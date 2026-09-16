@@ -63,4 +63,4 @@ Crash text is printed to USB before the reboot but the port re-enumerates, so ke
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations).
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix.

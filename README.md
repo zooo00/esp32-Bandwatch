@@ -132,6 +132,13 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
 ## Versions
 
+- **1.2.3** — deauth hardening: fixed a null-pointer crash in the driver-internal kick path
+  (`sendInternalKick`) that could fire on essentially every attack, added a 5‑minute dead‑man's‑switch
+  so an attack stops itself if the host/serial link drops, dropped leftover FC-probe diagnostics from
+  the raw-frame fallback path, and exposed a failed-frame counter (`deauth` now reports
+  `[bssid, ch, sent, failed]`, shown on the dashboard's deauth card). Host: command strings sent over
+  serial (`deauth`/`hunt`/`park`/...) now have embedded newlines stripped so an API value can't smuggle
+  a second command onto the line.
 - **1.2.2** — deauth attack: `deauth <bssid>` parks on the AP's channel and spams spoofed deauth frames until its
   stations drop (run a capture alongside to catch WPA2 handshakes); *Deauth* button per AP row in the dashboard,
   frame‑counter card while it runs.

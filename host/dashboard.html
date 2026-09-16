@@ -160,7 +160,7 @@
       <div class="note" id="deauthCh"></div>
     </div>
     <div>
-      <div class="meta">spoofing <b id="deauthMac"></b><br><span id="deauthHint"></span></div>
+      <div class="meta">spoofing <b id="deauthMac"></b><span id="deauthFail"></span><br><span id="deauthHint"></span></div>
       <div style="margin-top:8px"><button class="small stop" id="deauthStop">Stop deauth</button>
         <span class="note">Broadcasts deauth + disassoc frames on the AP's channel, so every client of that network drops and usually reconnects. Run a capture at the same time to grab WPA2 handshakes; clients with PMF (802.11w) enabled ignore it.</span></div>
     </div>
@@ -333,6 +333,7 @@
     $('#deauthMac').textContent = k.mac;
     $('#deauthSent').textContent = fmt(k.sent);
     $('#deauthCh').textContent = k.ch ? `parked on ch ${k.ch} (${band(k.ch)})` : 'channel unknown — hopping';
+    $('#deauthFail').textContent = k.fail ? ` (${fmt(k.fail)} failed)` : '';
     const d = (s.wifi_devs || []).find(x => x.mac === k.mac);
     $('#deauthHint').textContent = [d && (d.ssid || '(hidden SSID)'), d && d.sec].filter(Boolean).join(' · ');
   }

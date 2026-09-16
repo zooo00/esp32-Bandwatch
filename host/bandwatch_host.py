@@ -308,8 +308,11 @@ class Bandwatch:
         with self.lock:
             if self.ser is None:
                 return False
+            # Collapse embedded newlines/CRs so a value from the HTTP API (e.g. a crafted "mac") can't
+            # smuggle a second command onto the serial line.
+            line = cmd.strip().replace("\r", " ").replace("\n", " ")
             try:
-                self.ser.write((cmd.strip() + "\n").encode())
+                self.ser.write((line + "\n").encode())
                 return True
             except Exception as e:
                 self.state["log"].append(f"write failed: {e}")
@@ -367,12 +370,13 @@ class Bandwatch:
             st["hunt"] = None
 
     def _set_deauth(self, d):
-        # device sends [bssid, park channel (0 if hopping), frames sent] or null; ack lines may carry a bare mac string
+        # device sends [bssid, park channel (0 if hopping), frames sent, frames failed] or null;
+        # ack lines may carry a bare mac string. fail is optional for compatibility with older firmware.
         st = self.state
         if isinstance(d, str):
-            d = [d, 0, 0]
+            d = [d, 0, 0, 0]
         if d and (st["deauth"] is None or st["deauth"]["mac"] != d[0]):
-            st["deauth"] = {"mac": d[0], "ch": d[1], "sent": d[2]}
+            st["deauth"] = {"mac": d[0], "ch": d[1], "sent": d[2], "fail": d[3] if len(d) > 3 else 0}
         elif not d:
             st["deauth"] = None
 
@@ -430,6 +434,7 @@ class Bandwatch:
                 self._last_hist = now
             if msg.get("da") is not None and st["deauth"]:
                 st["deauth"]["sent"] = msg["da"]
+                st["deauth"]["fail"] = msg.get("df", st["deauth"].get("fail", 0))
             self._hunt_update(msg.get("h"))
         elif t == "s":
             st["sweep"] = msg["n"]

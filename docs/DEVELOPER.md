@@ -415,9 +415,30 @@ HCI event types are **not** the same numbers as LL PDU types (`ADV_SCAN_IND` is 
 traffic, no real channel number, no real CRC, legacy advertising only (extended advertising is compiled out
 of the core). It is not a BLE sniffer in the Ubertooth/nRF sense and must not be described as one.
 
-**Passive vs active** (`blescan passive|active`, default passive). Passive only listens, so we never
+**Address byte order.** `ble_addr_t.val` is little-endian, the order the address goes on air. The pcap
+builder writes those bytes as-is, which is correct for the wire format. Everything that *displays* or keys
+on a MAC - device table, LCD, dashboard, OUI lookup, the locally-administered (random) bit, hunt matching -
+expects conventional MSB-first order, so `bleGapEvent()` reverses into a separate buffer for
+`trackBleDevice()`. Getting this wrong (as 1.4 did) is quietly nasty: names land under mirrored keys, OUI
+lookup reads the device-id end of the address, and the random-address bit is read from the wrong byte.
+
+**Scan policy** (`blescan passive|active|auto`, default **auto**). Passive only listens, so we never
 transmit, but most device names live in scan responses that only arrive if something sends `SCAN_REQ` —
-measured: 2 named devices passive vs. many more active. Active scanning solicits them, which both fills in
-names and puts genuine `SCAN_RSP` packets in the capture as their own records; the cost is that the board is
-transmitting. Note the pre-1.4 code used active scanning unconditionally, so the README's "never transmits"
-claim was already inaccurate in BLE mode.
+measured: 2 named devices passive vs. 4 active in the same spot. Active scanning solicits them, which both
+fills in names and puts genuine `SCAN_RSP` packets in the capture as their own records; the cost is that the
+board is transmitting. Note the pre-1.4 code used active scanning unconditionally, so the README's "never
+transmits" claim was already inaccurate in BLE mode.
+
+**auto** is the default and gets most of the benefit for a fraction of the airtime: stay passive, and open a
+`kBleActiveWindowMs` (4 s) active window only when a *new* address appears that is **scannable** and has no
+name yet. Non-connectable beacons never answer a `SCAN_REQ`, so asking for one would transmit for nothing.
+Two guards matter:
+
+- The switch is requested by a flag from the GAP callback and applied in `serviceBle()` on the loop task -
+  restarting discovery from inside the callback would re-enter the NimBLE host.
+- `kBleSwitchMinMs` (2 s) rate-limits flips, because each one cancels and restarts discovery and so costs a
+  short gap in reception. In a crowded place with rotating random addresses, new MACs arrive constantly and
+  an unthrottled policy would sit permanently active.
+
+**The mode is frozen while a capture runs** (`if (capActive) return;`), so a single pcap is never half
+passive and half active. Whatever is running when recording starts stays for the whole file.

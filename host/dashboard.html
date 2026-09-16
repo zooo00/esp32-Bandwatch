@@ -150,6 +150,12 @@
         <label>&nbsp;</label>
         <button class="primary" id="capBtn">Start pcap capture</button>
       </div>
+      <div class="control" id="bleScanCtl" style="display:none">
+        <label>BLE scan</label>
+        <div class="seg" id="bleScanSeg">
+          <button data-scan="passive">Passive</button><button data-scan="auto">Auto</button><button data-scan="active">Active</button>
+        </div>
+      </div>
       <div class="control" id="sdCtl">
         <label>&nbsp;</label>
         <button class="primary" id="sdBtn">Record to SD</button>
@@ -313,6 +319,13 @@
     toast(on ? 'Saving pcap to this Mac' : 'Stopping Mac capture', on ? 'starting…' : 'closing the file…');
     post({ cmd: 'capture', value: on, snaplen: +$('#snap').value || 1600 });
   });
+  $('#bleScanSeg').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-scan]'); if (!b) return;
+    post({ cmd: 'blescan', value: b.dataset.scan });
+    toast('BLE scan mode', b.dataset.scan === 'auto'
+      ? 'passive, with a short active burst when a new device appears'
+      : b.dataset.scan === 'active' ? 'active — transmits SCAN_REQ to collect names' : 'passive — never transmits');
+  });
   $('#sdBtn').addEventListener('click', () => {
     const on = !(state && state.sd && state.sd.cap);
     armPending('sd', $('#sdBtn'), on ? 'Starting…' : 'Stopping…');
@@ -351,6 +364,13 @@
     $('#parkCtl').style.display = wifi ? '' : 'none';
     for (const id of ['#snapCtl', '#capCtl', '#sdCtl', '#capInfo', '#sdInfo']) $(id).style.display = '';
     $('#bleCapNote').style.display = wifi ? 'none' : '';
+    $('#bleScanCtl').style.display = wifi ? 'none' : '';
+    const bs = s.ble || {};
+    document.querySelectorAll('#bleScanSeg button').forEach(b =>
+      b.classList.toggle('active', b.dataset.scan === (bs.scan || 'auto')));
+    if (!wifi) $('#bleCapNote').innerHTML =
+      `BLE capture records <b>advertising packets only</b>, reconstructed from HCI reports — no connections, no channel number.` +
+      (bs.running ? `<br>scanning <b>${esc(bs.running)}</b>${bs.scan === 'auto' ? ' (auto)' : ''} · ${fmt(bs.adv || 0)} advertisements` : '');
     const sel = $('#park');
     const want = ['0', ...s.channels.map(c => String(c.ch))].join(',');
     if (sel.dataset.chs !== want) { sel.innerHTML = '<option value="0">hopping (sweep)</option>' + s.channels.map(c => `<option value="${c.ch}">park on ch ${c.ch} (${band(c.ch)})</option>`).join(''); sel.dataset.chs = want; }

@@ -75,7 +75,8 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 - LCD pages: `build*Page()` + `refresh*()`; add a page in the `Page` enum and `showPage()`.
 - BLE: Bandwatch drives NimBLE `ble_gap_disc()` directly, **not** the Arduino `BLEScan` wrapper, because the
   wrapper merges advertisement payloads and cannot give per-packet data (`docs/DEVELOPER.md` §13). AD parsing
-  is ours (`parseAdStructures`). Do not "simplify" this back to BLEScan.
+  is ours (`parseAdStructures`). Do not "simplify" this back to BLEScan. **`ble_addr_t.val` is
+  little-endian**: reverse it for anything that displays or keys on a MAC, keep it raw for the pcap.
 - Dashboard: `host/dashboard.html`, one `render*()` per section, polled from `/api/state` once a second. The
   poll is only 1 Hz, so anything the user clicks must latch a local pending state (see `armPending`) or it
   looks dead. `.capinfo` also carries `.control`, which is `display:grid` — override to block or inline
@@ -94,4 +95,4 @@ Crash text is printed to USB before the reboot but the port re-enumerates, so ke
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy.

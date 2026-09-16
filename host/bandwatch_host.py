@@ -522,7 +522,9 @@ class Bandwatch:
         elif t == "b":
             self.merge_ble(msg.get("dev", []))
         elif t == "ble":
-            st["ble"] = {"devs": msg.get("devs", 0), "cycles": msg.get("cycles", 0)}
+            st["ble"] = {"devs": msg.get("devs", 0), "cycles": msg.get("cycles", 0),
+                         "adv": msg.get("adv", 0), "scan": msg.get("scan"),
+                         "running": msg.get("running"), "switches": msg.get("switches", 0)}
             st["heap"] = msg.get("heap", st["heap"])
             self._hunt_update(msg.get("h"))
         elif t == "ack":
@@ -781,6 +783,8 @@ def make_handler(bw, html_path):
                     bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
+                elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):
+                    bw.send(f"blescan {req['value']}")
                 elif cmd == "sdinfo":
                     bw.send("sdinfo")
                 elif cmd == "info":

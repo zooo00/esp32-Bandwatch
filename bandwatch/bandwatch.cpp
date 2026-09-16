@@ -28,7 +28,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.4";
+constexpr const char* kVersion = "1.4.1";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -42,6 +42,8 @@ constexpr uint32_t kDevListMs = 2000;       // Device table -> host cadence
 constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not reported
 constexpr uint32_t kDevLcdFreshMs = 20000;  // ... nor shown on the LCD
 constexpr uint32_t kBleScanSec = 3;         // Restart the BLE scan (and clear its result cache) this often
+constexpr uint32_t kBleActiveWindowMs = 4000;   // how long to scan actively after a new scannable device
+constexpr uint32_t kBleSwitchMinMs = 2000;      // never flip the scan mode more often than this
 constexpr uint32_t kBleHeapFloor = 28000;   // ...or sooner, when the cache has eaten the heap down to this
 constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table; we never transmit.
 constexpr uint32_t kDeauthMaxMs = 5UL * 60UL * 1000UL;  // Dead-man's switch: auto-stop a deauth attack after this long
@@ -312,9 +314,19 @@ bool bleInited = false;
 volatile bool bleScanDone = false;
 uint32_t bleScanCycles = 0;
 volatile uint32_t bleAdvSeen = 0;   // advertising reports received (one per on-air packet)
-// Passive by default: a sniffer should listen, not transmit. Active scanning sends SCAN_REQ and so
-// collects the scan responses that carry most device names - at the cost of putting us on the air.
-bool bleActiveScan = false;
+// Scan policy. Passive only listens; active sends SCAN_REQ and so collects the scan responses that carry
+// most device names, at the cost of putting us on the air. "auto" stays passive and opens a short active
+// window when a new *scannable* address shows up with no name yet - enough to learn the name, then quiet
+// again. The mode is frozen while a capture runs so one pcap is not half passive and half active.
+enum BleScanMode : uint8_t { BLE_SCAN_PASSIVE = 0, BLE_SCAN_ACTIVE = 1, BLE_SCAN_AUTO = 2 };
+BleScanMode bleScanMode = BLE_SCAN_AUTO;
+bool bleActiveScan = false;              // what discovery is actually running right now
+volatile uint32_t bleActiveUntilMs = 0;  // auto mode: stay active until this millis()
+uint32_t bleLastSwitchMs = 0;
+uint32_t bleSwitches = 0;
+const char* bleScanModeName() {
+    return bleScanMode == BLE_SCAN_ACTIVE ? "active" : bleScanMode == BLE_SCAN_PASSIVE ? "passive" : "auto";
+}
 uint32_t bleStatusMs = 0;
 
 // UI objects
@@ -739,6 +751,7 @@ uint16_t buildBleLlFrame(uint8_t* out, const uint8_t* addr, uint8_t addrType, ui
 
 void trackBleDevice(const uint8_t* mac, int8_t rssi, uint8_t addrType, const AdInfo& ad, uint8_t bflags) {
     const uint32_t now = millis();
+    bool isNew = false;
     portENTER_CRITICAL(&g_devMux);
     const int i = devFindSlot(bleDevs, kBleDevSlots, mac);
     BleDev& d = bleDevs[i];
@@ -747,6 +760,7 @@ void trackBleDevice(const uint8_t* mac, int8_t rssi, uint8_t addrType, const AdI
         memcpy(d.mac, mac, 6);
         d.maxRssi = rssi;
         d.txPower = 127;
+        isNew = true;
     }
     d.rssi = rssi;
     if (rssi > d.maxRssi) d.maxRssi = rssi;
@@ -766,7 +780,12 @@ void trackBleDevice(const uint8_t* mac, int8_t rssi, uint8_t addrType, const AdI
         huntLastMs = now;
         huntCount = huntCount + 1;
     }
+    const bool named = d.name[0] != 0;
     portEXIT_CRITICAL(&g_devMux);
+    // Only a scannable advertiser can answer a SCAN_REQ, so asking for an active window for anything else
+    // would transmit for nothing. Flag only; the actual switch happens in serviceBle() on the loop task,
+    // because restarting discovery from inside the GAP callback would re-enter the host.
+    if (isNew && !named && (bflags & 4)) bleActiveUntilMs = now + kBleActiveWindowMs;
 }
 
 // One on-air advertising report. Runs in the NimBLE host task.
@@ -781,7 +800,13 @@ int bleGapEvent(struct ble_gap_event* event, void* arg) {
         const uint8_t bflags = ((pdu == LL_ADV_IND || pdu == LL_ADV_DIRECT_IND) ? 1 : 0)   // connectable
                              | 2                                                            // legacy adv
                              | ((pdu == LL_ADV_IND || pdu == LL_ADV_SCAN_IND) ? 4 : 0);     // scannable
-        trackBleDevice(d.addr.val, rssi, d.addr.type, ad, bflags);
+        // ble_addr_t.val is little-endian (as it goes on air). Everything that displays or keys on a MAC
+        // - the device table, the LCD, the dashboard, OUI lookup, the randomized-address bit, hunt
+        // matching - expects the conventional MSB-first order, so reverse it here. The pcap builder below
+        // deliberately keeps the raw little-endian bytes, because that is what the wire format wants.
+        uint8_t mac[6];
+        for (int i = 0; i < 6; i++) mac[i] = d.addr.val[5 - i];
+        trackBleDevice(mac, rssi, d.addr.type, ad, bflags);
         bleAdvSeen = bleAdvSeen + 1;
 
         if (capActive && capRing) {                 // same single-producer discipline as the Wi-Fi path
@@ -815,7 +840,7 @@ void startBle() {
     struct ble_gap_disc_params p = {};
     p.itvl = 160;            // 100 ms in 0.625 ms units
     p.window = 128;          // 80 ms
-    p.passive = bleActiveScan ? 0 : 1;   // see bleActiveScan: passive listens only
+    p.passive = bleActiveScan ? 0 : 1;   // bleActiveScan = what we decided to run
     p.filter_duplicates = 0; // every advertisement, not just the first from each address
     p.limited = 0;
     bleScanDone = false;
@@ -832,15 +857,32 @@ void stopBle() {
     bleScan = nullptr;
 }
 
-// Discovery runs continuously (BLE_HS_FOREVER) and keeps no result cache, so there is nothing to
-// recycle; this only restarts it if the host ever ends discovery on its own.
+// Discovery runs continuously (BLE_HS_FOREVER) and keeps no result cache, so there is nothing to recycle.
+// This restarts it if the host ever ends discovery, and applies the passive/active policy.
 void serviceBle() {
     if (bandMode != BAND_BLE || !bleInited) return;
     if (bleScanDone) {
         bleScanCycles++;
         bleScanDone = false;
         startBle();
+        return;
     }
+    // A capture must not be half passive and half active: whatever is running when recording starts stays.
+    if (capActive) return;
+    bool want = bleActiveScan;
+    switch (bleScanMode) {
+        case BLE_SCAN_PASSIVE: want = false; break;
+        case BLE_SCAN_ACTIVE:  want = true;  break;
+        case BLE_SCAN_AUTO:    want = static_cast<int32_t>(bleActiveUntilMs - millis()) > 0; break;
+    }
+    if (want == bleActiveScan) return;
+    const uint32_t now = millis();
+    if (now - bleLastSwitchMs < kBleSwitchMinMs) return;   // rate limit: restarting discovery costs a gap
+    bleLastSwitchMs = now;
+    bleSwitches++;
+    bleActiveScan = want;
+    ble_gap_disc_cancel();
+    startBle();
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1404,9 +1446,10 @@ void sendBleStatus() {
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kBleDevSlots; i++) if (bleDevs[i].lastMs && now - bleDevs[i].lastMs <= kDevFreshMs) n++;
     portEXIT_CRITICAL(&g_devMux);
-    Serial.printf("{\"t\":\"ble\",\"devs\":%d,\"cycles\":%lu,\"heap\":%u,\"adv\":%lu,\"scan\":\"%s\",",
+    Serial.printf("{\"t\":\"ble\",\"devs\":%d,\"cycles\":%lu,\"heap\":%u,\"adv\":%lu,\"scan\":\"%s\",\"running\":\"%s\",\"switches\":%lu,",
                   n, static_cast<unsigned long>(bleScanCycles), static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned long>(bleAdvSeen), bleActiveScan ? "active" : "passive");
+                  static_cast<unsigned long>(bleAdvSeen), bleScanModeName(),
+                  bleActiveScan ? "active" : "passive", static_cast<unsigned long>(bleSwitches));
     printHunt();
     Serial.print("}\n");
 }
@@ -1884,13 +1927,12 @@ void handleCommand(char* line) {
     } else if (!strcmp(line, "sdread")) {
         sdReadFile(arg);
     } else if (!strcmp(line, "blescan")) {
-        const bool want = !strcmp(arg, "active");
-        if (want != bleActiveScan) {
-            bleActiveScan = want;
-            if (bandMode == BAND_BLE && bleInited) { ble_gap_disc_cancel(); startBle(); }
-        }
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"blescan\",\"mode\":\"%s\"}\n",
-                      bleActiveScan ? "active" : "passive");
+        if (!strcmp(arg, "active"))       bleScanMode = BLE_SCAN_ACTIVE;
+        else if (!strcmp(arg, "passive")) bleScanMode = BLE_SCAN_PASSIVE;
+        else if (!strcmp(arg, "auto"))    bleScanMode = BLE_SCAN_AUTO;
+        bleLastSwitchMs = 0;   // apply the new policy on the next serviceBle() without waiting out the limit
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"blescan\",\"mode\":\"%s\",\"running\":\"%s\"}\n",
+                      bleScanModeName(), bleActiveScan ? "active" : "passive");
     } else if (!strcmp(line, "time")) {
         const uint32_t e = strtoul(arg, nullptr, 10);
         if (e > 1600000000UL) { epochBase = e; epochBaseMs = millis(); epochValid = true; }
@@ -2676,7 +2718,10 @@ void refreshDevices() {
     }
     char buf[48];
     const int n = devRowCount;
-    snprintf(buf, sizeof(buf), "%s %d%s", mode154() ? "15.4" : wifiMode() ? "WiFi" : "BLE", n, recTag());
+    if (bandMode == BAND_BLE)
+        snprintf(buf, sizeof(buf), "BLE %d %s%s", n, bleActiveScan ? "act" : "psv", recTag());
+    else
+        snprintf(buf, sizeof(buf), "%s %d%s", mode154() ? "15.4" : "WiFi", n, recTag());
     lv_label_set_text(devHdrRight, buf);
     for (int i = 0; i < kDevRows; i++) {
         if (i >= n) { lv_obj_add_flag(devRow[i], LV_OBJ_FLAG_HIDDEN); continue; }
@@ -2721,7 +2766,7 @@ void refreshHunt() {
     else snprintf(buf, sizeof(buf), "not seen yet");
     lv_label_set_text(huntInfo1, buf);
     if (hopMode()) snprintf(buf, sizeof(buf), "listening ch %u%s", currentChannelNum, parkedIdx >= 0 ? " (parked)" : " (hopping)");
-    else snprintf(buf, sizeof(buf), "BLE scan, %lu cycles", static_cast<unsigned long>(bleScanCycles));
+    else snprintf(buf, sizeof(buf), "BLE %s scan", bleActiveScan ? "active" : "passive");
     lv_label_set_text(huntInfo2, buf);
 }
 
@@ -2756,7 +2801,8 @@ void refreshSystem(float global) {
         portEXIT_CRITICAL(&g_devMux);
         snprintf(buf, sizeof(buf), "BLE mode: %d devices (60 s)", devs);
         lv_label_set_text(sysLines[n++], buf);
-        snprintf(buf, sizeof(buf), "  scan cycles %lu", static_cast<unsigned long>(bleScanCycles));
+        snprintf(buf, sizeof(buf), "  scan %s -> %s  %lu adv", bleScanModeName(),
+                 bleActiveScan ? "active" : "passive", static_cast<unsigned long>(bleAdvSeen));
         lv_label_set_text(sysLines[n++], buf);
         lv_label_set_text(sysLines[n++], "  Wi-Fi sniffing paused");
     }

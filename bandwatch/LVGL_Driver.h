@@ -11,7 +11,7 @@
 
 #define LVGL_WIDTH    (LCD_WIDTH )
 #define LVGL_HEIGHT   LCD_HEIGHT
-#define LVGL_BUF_LEN  (LVGL_WIDTH * LVGL_HEIGHT / 12)   /* pixels per draw buffer (~9 KB each) */
+#define LVGL_BUF_LEN  (LVGL_WIDTH * LVGL_HEIGHT / 14)   /* pixels in the draw buffer (~7.9 KB) */
 
 #define EXAMPLE_LVGL_TICK_PERIOD_MS  5
 

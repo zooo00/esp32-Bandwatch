@@ -11,19 +11,28 @@ Serial protocol (one line each):
     {"t":"hello", ...}            device info, channel list, band mode              (boot / "info")
     {"t":"d", "c":36, "s":..}     one completed dwell on channel c                  (every ~220 ms)
     {"t":"s", "n":12, "ch":[..]}  full snapshot after every sweep
+    {"t":"w", "dev":[...]}        Wi-Fi transmitter table (every 2 s)
+    {"t":"b", "dev":[...]}        BLE advertiser table (every 2 s, BLE mode)
+    {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
-Commands to the device: "band 5g|2.4g|both", "park <ch>|0", "cap 0|1", "snap N", "info".
+Commands to the device: "band 5g|2.4g|both|ble", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0", "info".
+
+Vendor names come from the IEEE OUI registry: the first run downloads oui.csv (~3 MB) into ~/.cache/bandwatch/
+in the background; until then (or offline) a small built-in table is used.
 """
 import argparse
 import base64
+import csv
 import glob
+import io
 import json
 import os
 import struct
 import sys
 import threading
 import time
+import urllib.request
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
@@ -34,7 +43,82 @@ except ImportError:
     sys.exit("pyserial is required: pip3 install pyserial")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-HISTORY_LEN = 600  # ~10 minutes of dwell samples at 1/s for the global sparkline
+HISTORY_LEN = 600       # ~10 minutes of 1 Hz samples for the global trend
+DEV_HIST_LEN = 120      # per-device RSSI samples (one per device report, ~2 s)
+DEV_EXPIRE_S = 600      # forget devices not seen for this long
+OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
+OUI_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "bandwatch", "oui.csv")
+
+# Small fallback OUI table (first 3 bytes, upper-case hex) used until the IEEE registry is cached.
+OUI_FALLBACK = {
+    "3C22FB": "Apple", "F0D1A9": "Apple", "A4C639": "Apple", "DC2B2A": "Apple", "8C8590": "Apple", "F4F15A": "Apple",
+    "BC7574": "Apple", "A85C2C": "Apple", "9C35EB": "Apple", "F0DBE2": "Apple", "D0034B": "Apple", "48A195": "Apple",
+    "94E6F7": "Intel", "04D3B0": "Intel", "3C9C0F": "Intel", "8C8CAA": "Intel", "A4B1C1": "Intel", "F8633F": "Intel",
+    "3C5AB4": "Google", "F4F5D8": "Google", "F88FCA": "Google", "18B430": "Nest", "001A11": "Google",
+    "B827EB": "Raspberry Pi", "DCA632": "Raspberry Pi", "E45F01": "Raspberry Pi",
+    "D8F15B": "Espressif", "3C71BF": "Espressif", "A4CF12": "Espressif", "24A160": "Espressif", "7CDFA1": "Espressif",
+    "84F3EB": "Espressif", "30AEA4": "Espressif", "C82B96": "Espressif", "4C11AE": "Espressif", "48E729": "Espressif",
+    "50C7BF": "TP-Link", "C006C3": "TP-Link", "9C53CD": "TP-Link", "F4EC38": "TP-Link", "F81A67": "TP-Link", "A0F3C1": "TP-Link",
+    "788A20": "Ubiquiti", "FCECDA": "Ubiquiti", "24A43C": "Ubiquiti", "D021F9": "Ubiquiti", "E063DA": "Ubiquiti", "68D79A": "Ubiquiti",
+    "3C7A8A": "Netgear", "A040A0": "Netgear", "28C68E": "Netgear", "9C3DCF": "Netgear",
+    "F0B429": "Xiaomi", "64B473": "Xiaomi", "7811DC": "Xiaomi", "00E04C": "Realtek",
+    "40B076": "ASUSTek", "04D4C4": "ASUSTek", "2C4D54": "ASUSTek", "F02F74": "ASUSTek", "1C872C": "ASUSTek",
+    "4C5E0C": "MikroTik", "6C3B6B": "MikroTik", "D4CA6D": "MikroTik", "E01F0C": "Huawei", "3C0518": "Huawei", "CC96A0": "Huawei",
+    "AC37C9": "Sonos", "5CAAFD": "Sonos", "B8E937": "Sonos", "347E5C": "Sonos",
+    "FC65DE": "Amazon", "747548": "Amazon", "A002DC": "Amazon", "F0272D": "Amazon", "0C47C9": "Amazon", "40B4CD": "Amazon",
+    "ECB5FA": "Signify (Hue)", "001788": "Philips Lighting", "A8BB50": "WiZ",
+    "E0286D": "AVM (FRITZ!)", "3810D5": "AVM (FRITZ!)", "C80E14": "AVM (FRITZ!)", "2C3AFD": "AVM (FRITZ!)", "7CFF4D": "AVM (FRITZ!)",
+    "44FE3B": "Arcadyan", "1C3BF3": "Arcadyan", "88B1E1": "Sagemcom", "00259C": "Cisco-Linksys", "C05627": "Belkin",
+    "5CE931": "Samsung", "8C71F8": "Samsung", "C4731E": "Samsung", "50B7C3": "Samsung", "BC7E8B": "Samsung",
+    "DC7196": "Microsoft", "6045BD": "Microsoft", "A4DA22": "Garmin", "4C4FEE": "OnePlus", "000CE6": "Meru Networks",
+    "9C5C8E": "ASUSTek", "AC15A2": "Huawei", "FCB214": "Ubiquiti", "F4A475": "Intel",
+}
+
+# Bluetooth SIG company identifiers (subset)
+BLE_COMPANY = {
+    0x004C: "Apple", 0x0006: "Microsoft", 0x00E0: "Google", 0x0075: "Samsung", 0x0087: "Garmin", 0x0157: "Huami (Amazfit)",
+    0x0171: "Amazon", 0x038F: "Xiaomi", 0x0059: "Nordic Semiconductor", 0x02E5: "Espressif", 0x01D7: "Qualcomm",
+    0x000F: "Broadcom", 0x000A: "CSR", 0x0002: "Intel", 0x000D: "Texas Instruments", 0x0030: "STMicroelectronics",
+    0x0131: "Cypress", 0x0099: "Bose", 0x0310: "Sonos", 0x03DA: "Tile", 0x0046: "Logitech", 0x0110: "Nintendo",
+    0x0054: "Sony", 0x012D: "Sony", 0x027D: "Huawei", 0x02FF: "Fitbit", 0x0065: "HP", 0x004F: "Lenovo",
+    0x0201: "LG", 0x00C4: "LG", 0x038B: "Withings", 0x0154: "Oura", 0x0B22: "Oura", 0x0553: "Ledger", 0x0BFC: "Tesla",
+    0x0343: "Skullcandy", 0x00D2: "Dialog Semiconductor", 0x0369: "Realtek", 0x0057: "Harman", 0x03B4: "Ring (Amazon)",
+    0x04C3: "Sennheiser", 0x0180: "Jabra (GN Audio)", 0x0009: "Infineon", 0x0189: "Roku", 0x0451: "Tuya",
+    0x0CB2: "Signify (Hue)", 0x010C: "Signify (Hue)", 0x0079: "Philips", 0x003D: "Silicon Labs", 0x02B5: "Silicon Labs",
+    0x0129: "Philips", 0x0400: "Netgear", 0x0822: "adidas", 0x01A5: "iFit", 0x0117: "Zepp",
+}
+
+APPLE_TYPE = {
+    0x02: "iBeacon", 0x05: "AirDrop", 0x06: "HomeKit", 0x07: "AirPods / proximity pairing", 0x08: "Hey Siri",
+    0x09: "AirPlay target (Apple TV / HomePod)", 0x0A: "AirPlay source", 0x0B: "Magic Switch (Watch)", 0x0C: "Handoff",
+    0x0D: "Tethering target", 0x0E: "Tethering source (iPhone hotspot)", 0x0F: "Nearby Action",
+    0x10: "Nearby Info (iPhone / Mac / Watch)", 0x12: "Find My (AirTag / Find My network)", 0x14: "Find My (offline finding)",
+    0x16: "Hey Siri", 0x18: "Continuity",
+}
+
+APPEARANCE = {
+    1: "Phone", 2: "Computer", 3: "Watch", 4: "Clock", 5: "Display", 6: "Remote control", 7: "Eyeglasses", 8: "Tag",
+    9: "Keyring", 10: "Media player", 11: "Barcode scanner", 12: "Thermometer", 13: "Heart-rate sensor", 14: "Blood pressure",
+    15: "HID (keyboard/mouse/gamepad)", 16: "Glucose meter", 17: "Running/walking sensor", 18: "Cycling sensor", 19: "Control device",
+    20: "Network device", 21: "Sensor", 22: "Light fixture", 23: "Fan", 24: "HVAC", 25: "Air conditioning", 26: "Humidifier",
+    27: "Heating", 28: "Access control", 29: "Motorized device", 30: "Power device", 31: "Light source", 32: "Window covering",
+    33: "Audio sink (speaker)", 34: "Audio source", 35: "Motorized vehicle", 36: "Domestic appliance", 37: "Wearable audio",
+    38: "Aircraft", 39: "AV equipment", 40: "Display equipment", 41: "Hearing aid", 42: "Gaming", 43: "Signage",
+    49: "Pulse oximeter", 50: "Weight scale", 51: "Personal mobility", 52: "Continuous glucose monitor", 53: "Insulin pump",
+    54: "Medication delivery", 55: "Spirometer", 81: "Outdoor sports",
+}
+
+SERVICE_UUID = {
+    0xFD6F: "Exposure Notification", 0xFEAA: "Eddystone beacon", 0xFE9F: "Google", 0xFE2C: "Google Fast Pair",
+    0xFEF3: "Google", 0xFD5A: "Samsung SmartThings", 0xFD69: "Samsung SmartTag", 0x180D: "Heart rate", 0x180F: "Battery",
+    0x1812: "HID", 0x1826: "Fitness machine", 0x181C: "User data", 0x1816: "Cycling speed/cadence", 0x1818: "Cycling power",
+    0x1814: "Running speed", 0x1810: "Blood pressure", 0x1809: "Health thermometer", 0x1808: "Glucose", 0x181A: "Environmental sensing",
+    0xFE07: "Sonos", 0xFEED: "Tile tracker", 0xFD44: "Apple", 0xFE0F: "Philips Hue", 0xFEBE: "Bose", 0xFE61: "Logitech",
+    0xFE95: "Xiaomi Mi", 0xFDAB: "Xiaomi", 0xFE78: "HP", 0xFE03: "Amazon", 0xFD3D: "Amazon Sidewalk", 0xFE00: "Amazon",
+    0xFDCD: "Qingping", 0xFEE7: "Tencent", 0xFEBB: "Adafruit", 0xFDF0: "Apple", 0x1802: "Immediate alert (find me)",
+    0x1803: "Link loss", 0xFE59: "Nordic DFU", 0xFEE0: "Huami (Amazfit)", 0xFDEE: "Huawei", 0xFDD2: "Bosch", 0xFD82: "Sony",
+    0xFE9A: "Estimote", 0xFD84: "Tile", 0xFD65: "Razer", 0xFE0D: "Ford", 0xFEF5: "Dialog", 0xFDF7: "HP",
+}
 
 
 def find_port():
@@ -53,11 +137,89 @@ def channel_freq_mhz(ch):
     return 5000 + 5 * ch
 
 
+class OuiDb:
+    def __init__(self):
+        self.table = dict(OUI_FALLBACK)
+        self.source = "built-in table"
+        self.lock = threading.Lock()
+
+    def load_cache(self):
+        try:
+            with open(OUI_CACHE, newline="", encoding="utf-8", errors="replace") as f:
+                self._load(f)
+            return True
+        except Exception:
+            return False
+
+    def _load(self, f):
+        tab = dict(OUI_FALLBACK)
+        for row in csv.reader(f):
+            if len(row) >= 3 and len(row[1]) == 6 and row[0].startswith("MA"):
+                tab[row[1].upper()] = row[2].strip()
+        with self.lock:
+            self.table = tab
+            self.source = f"IEEE registry ({len(tab)} prefixes)"
+
+    def download_bg(self):
+        def run():
+            try:
+                os.makedirs(os.path.dirname(OUI_CACHE), exist_ok=True)
+                req = urllib.request.Request(OUI_URL, headers={"User-Agent": "bandwatch/1.1"})
+                with urllib.request.urlopen(req, timeout=40) as r:
+                    data = r.read()
+                with open(OUI_CACHE, "wb") as f:
+                    f.write(data)
+                self._load(io.StringIO(data.decode("utf-8", "replace")))
+            except Exception as e:
+                with self.lock:
+                    self.source = f"built-in table (IEEE download failed: {e.__class__.__name__})"
+        threading.Thread(target=run, daemon=True).start()
+
+    def lookup(self, mac):
+        try:
+            first = int(mac[0:2], 16)
+        except ValueError:
+            return ""
+        if first & 0x02:
+            return "(randomized MAC)"
+        key = mac.replace(":", "").upper()[:6]
+        with self.lock:
+            return self.table.get(key, "")
+
+
+def sec_string(sec, pmf):
+    if not sec:
+        return ""
+    parts = []
+    if sec & 0x80: parts.append("Open")
+    if sec & 0x40: parts.append("OWE (Enhanced Open)")
+    if sec & 0x01: parts.append("WEP")
+    if sec & 0x02: parts.append("WPA")
+    if sec & 0x04: parts.append("WPA2-PSK")
+    if sec & 0x08: parts.append("WPA2-Enterprise")
+    if sec & 0x10: parts.append("WPA3-SAE")
+    if sec & 0x20: parts.append("WPA3-Enterprise")
+    s = " / ".join(parts)
+    if pmf == 2: s += " · PMF required"
+    elif pmf == 1: s += " · PMF capable"
+    return s
+
+
+def phy_string(phy, ch):
+    if not phy:
+        return ""
+    if phy & 16: return "be (Wi-Fi 7)"
+    if phy & 8: return "ax (Wi-Fi 6)"
+    if phy & 4: return "ac (Wi-Fi 5)"
+    if phy & 2: return "n (Wi-Fi 4)"
+    return "a" if ch > 14 else "b/g"
+
+
 class PcapWriter:
     """pcap (LINKTYPE_IEEE802_11_RADIOTAP = 127) with TSFT, flags, channel and dBm signal per frame."""
 
-    RT_PRESENT = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 5)  # TSFT, Flags, Channel, dBm antsignal
-    RT_LEN = 24  # 8 hdr + 8 tsft + 1 flags + 1 pad + 4 channel + 1 antsignal + 1 pad
+    RT_PRESENT = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 5)
+    RT_LEN = 24
 
     def __init__(self, path, fcs_present=True):
         self.path = path
@@ -70,8 +232,7 @@ class PcapWriter:
 
     def write(self, ch, rssi, ts_us, orig_len, data):
         flags = 0x10 if self.fcs_present else 0x00
-        band_flags = 0x0100 if ch > 14 else 0x0080  # 5 GHz / 2 GHz spectrum
-        band_flags |= 0x0040  # OFDM (good enough for display purposes)
+        band_flags = (0x0100 if ch > 14 else 0x0080) | 0x0040
         rt = struct.pack("<BBHI", 0, 0, self.RT_LEN, self.RT_PRESENT)
         rt += struct.pack("<Q", ts_us)
         rt += struct.pack("<BB", flags, 0)
@@ -91,33 +252,25 @@ class PcapWriter:
 
 
 class Bandwatch:
-    def __init__(self, port, captures_dir, fcs_present=True):
+    def __init__(self, port, captures_dir, oui, fcs_present=True):
         self.port_name = port
         self.captures_dir = captures_dir
         self.fcs_present = fcs_present
+        self.oui = oui
         self.ser = None
         self.lock = threading.Lock()
+        self.dlock = threading.Lock()
         self.pcap = None
         self.state = {
-            "connected": False,
-            "port": port,
-            "hello": None,
-            "band": None,
-            "chs": [],
-            "channels": {},        # ch -> {s, r, f, b, st, u, state, t}
-            "current": None,
-            "global": 0.0,
-            "sweep": 0,
-            "aps": 0,
-            "park": 0,
-            "cap": 0,
-            "drop": 0,
-            "heap": None,
-            "last_rx": 0,
-            "log": deque(maxlen=40),
-            "capture": None,       # {file, frames, bytes, started}
+            "connected": False, "port": port, "hello": None, "band": None, "chs": [], "channels": {},
+            "current": None, "global": 0.0, "sweep": 0, "aps": 0, "park": 0, "cap": 0, "drop": 0, "heap": None,
+            "last_rx": 0, "log": deque(maxlen=60), "capture": None,
+            "hunt": None,            # {"mac", "rssi", "age_ms", "count", "hist": deque}
+            "ble": {"devs": 0, "cycles": 0},
         }
-        self.history = deque(maxlen=HISTORY_LEN)  # (t, global, current_ch, current_score)
+        self.wifi_devs = {}
+        self.ble_devs = {}
+        self.history = deque(maxlen=HISTORY_LEN)
         self._last_hist = 0
 
     # ---------------- serial side ----------------
@@ -188,14 +341,32 @@ class Bandwatch:
                     self.stop_capture()
             time.sleep(1.0)
 
+    def _set_hunt(self, mac):
+        st = self.state
+        if mac and (st["hunt"] is None or st["hunt"]["mac"] != mac):
+            st["hunt"] = {"mac": mac, "rssi": None, "age_ms": None, "count": 0, "hist": deque(maxlen=400)}
+        elif not mac:
+            st["hunt"] = None
+
+    def _hunt_update(self, h):
+        hu = self.state["hunt"]
+        if h is None or hu is None:
+            return
+        rssi, age, count = h
+        hu["rssi"] = rssi if age < 60000 else None
+        hu["age_ms"] = age if age < 60000 else None
+        hu["count"] = count
+        now = time.time()
+        if age < 5000 and (not hu["hist"] or now - hu["hist"][-1][0] >= 0.2):
+            hu["hist"].append((round(now, 2), rssi))
+
     def handle_line(self, raw):
         self.state["last_rx"] = time.time()
         if raw.startswith(b"P "):
             self.handle_frame(raw)
             return
         try:
-            text = raw.decode("utf-8", "replace")
-            msg = json.loads(text)
+            msg = json.loads(raw.decode("utf-8", "replace"))
         except Exception:
             if raw.strip():
                 self.state["log"].append(raw.decode("utf-8", "replace")[:160])
@@ -209,10 +380,11 @@ class Bandwatch:
             st["park"] = msg.get("park", 0)
             st["cap"] = msg.get("cap", 0)
             st["heap"] = msg.get("heap")
-            # keep only channels that are part of the current band mode
             st["channels"] = {c: v for c, v in st["channels"].items() if c in st["chs"]}
             for c in st["chs"]:
                 st["channels"].setdefault(c, {"s": 0.0, "r": 0.0, "f": 0, "b": 0, "st": 0, "u": 0, "state": 1, "t": 0})
+            self._set_hunt(msg.get("hunt"))
+            self._hunt_update(msg.get("h"))
         elif t == "d":
             c = msg["c"]
             st["channels"][c] = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
@@ -227,6 +399,7 @@ class Bandwatch:
             if now - self._last_hist >= 1.0:
                 self.history.append((round(now, 1), msg["g"], c, msg["s"]))
                 self._last_hist = now
+            self._hunt_update(msg.get("h"))
         elif t == "s":
             st["sweep"] = msg["n"]
             st["global"] = msg["g"]
@@ -243,6 +416,14 @@ class Bandwatch:
                                      "state": state, "t": prev.get("t", 0)}
             st["chs"] = chs
             st["channels"] = {c: v for c, v in st["channels"].items() if c in chs}
+        elif t == "w":
+            self.merge_wifi(msg.get("dev", []))
+        elif t == "b":
+            self.merge_ble(msg.get("dev", []))
+        elif t == "ble":
+            st["ble"] = {"devs": msg.get("devs", 0), "cycles": msg.get("cycles", 0)}
+            st["heap"] = msg.get("heap", st["heap"])
+            self._hunt_update(msg.get("h"))
         elif t == "ack":
             st["log"].append("ack " + json.dumps({k: v for k, v in msg.items() if k != "t"}))
             if "band" in msg:
@@ -251,8 +432,73 @@ class Bandwatch:
                 st["park"] = msg["park"]
             if "cap" in msg:
                 st["cap"] = msg["cap"]
+            if msg.get("cmd") == "hunt":
+                self._set_hunt(msg.get("hunt"))
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
+
+    def merge_wifi(self, rows):
+        now = time.time()
+        with self.dlock:
+            for r in rows:
+                try:
+                    mac, rssi, mx, frames, age, ch, flags, ssid = r[:8]
+                    extra = r[8:15] if len(r) >= 15 else [0, 0, 0, 0, 0, 0, ""]
+                except Exception:
+                    continue
+                d = self.wifi_devs.get(mac)
+                if d is None:
+                    d = {"mac": mac, "first": now, "hist": deque(maxlen=DEV_HIST_LEN), "ssid": "", "sec": "", "phy": "",
+                         "bw": None, "util": None, "stations": None, "cc": ""}
+                    self.wifi_devs[mac] = d
+                d["vendor"] = self.oui.lookup(mac)
+                d.update({"rssi": rssi, "max": mx, "frames": frames, "last": now - age / 1000.0, "ch": ch,
+                          "ap": bool(flags & 1), "ssid": ssid or d["ssid"]})
+                sec, pmf, phy, bw, util, stations, cc = extra
+                if flags & 2:
+                    d.update({"sec": sec_string(sec, pmf), "phy": phy_string(phy, ch), "bw": bw * 10 if bw else None,
+                              "util": round(util * 100 / 255) if util else None, "stations": stations, "cc": cc})
+                if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
+                    d["hist"].append((round(now, 1), rssi))
+            self._expire(self.wifi_devs, now)
+
+    def merge_ble(self, rows):
+        now = time.time()
+        with self.dlock:
+            for r in rows:
+                try:
+                    mac, rssi, mx, adv, age, atype, company, name = r[:8]
+                    extra = r[8:14] if len(r) >= 14 else [0, 127, 0, 0, 0, 0]
+                except Exception:
+                    continue
+                appearance, tx, svc, svcdata, apple, flags = extra
+                d = self.ble_devs.get(mac)
+                if d is None:
+                    d = {"mac": mac, "first": now, "hist": deque(maxlen=DEV_HIST_LEN), "name": ""}
+                    self.ble_devs[mac] = d
+                random_addr = bool(atype) or bool(int(mac[0:2], 16) & 0x02)
+                vendor = BLE_COMPANY.get(company) or ("" if random_addr else self.oui.lookup(mac))
+                kinds = []
+                if apple:
+                    kinds.append(APPLE_TYPE.get(apple, f"Apple type 0x{apple:02x}"))
+                if appearance:
+                    kinds.append(APPEARANCE.get(appearance >> 6, f"appearance 0x{appearance:04x}"))
+                for u in (svc, svcdata):
+                    if u:
+                        kinds.append(SERVICE_UUID.get(u, f"service 0x{u:04x}"))
+                d.update({"rssi": rssi, "max": mx, "adv": adv, "last": now - age / 1000.0, "random": random_addr,
+                          "company": company, "company_name": BLE_COMPANY.get(company, f"0x{company:04x}" if company else ""),
+                          "vendor": vendor, "name": name or d["name"], "appearance": appearance,
+                          "tx": None if tx == 127 else tx, "svc": svc, "svcdata": svcdata, "apple": apple,
+                          "connectable": bool(flags & 1), "legacy": bool(flags & 2), "kind": ", ".join(dict.fromkeys(kinds))})
+                if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
+                    d["hist"].append((round(now, 1), rssi))
+            self._expire(self.ble_devs, now)
+
+    @staticmethod
+    def _expire(table, now):
+        for mac in [m for m, d in table.items() if now - d["last"] > DEV_EXPIRE_S]:
+            del table[mac]
 
     def handle_frame(self, raw):
         if self.pcap is None:
@@ -269,13 +515,12 @@ class Bandwatch:
             cap["frames"] = self.pcap.frames
             cap["bytes"] = self.pcap.bytes
 
-    # ---------------- capture control ----------------
+    # ---------------- control ----------------
     def start_capture(self, snaplen=None):
         if self.pcap:
             return self.state["capture"]
         os.makedirs(self.captures_dir, exist_ok=True)
-        name = time.strftime("bandwatch-%Y%m%d-%H%M%S.pcap")
-        path = os.path.join(self.captures_dir, name)
+        path = os.path.join(self.captures_dir, time.strftime("bandwatch-%Y%m%d-%H%M%S.pcap"))
         self.pcap = PcapWriter(path, fcs_present=self.fcs_present)
         self.state["capture"] = {"file": path, "frames": 0, "bytes": 0, "started": time.time()}
         if snaplen:
@@ -290,40 +535,48 @@ class Bandwatch:
             self.pcap.close()
             self.state["log"].append(f"capture stopped: {self.pcap.path} ({self.pcap.frames} frames)")
             self.pcap = None
-        cap = self.state["capture"]
-        if cap:
-            cap["stopped"] = time.time()
         self.state["capture"] = None
-        return cap
+
+    def hunt(self, mac, ch=None):
+        if not mac:
+            self.send("hunt 0")
+            return
+        mac = mac.lower()
+        if ch is None:
+            d = self.wifi_devs.get(mac)
+            ch = d["ch"] if d else 0
+        self.send(f"hunt {mac} {int(ch or 0)}")
 
     def snapshot(self):
         st = self.state
+        now = time.time()
         chans = [dict(ch=c, **st["channels"].get(c, {})) for c in st["chs"]]
+        with self.dlock:
+            wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.wifi_devs.values()]
+            ble = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.ble_devs.values()]
+            src = None
+            if st["hunt"]:
+                src = self.wifi_devs.get(st["hunt"]["mac"]) or self.ble_devs.get(st["hunt"]["mac"])
+        hunt = None
+        if st["hunt"]:
+            hu = st["hunt"]
+            hunt = {"mac": hu["mac"], "rssi": hu["rssi"], "age_ms": hu["age_ms"], "count": hu["count"],
+                    "hist": list(hu["hist"]), "label": (src or {}).get("ssid") or (src or {}).get("name") or "",
+                    "vendor": (src or {}).get("vendor", ""), "kind": (src or {}).get("kind", "")}
         return {
-            "connected": st["connected"],
-            "port": st["port"],
-            "age": round(time.time() - st["last_rx"], 1) if st["last_rx"] else None,
-            "band": st["band"],
-            "current": st["current"],
-            "global": st["global"],
-            "sweep": st["sweep"],
-            "aps": st["aps"],
-            "park": st["park"],
-            "cap": st["cap"],
-            "drop": st["drop"],
-            "heap": st["heap"],
-            "hello": st["hello"],
-            "channels": chans,
-            "history": list(self.history),
-            "capture": st["capture"],
-            "captures_dir": os.path.abspath(self.captures_dir),
-            "log": list(st["log"])[-15:],
+            "connected": st["connected"], "port": st["port"],
+            "age": round(now - st["last_rx"], 1) if st["last_rx"] else None,
+            "band": st["band"], "current": st["current"], "global": st["global"], "sweep": st["sweep"], "aps": st["aps"],
+            "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
+            "channels": chans, "history": list(self.history), "capture": st["capture"],
+            "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
+            "wifi_devs": wifi, "ble_devs": ble, "hunt": hunt, "ble": st["ble"], "oui_source": self.oui.source,
         }
 
 
 def make_handler(bw, html_path):
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *a):  # quiet
+        def log_message(self, *a):
             pass
 
         def _json(self, obj, code=200):
@@ -364,7 +617,7 @@ def make_handler(bw, html_path):
                 self.end_headers()
                 return
             cmd = req.get("cmd")
-            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both"):
+            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble"):
                 bw.send(f"band {req['value']}")
             elif cmd == "park":
                 bw.send(f"park {int(req.get('value') or 0)}")
@@ -373,6 +626,8 @@ def make_handler(bw, html_path):
                     bw.start_capture(req.get("snaplen"))
                 else:
                     bw.stop_capture()
+            elif cmd == "hunt":
+                bw.hunt(req.get("mac"), req.get("ch"))
             elif cmd == "info":
                 bw.send("info")
             else:
@@ -389,14 +644,19 @@ def main():
     ap.add_argument("--bind", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     ap.add_argument("--captures", default=os.path.join(os.getcwd(), "captures"), help="pcap output directory")
     ap.add_argument("--no-fcs", action="store_true", help="do not mark frames as carrying an FCS in radiotap")
+    ap.add_argument("--no-oui-download", action="store_true", help="do not fetch the IEEE OUI registry")
     args = ap.parse_args()
 
-    bw = Bandwatch(args.port, args.captures, fcs_present=not args.no_fcs)
+    oui = OuiDb()
+    if not oui.load_cache() and not args.no_oui_download:
+        oui.download_bg()
+
+    bw = Bandwatch(args.port, args.captures, oui, fcs_present=not args.no_fcs)
     threading.Thread(target=bw.reader, daemon=True).start()
     html_path = os.path.join(HERE, "dashboard.html")
     srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, html_path))
     print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/  (serial: {args.port or 'auto'}, "
-          f"captures: {os.path.abspath(args.captures)})")
+          f"captures: {os.path.abspath(args.captures)}, vendors: {oui.source})")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

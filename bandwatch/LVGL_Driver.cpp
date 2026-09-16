@@ -9,8 +9,7 @@
 #include "bandwatch.h"
 
 // RGB565 draw buffers (lv_color_t would be 3 bytes/pixel in LVGL 9; the panel is 16-bit)
-static uint16_t buf1[ LVGL_BUF_LEN ];
-static uint16_t buf2[ LVGL_BUF_LEN ];
+static uint16_t buf1[ LVGL_BUF_LEN ];   // single buffer: the SPI flush is synchronous anyway
 // static lv_color_t* buf1 = (lv_color_t*) heap_caps_malloc(LVGL_BUF_LEN, MALLOC_CAP_SPIRAM);
 // static lv_color_t* buf2 = (lv_color_t*) heap_caps_malloc(LVGL_BUF_LEN, MALLOC_CAP_SPIRAM);
 
@@ -48,7 +47,7 @@ void Lvgl_Init(void)
 
   lv_display_t * disp = lv_display_create(LVGL_WIDTH, LVGL_HEIGHT);
   lv_display_set_flush_cb(disp, Lvgl_Display_LCD);
-  lv_display_set_buffers(disp, buf1, buf2, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_display_set_buffers(disp, buf1, nullptr, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
   lv_indev_t * indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);

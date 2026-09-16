@@ -6,7 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 SKETCH="$PWD/bandwatch"
-FQBN="esp32:esp32:esp32c5:CDCOnBoot=cdc,PartitionScheme=no_ota,FlashSize=4M,PSRAM=disabled,UploadSpeed=460800"
+FQBN="esp32:esp32:esp32c5:CDCOnBoot=cdc,PartitionScheme=huge_app,FlashSize=4M,PSRAM=disabled,UploadSpeed=460800"
 BUILD_DIR="$PWD/build"
 
 # LVGL picks up the sketch-local lv_conf.h through LV_CONF_PATH (absolute path, quoted for the preprocessor).

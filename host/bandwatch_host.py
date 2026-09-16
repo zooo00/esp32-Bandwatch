@@ -525,6 +525,17 @@ class Bandwatch:
             st["ble"] = {"devs": msg.get("devs", 0), "cycles": msg.get("cycles", 0),
                          "adv": msg.get("adv", 0), "scan": msg.get("scan"),
                          "running": msg.get("running"), "switches": msg.get("switches", 0)}
+            if msg.get("cap") is not None:
+                st["cap"] = msg["cap"]
+            if msg.get("drop") is not None:
+                st["drop"] = msg["drop"]
+            # BLE mode has no dwell lines, so this heartbeat is the only live SD progress the host sees
+            if msg.get("sdc") is not None:
+                sd = st.get("sd") or {}
+                sd.update({"cap": msg["sdc"], "frames": msg.get("sdf", sd.get("frames", 0)),
+                           "bytes": msg.get("sdb", sd.get("bytes", 0))})
+                st["sd"] = sd
+                self._sd_track(sd)
             st["heap"] = msg.get("heap", st["heap"])
             self._hunt_update(msg.get("h"))
         elif t == "ack":
@@ -543,9 +554,12 @@ class Bandwatch:
                 self._set_deauth(msg.get("deauth"))
             if msg.get("cmd") in ("sdcap", "sdinfo"):
                 sd = st.get("sd") or {}
-                for k in ("sd", "mb", "cap", "file", "frames", "bytes", "err"):
+                # the device's ack uses "sdcap" for the running flag and "sd" for card presence
+                keymap = {"sd": "mounted", "sdcap": "cap", "cap": "cap", "mb": "mb", "file": "file",
+                          "frames": "frames", "bytes": "bytes", "err": "err"}
+                for k, dest in keymap.items():
                     if k in msg:
-                        sd["mounted" if k == "sd" else k] = msg[k]
+                        sd[dest] = msg[k]
                 st["sd"] = sd
                 self._sd_track(sd)
         elif t in ("log", "err"):

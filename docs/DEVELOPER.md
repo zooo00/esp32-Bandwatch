@@ -125,7 +125,7 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc]`; flags bit0 AP, bit1 IEs parsed; `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
 | `{"t":"b","dev":[...]}` | every 2 s in BLE mode | rows `[mac, rssi, max, adverts, age_ms, addrType, company, name, appearance, txPower(127=none), svcUuid16, svcDataUuid16, appleType, flags]`; flags bit0 connectable, bit1 legacy adv, bit2 scannable |
 | `{"t":"z","dev":[...]}` | every 2 s in 802.15.4 mode | rows `[id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]`; `id` = extended address `aa:bb:cc:dd:ee:ff:00:11` or `pan/short` hex; `proto` 0 unknown, 1 Zigbee, 2 Zigbee GP, 3 Thread/6LoWPAN, 4 MAC‑secured; flags bit0 ext addr, bit1 beacons, bit2 permit join, bit3 MAC security, bit4 data seen |
-| `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `h` |
+| `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
 | `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
 | `{"t":"sdls","files":[[name, bytes], ...]}` | after `sdls` | files in the card root |
@@ -442,3 +442,25 @@ Two guards matter:
 
 **The mode is frozen while a capture runs** (`if (capActive) return;`), so a single pcap is never half
 passive and half active. Whatever is running when recording starts stays for the whole file.
+
+
+## 14. Capture telemetry gotchas (1.4.2)
+
+Two bugs made SD recording *look* broken while the device was in fact writing the file correctly. Both were
+in the reporting path, and both are easy to reintroduce:
+
+1. **BLE mode has no `{"t":"d"}` lines.** The SD counters (`sdc`/`sdf`/`sdb`) were only added to `sendDwell()`,
+   so in BLE mode the dashboard never saw progress: the frame count sat still and the Record button never
+   flipped, even though the card was filling. `sendBleStatus()` now carries the same fields. **Rule: any
+   live counter the dashboard needs must go on both the dwell line and the BLE heartbeat.**
+2. **Ack key mismatch.** The device's ack is `{"cmd":"sdcap","sdcap":1,...}` but the host was copying a key
+   named `cap`, so `sd.cap` was never updated from the ack. In Wi-Fi the next dwell line masked the bug;
+   in BLE nothing ever corrected it. The host now maps `sdcap` -> `cap` explicitly.
+
+Symptom to remember: if a capture writes a file on the card but the dashboard shows nothing happening,
+suspect the telemetry path, not the writer. `sdinfo` over serial reports the device's own truth.
+
+**LCD record light.** `recording()` is true when either sink is active; `applyRecColor()` paints the page
+header red and `recTag()` appends ` USB` / ` SD` / ` REC`, on the Overview, Channels, Devices and Hunt
+headers. The RGB LED pulses in parallel (`driveLed`), cyan for the host sink, magenta for the card, white
+for both - placed after the hunt branch so hunting keeps the LED, but before the busy-score colours.

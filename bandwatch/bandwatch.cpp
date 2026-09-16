@@ -28,7 +28,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.4.1";
+constexpr const char* kVersion = "1.4.2";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -1440,16 +1440,20 @@ void sendSweep() {
 
 // BLE-mode heartbeat (no dwells there)
 void sendBleStatus() {
-    if (!serialRoom(200)) return;
+    if (!serialRoom(300)) return;
     int n = 0;
     const uint32_t now = millis();
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kBleDevSlots; i++) if (bleDevs[i].lastMs && now - bleDevs[i].lastMs <= kDevFreshMs) n++;
     portEXIT_CRITICAL(&g_devMux);
-    Serial.printf("{\"t\":\"ble\",\"devs\":%d,\"cycles\":%lu,\"heap\":%u,\"adv\":%lu,\"scan\":\"%s\",\"running\":\"%s\",\"switches\":%lu,",
+    Serial.printf("{\"t\":\"ble\",\"devs\":%d,\"cycles\":%lu,\"heap\":%u,\"adv\":%lu,\"scan\":\"%s\",\"running\":\"%s\",\"switches\":%lu,"
+                  "\"cap\":%d,\"drop\":%lu,\"sdc\":%d,\"sdf\":%lu,\"sdb\":%lu,",
                   n, static_cast<unsigned long>(bleScanCycles), static_cast<unsigned>(ESP.getFreeHeap()),
                   static_cast<unsigned long>(bleAdvSeen), bleScanModeName(),
-                  bleActiveScan ? "active" : "passive", static_cast<unsigned long>(bleSwitches));
+                  bleActiveScan ? "active" : "passive", static_cast<unsigned long>(bleSwitches),
+                  captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped),
+                  sdCapEnabled ? 1 : 0, static_cast<unsigned long>(sdFrames),
+                  static_cast<unsigned long>(sdBytes));
     printHunt();
     Serial.print("}\n");
 }
@@ -2538,6 +2542,14 @@ void buildUi() {
     showPage(PAGE_OVERVIEW);
 }
 
+bool recording() { return sdCapEnabled || captureEnabled; }
+
+// Paint a header label red while recording so the LCD has an unmistakable record light, not just a word.
+void applyRecColor(lv_obj_t* lbl) {
+    if (!lbl) return;
+    lv_obj_set_style_text_color(lbl, recording() ? c565(RED_565) : c565(GREY_565), 0);
+}
+
 // "SD", "USB" or "REC" (both) while a capture is running; empty otherwise.
 const char* recTag() {
     if (sdCapEnabled && captureEnabled) return " REC";
@@ -2565,6 +2577,7 @@ void refreshOverview(float global) {
     lv_label_set_text(sweepLabel, buf);
     chanHeaderText(buf, sizeof(buf));
     lv_label_set_text(chanLabel, buf);
+    applyRecColor(chanLabel);
 
     int top[3];
     sortTop3(top);
@@ -2638,6 +2651,7 @@ void refreshChannels(float global) {
     char buf[48];
     chanHeaderText(buf, sizeof(buf));
     lv_label_set_text(listChanLabel, buf);
+    applyRecColor(listChanLabel);
     int slot = 0;
     for (int i = 0; i < kChannelCount && slot < kListSlots; i++) {
         if (!chanEnabled(i)) continue;
@@ -2723,6 +2737,7 @@ void refreshDevices() {
     else
         snprintf(buf, sizeof(buf), "%s %d%s", mode154() ? "15.4" : "WiFi", n, recTag());
     lv_label_set_text(devHdrRight, buf);
+    applyRecColor(devHdrRight);
     for (int i = 0; i < kDevRows; i++) {
         if (i >= n) { lv_obj_add_flag(devRow[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_remove_flag(devRow[i], LV_OBJ_FLAG_HIDDEN);
@@ -2752,7 +2767,8 @@ void refreshHunt() {
     const int rssi = huntRssi;
     const bool seen = last != 0;
     const uint32_t age = seen ? millis() - last : 0;
-    lv_label_set_text(huntHdrRight, hopMode() ? (parkedIdx >= 0 ? "parked" : "hopping") : "BLE");
+    lv_label_set_text(huntHdrRight, recording() ? recTag() + 1 : hopMode() ? (parkedIdx >= 0 ? "parked" : "hopping") : "BLE");
+    applyRecColor(huntHdrRight);
     if (seen && age < 5000) snprintf(buf, sizeof(buf), "%d", rssi);
     else snprintf(buf, sizeof(buf), "--");
     lv_label_set_text(huntBig, buf);

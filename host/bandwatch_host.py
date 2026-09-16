@@ -403,10 +403,22 @@ class Bandwatch:
             if raw.strip():
                 self.state["log"].append(raw.decode("utf-8", "replace")[:160])
             return
+        # A line that parses as JSON but has a field missing or the wrong shape must not escape to
+        # reader(): an exception there drops the serial session and silently stops a running capture.
+        try:
+            self._dispatch(msg)
+        except Exception as e:
+            self.state["log"].append(f"bad {msg.get('t')!r} line ({e.__class__.__name__}: {e})")
+
+    def _dispatch(self, msg):
         t = msg.get("t")
         st = self.state
         if t == "hello":
             st["hello"] = msg
+            # A hold of the BOOT button changes band on the device and switches capture off there; without
+            # this the host would keep an open pcap that never grows again (hello is the only line we get).
+            if self.pcap and msg.get("band") and self.cap_band != msg.get("band"):
+                self.stop_capture()
             st["band"] = msg.get("band")
             st["chs"] = msg.get("chs", [])
             st["park"] = msg.get("park", 0)
@@ -566,19 +578,20 @@ class Bandwatch:
             del table[mac]
 
     def handle_frame(self, raw):
-        if self.pcap is None:
+        pcap = self.pcap          # stop_capture() runs on the HTTP thread and may clear/close it mid-frame
+        if pcap is None:
             return
         try:
             parts = raw.split(b" ", 5)
             ch, rssi, ts_us, orig_len = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
             data = base64.b64decode(parts[5])
+            pcap.write(ch, rssi, ts_us, orig_len, data)
         except Exception:
             return
-        self.pcap.write(ch, rssi, ts_us, orig_len, data)
         cap = self.state["capture"]
         if cap:
-            cap["frames"] = self.pcap.frames
-            cap["bytes"] = self.pcap.bytes
+            cap["frames"] = pcap.frames
+            cap["bytes"] = pcap.bytes
 
     # ---------------- control ----------------
     def start_capture(self, snaplen=None):
@@ -687,23 +700,26 @@ def make_handler(bw, html_path):
                 self.end_headers()
                 return
             cmd = req.get("cmd")
-            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154"):
-                bw.send(f"band {req['value']}")
-            elif cmd == "park":
-                bw.send(f"park {int(req.get('value') or 0)}")
-            elif cmd == "capture":
-                if req.get("value"):
-                    bw.start_capture(req.get("snaplen"))
+            try:
+                if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154"):
+                    bw.send(f"band {req['value']}")
+                elif cmd == "park":
+                    bw.send(f"park {int(req.get('value') or 0)}")
+                elif cmd == "capture":
+                    if req.get("value"):
+                        bw.start_capture(req.get("snaplen"))
+                    else:
+                        bw.stop_capture()
+                elif cmd == "hunt":
+                    bw.hunt(req.get("mac"), req.get("ch"))
+                elif cmd == "deauth":
+                    bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
+                elif cmd == "info":
+                    bw.send("info")
                 else:
-                    bw.stop_capture()
-            elif cmd == "hunt":
-                bw.hunt(req.get("mac"), req.get("ch"))
-            elif cmd == "deauth":
-                bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
-            elif cmd == "info":
-                bw.send("info")
-            else:
-                return self._json({"error": "unknown command"}, 400)
+                    return self._json({"error": "unknown command"}, 400)
+            except (TypeError, ValueError) as e:
+                return self._json({"error": f"bad argument: {e}"}, 400)
             return self._json({"ok": True})
 
     return Handler

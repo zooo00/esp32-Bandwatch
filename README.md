@@ -30,7 +30,9 @@ a deauth attack is running — it never transmits.
   distance, the radio parks on the target's channel, and the dashboard plots the RSSI trend.
 - **Deauth**: pick an AP (its BSSID) over serial or from the dashboard and the radio parks on its channel and
   spams deauth frames with the AP spoofed as sender; connected stations drop off and usually reconnect. Run a
-  capture at the same time to catch WPA2 handshakes. Stations with PMF (802.11w) enabled ignore it.
+  capture at the same time to catch WPA2 handshakes. Stations with PMF (802.11w) enabled ignore it. The attack
+  stops itself after 5 minutes (`kDeauthMaxMs`) so a crashed host or an unplugged cable cannot leave the board
+  transmitting; re-send the command to continue. Only point it at networks you are authorised to test.
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble → 802.15.4; on the
@@ -90,16 +92,21 @@ The page polls the device state once a second: band and park controls, capture s
 bar chart per channel (grouped by band segment, current channel marked), a 10‑minute trend of the max score, a
 per‑channel table and the device log.
 
+The dashboard is served on `127.0.0.1` only. `/api/cmd` has no authentication and can start a deauth attack,
+so think before using `--bind` to expose it beyond the loopback interface.
+
 **Capture** streams every received frame (up to the snap length) over USB; the host writes
-`captures/bandwatch-YYYYmmdd-HHMMSS.pcap` with a radiotap header (TSFT, channel, dBm signal) that Wireshark
-opens directly. Park on one channel for a continuous capture; while hopping, each sweep contributes a 220 ms slice
+`captures/bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` (`bandwatch-802154-…` in 802.15.4 mode) with a radiotap header
+(TSFT, channel, dBm signal) that Wireshark opens directly. Park on one channel for a continuous capture; while hopping, each sweep contributes a 220 ms slice
 per channel. Throughput is bounded by USB CDC (~300 KB/s of frame data); the device counts frames it had to drop
 (`drop` in the dashboard). Frames are captured as received, i.e. encrypted payloads stay encrypted. If Wireshark
 reports bad FCS on every frame, run with `--no-fcs`.
 
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
 `cap 0|1`, `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
-modes only — parks on the AP's channel and kicks its stations), `info`, `reboot`.
+modes only — parks on the AP's channel and kicks its stations, auto‑stops after 5 min), `info`, `reboot`.
+Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
+`cap 1` afterwards.
 802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need
 the network key, Wireshark knows the default Zigbee trust‑centre key).
 
@@ -115,7 +122,8 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 ## Tuning knobs (`bandwatch/bandwatch.cpp`)
 
 `kChannels[]`, `kDwellMs` (220), `kStrongThresholdDbm` (−65), `kBusyEmaAlpha` (0.22), `kLongPressMs` (700),
-`kCapSlots` / `kCapMaxLen` (capture ring: 20 × 1600 B), `kCountryCode` ("EU", only affects the regulatory table).
+`kCapSlots` / `kCapMaxLen` (capture ring: 20 × 1600 B), `kCountryCode` ("EU", only affects the regulatory table),
+`kDeauthMaxMs` (5 min, the deauth dead‑man's switch).
 
 ## Limitations
 
@@ -132,6 +140,15 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
 ## Versions
 
+- **1.2.4** — full-codebase review pass. Firmware: a mode change now frees the capture ring instead of only
+  switching capture off (it used to hold ~32 KB through BLE mode, where RAM is tightest); SSIDs, BLE names and
+  country codes are stripped of control characters at ingest, and the country code is JSON-escaped like every
+  other string, so a malformed beacon can no longer corrupt a `{"t":"w"}` line; a bogus RSN cipher count can no
+  longer wrap the IE parser's offset; `stopDeauth()` restores the quiet-sniffing TX power; a `#warning` fires if
+  the Arduino core is not the 3.3.x the deauth offsets were reverse-engineered against. Host: a malformed line
+  no longer tears down the serial session and silently ends a capture; stopping a busy capture no longer races
+  the pcap writer; changing band with the BOOT button now closes the host's pcap too; `/api/cmd` returns 400 on
+  a bad argument instead of raising.
 - **1.2.3** — deauth hardening: fixed a null-pointer crash in the driver-internal kick path
   (`sendInternalKick`) that could fire on essentially every attack, added a 5‑minute dead‑man's‑switch
   so an attack stops itself if the host/serial link drops, dropped leftover FC-probe diagnostics from

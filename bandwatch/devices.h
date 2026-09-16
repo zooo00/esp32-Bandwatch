@@ -76,7 +76,7 @@ inline int dev154FindSlot(Dev154* tab, int slots, const uint8_t* key) {
         if (key8Eq(tab[i].key, key)) return i;
         if (tab[i].lastMs < oldestMs) { oldestMs = tab[i].lastMs; oldest = i; }
     }
-    return oldest;
+    return oldest >= 0 ? oldest : start;   // never -1: every probed slot could hold lastMs == UINT32_MAX
 }
 
 inline int macHashIdx(const uint8_t* mac, int slots) {
@@ -99,5 +99,5 @@ inline int devFindSlot(T* tab, int slots, const uint8_t* mac) {
         if (macEq(tab[i].mac, mac)) return i;           // found
         if (tab[i].lastMs < oldestMs) { oldestMs = tab[i].lastMs; oldest = i; }
     }
-    return oldest;                                      // evict the stalest probed entry
+    return oldest >= 0 ? oldest : start;                // evict the stalest probed entry (never -1)
 }

@@ -23,7 +23,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.2.3";
+constexpr const char* kVersion = "1.2.4";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -203,6 +203,14 @@ uint32_t deauthStartMs = 0;     // millis() when the current attack started; ser
 // that rejects our hand-rolled [C0]/[A0] frames.
 //   arg0: pointer to a word holding an ieee80211com* — g_ic+16 (STA) or g_ic+20 (AP); it panics on 0
 //   arg1: target MAC (the station being kicked, ends up as DA), arg2: reason code
+//
+// Every numeric offset used by this path (g_ic+16/+20/+436/+440, hmac+312, desc+4/+20/+40/+52/+56) was
+// reverse-engineered from the prebuilt libnet80211.a in Arduino-ESP32 core 3.3.11 (ESP-IDF 5.5.5). Nothing
+// validates them at runtime, so a core that lays those structs out differently turns these reads and writes
+// into memory corruption rather than a clean failure. Re-verify them before bumping the core (docs/DEVELOPER.md §9).
+#if defined(ESP_ARDUINO_VERSION_MAJOR) && (ESP_ARDUINO_VERSION_MAJOR != 3 || ESP_ARDUINO_VERSION_MINOR != 3)
+#warning "Arduino-ESP32 core is not 3.3.x: the driver-internal deauth offsets may no longer match (docs/DEVELOPER.md)."
+#endif
 extern "C" {
     int ieee80211_send_deauth_no_bss(void* hmacSlot, const uint8_t* mac, uint16_t reason);
     // DIAGNOSTIC build 3 pieces — the driver builds the frame itself; we only steer which MACs go where.
@@ -365,6 +373,17 @@ bool parseMac(const char* s, uint8_t* out) {
     return true;
 }
 
+// Replace control characters in a string captured off the air (SSID, BLE name, country code) with '.'.
+// Bytes >= 0x80 are left alone so UTF-8 names survive. Without this a hostile or corrupt beacon can put
+// control bytes in the table, where printJsonStr expands each to a 6-byte \u escape and blows past the
+// serialRoom() budget that keeps JSON lines from being truncated mid-write.
+void IRAM_ATTR sanitizeText(char* s, size_t n) {
+    for (size_t i = 0; i < n && s[i]; i++) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x20 || c == 0x7F) s[i] = '.';
+    }
+}
+
 // Write a JSON string literal (quoted, escaped) to Serial.
 void printJsonStr(const char* s) {
     Serial.write('"');
@@ -401,10 +420,10 @@ void IRAM_ATTR parseBeaconIes(WifiDev& d, const uint8_t* payload, uint16_t sigLe
         if (off + 2 + len > end) break;
         switch (id) {
             case 0:   // SSID
-                if (len > 0 && len <= 32) { memcpy(d.ssid, v, len); d.ssid[len] = 0; }
+                if (len > 0 && len <= 32) { memcpy(d.ssid, v, len); d.ssid[len] = 0; sanitizeText(d.ssid, len); }
                 break;
             case 7:   // Country
-                if (len >= 2) { d.cc[0] = v[0]; d.cc[1] = v[1]; d.cc[2] = 0; }
+                if (len >= 2) { d.cc[0] = v[0]; d.cc[1] = v[1]; d.cc[2] = 0; sanitizeText(d.cc, 2); }
                 break;
             case 11:  // BSS load
                 if (len >= 3) { d.stations = v[0] | (v[1] << 8); d.util = v[2]; }
@@ -424,8 +443,12 @@ void IRAM_ATTR parseBeaconIes(WifiDev& d, const uint8_t* payload, uint16_t sigLe
                 sawRsn = true;
                 if (len < 8) break;
                 uint16_t p = 2 + 4;                         // version + group cipher
-                const uint16_t pc = v[p] | (v[p + 1] << 8); p += 2 + 4 * pc;
-                if (p + 2 > len) break;
+                const uint16_t pc = v[p] | (v[p + 1] << 8);
+                // 32-bit math: a bogus pairwise-cipher count would wrap a uint16 back into range and
+                // make the checks below pass on garbage offsets.
+                const uint32_t after = static_cast<uint32_t>(p) + 2u + 4u * pc;
+                if (after + 2u > len) break;
+                p = static_cast<uint16_t>(after);
                 const uint16_t ac = v[p] | (v[p + 1] << 8); p += 2;
                 for (uint16_t k = 0; k < ac && p + 4 <= len; k++, p += 4) {
                     if (!(v[p] == 0x00 && v[p + 1] == 0x0F && v[p + 2] == 0xAC)) continue;
@@ -579,6 +602,7 @@ class AdvCallbacks : public BLEAdvertisedDeviceCallbacks {
         if (dev.haveName()) {
             String n = dev.getName();
             strncpy(name, n.c_str(), sizeof(name) - 1);
+            sanitizeText(name, sizeof(name) - 1);
         }
         if (dev.haveManufacturerData()) {
             String md = dev.getManufacturerData();
@@ -961,12 +985,25 @@ void stopWifi() {
 
 void stopDeauth();   // defined below with the hunt helpers; a mode change tears the attack down first
 
+// Stop capturing and give the ring back to the heap. Safe from the loop task only: the radio callbacks
+// re-read capRing/captureEnabled on every frame and run to completion, so they never hold a stale pointer.
+void releaseCapture() {
+    captureEnabled = false;
+    if (!capRing) return;
+    CapFrame* r = capRing;
+    capRing = nullptr;
+    capSlots = 0;
+    capHead = capTail = 0;
+    free(r);
+}
+
 // Switch band mode at runtime: clears per-channel history and restarts the sweep (or swaps radios).
 void setBandMode(BandMode m) {
     const BandMode prev = bandMode;
     if (m == prev) return;
     bandMode = m;
-    captureEnabled = false;   // the host restarts a capture if it wants one (link type differs per radio)
+    releaseCapture();         // the host restarts a capture if it wants one (link type differs per radio);
+                              // the ring must go back to the heap or BLE mode starts ~32 KB short
     stopDeauth();             // the attack is pinned to a channel: unpark, and the host can re-send it
     if (parkedIdx >= 0 && !chanEnabled(parkedIdx)) parkedIdx = -1;
     const bool radioChange = (prev == BAND_BLE) || (prev == BAND_154) || (m == BAND_BLE) || (m == BAND_154);
@@ -1175,13 +1212,11 @@ void sendSweep() {
 // BLE-mode heartbeat (no dwells there)
 void sendBleStatus() {
     if (!serialRoom(200)) return;
-    BleDev tmp[1];
     int n = 0;
     const uint32_t now = millis();
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kBleDevSlots; i++) if (bleDevs[i].lastMs && now - bleDevs[i].lastMs <= kDevFreshMs) n++;
     portEXIT_CRITICAL(&g_devMux);
-    (void)tmp;
     Serial.printf("{\"t\":\"ble\",\"devs\":%d,\"cycles\":%lu,\"heap\":%u,", n, static_cast<unsigned long>(bleScanCycles),
                   static_cast<unsigned>(ESP.getFreeHeap()));
     printHunt();
@@ -1218,7 +1253,9 @@ void sendDevices() {
             Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", i ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
                           static_cast<unsigned long>(now - d.lastMs), d.ch, d.flags);
             printJsonStr(d.ssid);
-            Serial.printf(",%u,%u,%u,%u,%u,%u,\"%s\"]", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations, d.cc[0] ? d.cc : "");
+            Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
+            printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
+            Serial.print("]");
         }
         Serial.print("]}\n");
     } else {
@@ -1388,6 +1425,7 @@ void stopDeauth() {
     portENTER_CRITICAL(&g_devMux);
     deauthActive = false;
     portEXIT_CRITICAL(&g_devMux);
+    (void)esp_wifi_set_max_tx_power(82);   // back to startWifi's quiet-sniffing level (startDeauth raised it to 16 dBm)
     // If hunt re-parked after us, this unparks its park too: last writer wins, hopping resumes.
     if (deauthParked) { setPark(-1); deauthParked = false; }
 }
@@ -1417,7 +1455,7 @@ void handleCommand(char* line) {
             }
         }
         captureEnabled = on && capRing;
-        if (!captureEnabled && capRing) { CapFrame* r = capRing; capRing = nullptr; capSlots = 0; free(r); }
+        if (!captureEnabled) releaseCapture();
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"cap\",\"cap\":%d}\n", captureEnabled ? 1 : 0);
     } else if (!strcmp(line, "snap")) {
         int n = atoi(arg);
@@ -1588,10 +1626,12 @@ void sendInternalKick() {
     void* desc = ieee80211_alloc_deauth(deauthSlotPad, kBcastMac, 7);   // arg1 likely unused; reason 7 lands at D+24
     if (!desc) { deauthTxFail = deauthTxFail + 1; return; }
     // Mirror send_deauth_no_bss's ebuf-header bit juggling: desc[+4] holds the ebuf pointer P, and the
-    // bits live in the first word P points at. P has been seen 0 on some driver builds — dereferencing
-    // it unconditionally would crash every burst, so guard it (same P is reused below for D).
+    // bits live in the first word P points at. A 0 here means this core's descriptor layout is not the one
+    // these offsets were derived from: bail instead of dereferencing it, and instead of TXing a frame we
+    // could not patch (the spoofed SA/BSSID is written through P below).
     const uint32_t P = *reinterpret_cast<const volatile uint32_t*>(reinterpret_cast<char*>(desc) + 4);
-    if (P) {
+    if (!P) { deauthTxFail = deauthTxFail + 1; return; }
+    {
         volatile uint32_t* ebw = reinterpret_cast<volatile uint32_t*>(P);
         uint32_t v = *ebw;
         v |= 0x80000u | 0x40000u;
@@ -1611,15 +1651,13 @@ void sendInternalKick() {
         *reinterpret_cast<volatile uint32_t*>(d56) |= 1;        // robust-mgmt flag (get_robustmgtframe's bit — WPA2 stations can demand it)
     }
     // Frame data D sits at *(P+4) (same double-deref as above), and desc[+40]&2 shifts all addresses by +8.
-    if (P) {
-        uint8_t* D = reinterpret_cast<uint8_t*>(*reinterpret_cast<volatile uint32_t*>(P + 4));
-        if (D) {
-            const size_t off = (*reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40) & 2u) ? 8 : 0;
-            if (deauthHstate == 0)   // hstate-0 branch puts broadcast in the BSSID slot → patch so SA==BSSID like a real AP kick
-                memcpy(D + 16 + off, deauthBssid, 6);
-            D[off] = 0xC8;  D[1 + off] = 0x02;   // match the real TP-Link deauths seen on this BSS: FC [C8 02], dur 0x32
-            D[2 + off] = 0x32;  D[3 + off] = 0x00;
-        }
+    uint8_t* D = reinterpret_cast<uint8_t*>(*reinterpret_cast<volatile uint32_t*>(P + 4));
+    if (D) {
+        const size_t off = (*reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40) & 2u) ? 8 : 0;
+        if (deauthHstate == 0)   // hstate-0 branch puts broadcast in the BSSID slot → patch so SA==BSSID like a real AP kick
+            memcpy(D + 16 + off, deauthBssid, 6);
+        D[off] = 0xC8;  D[1 + off] = 0x02;   // match the real TP-Link deauths seen on this BSS: FC [C8 02], dur 0x32
+        D[2 + off] = 0x32;  D[3 + off] = 0x00;
     }
     *reinterpret_cast<volatile uint16_t*>(reinterpret_cast<char*>(desc) + 20) = 26;   // len 24→26 so the reason code fits on air (ppTxPkt prepends an 8-byte prefix)
     if (chm_is_at_home_channel()) ic_tx_pkt(desc);                   // TX now…
@@ -1988,11 +2026,12 @@ void refreshOverview(float global) {
                                  : bandMode == BAND_154 ? "802.15.4 channels 11-26"
                                  : "1-13 | 36-64 | 100-144 | 149-165");
 
-    const ChannelState& cur = channels[currentIdx < 0 ? 0 : currentIdx];
+    const int curIdx = currentIdx < 0 ? 0 : currentIdx;
+    const ChannelState& cur = channels[curIdx];
     if (cur.hasData) {
         fmtRate(r1, sizeof(r1), cur.metrics.frames * 1000.0f / kDwellMs, " pkt/s");
         fmtRate(r2, sizeof(r2), cur.metrics.bytes * 1000.0f / kDwellMs, " B/s");
-        snprintf(buf, sizeof(buf), "ch%u: %s  %s", kChannels[currentIdx], r1, r2);
+        snprintf(buf, sizeof(buf), "ch%u: %s  %s", kChannels[curIdx], r1, r2);
         lv_label_set_text(statsLine1, buf);
         snprintf(buf, sizeof(buf), "talkers %u  strong %u/%lu  raw %.0f", cur.metrics.unique, cur.metrics.strong,
                  static_cast<unsigned long>(cur.metrics.frames), cur.busyCurrent);
@@ -2313,6 +2352,7 @@ void Bandwatch_Init(void) {
     pinMode(kBootButtonPin, INPUT_PULLUP);
     memset(wifiDevs, 0, sizeof(wifiDevs));
     memset(bleDevs, 0, sizeof(bleDevs));
+    memset(devs154, 0, sizeof(devs154));
 
     setLedColor({255, 0, 0}, 100);
     delay(120);

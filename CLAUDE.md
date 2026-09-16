@@ -41,12 +41,18 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    scan cache is cleared every 3 s and cut early below ~28 KB free. Out-of-memory shows up as
    `abort() ... lock_init_generic` or a store fault in `lv_obj_class_create_obj`.
 5. **One radio.** Wi-Fi bands, BLE and 802.15.4 are exclusive modes; `setBandMode()` tears one down and starts
-   the next. Capture is switched off on every mode change (pcap link type differs).
+   the next. Every mode change calls `releaseCapture()`: capture off *and* the ~32 KB ring returned to the heap
+   (pcap link type differs per radio, and BLE mode needs that RAM). Only free the ring from the loop task.
 6. **Serial output never blocks** (`setTxTimeoutMs(0)`, 8 KB TX buffer) and every line first checks
    `Serial.availableForWrite()` so lines are dropped whole, never truncated.
 7. **The prebuilt Arduino core cannot be reconfigured** (sdkconfig is fixed): BLE extended advertising is off,
    802.15.4 is on, 5 GHz Wi-Fi is on. Changing that means switching to ESP-IDF.
-8. Apple Silicon without Rosetta: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags.
+8. **Do not bump the core casually.** The deauth path pokes hard-coded offsets inside the prebuilt
+   `libnet80211.a` (core 3.3.11 / IDF 5.5.5). Nothing checks them at runtime, so a different layout corrupts
+   memory instead of failing. A `#warning` fires off 3.3.x; re-verify the offset table in `docs/DEVELOPER.md` §9.
+9. **Strings off the air are hostile input.** SSID / BLE name / country code are control-character-stripped at
+   ingest and JSON-escaped on the way out; keep both, or a crafted beacon corrupts a whole protocol line.
+10. Apple Silicon without Rosetta: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags.
    arduino-cli caches prototype generation — `rm -rf build` after touching the wrapper.
 
 ## Where to change things
@@ -63,4 +69,4 @@ Crash text is printed to USB before the reboot but the port re-enumerates, so ke
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness.

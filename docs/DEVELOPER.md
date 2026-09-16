@@ -123,14 +123,28 @@ Device → host, one JSON object per line unless noted:
 
 Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
 `hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, `deauth <bssid>` (Wi‑Fi modes only —
-parks on the AP's channel and spams spoofed deauth frames at its stations) / `deauth 0`, `info`, `reboot`.
+parks on the AP's channel and spams spoofed deauth frames at its stations; stops itself after `kDeauthMaxMs`,
+5 min) / `deauth 0`, `info`, `reboot`.
+
+The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
+also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
+instead of killing the reader thread (an exception there closes the serial port and silently ends a capture).
 
 ## 5. Host tool (`host/`)
 
 `bandwatch_host.py`: a reader thread parses lines into a state dict (channels, history, device tables with
 per-device RSSI history, hunt state), an HTTP server exposes `GET /api/state` (everything, JSON) and
 `POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
-for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Vendor names: IEEE OUI CSV cached in `~/.cache/bandwatch/oui.csv`
+for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Files are named `bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` /
+`bandwatch-802154-…` in `--captures` (default `./captures`).
+
+`/api/cmd` has **no authentication**, and one of its commands starts a deauth attack, so the server binds to
+`127.0.0.1` by default; `--bind 0.0.0.0` hands that to anyone who can reach the port. Values that reach the
+serial line have embedded CR/LF stripped in `Bandwatch.send()` so a crafted field cannot append a second
+command to the line. The pcap writer is touched from both the reader thread and the HTTP thread, so
+`handle_frame()` takes a local reference and tolerates the file being closed underneath it.
+
+Vendor names: IEEE OUI CSV cached in `~/.cache/bandwatch/oui.csv`
 (downloaded once in the background) with a built-in fallback; Bluetooth company ids, Apple continuity types,
 GAP appearance categories and common service UUIDs are small tables at the top of the file.
 
@@ -191,3 +205,54 @@ set; charts are inline SVG.
    `drop` small; `cap 0`.
 5. `hunt <mac of a strong AP> <ch>`: `d` lines carry `h: [rssi, age_ms, hits]` with hits rising; `hunt 0`.
 6. BOOT tap cycles pages, hold cycles modes; LED changes with score / hunt distance.
+7. `cap 1`, then hold BOOT to change band: the device must report `cap: 0` in the next `hello` **and** free the
+   capture ring — compare `heap` before `cap 1` and after the mode change; they should match within a few
+   hundred bytes. The host closes its pcap on the same `hello`.
+8. `deauth <bssid of your own AP>`: `da` rises in the `d` lines, `df` stays at 0. Leave it running past
+   `kDeauthMaxMs` (5 min) and confirm it stops itself with a `deauth auto-stopped` log line and `deauth: null`.
+
+## 9. The driver-internal deauth path (fragile — read before touching)
+
+`sendInternalKick()` does not build a frame itself. It calls undocumented symbols inside the prebuilt
+`libnet80211.a` (`ieee80211_alloc_deauth`, `ieee80211_send_setup`, `ieee80211_set_tx_desc`, `ic_tx_pkt`) and
+patches the descriptor they hand back, because the public `esp_wifi_80211_tx()` sanity check rejects
+real deauth frame-control bytes. That means **hard-coded byte offsets into driver-private structs**:
+
+| Offset | Meaning |
+| --- | --- |
+| `g_ic+16` / `g_ic+20` | STA / AP hmac pointer, passed as arg0 (the driver panics if it is 0) |
+| `g_ic+436` / `g_ic+440` | head / tail of the deferred-TX queue used when off the home channel |
+| `hmac+312` | hstate: selects which address slot becomes DA / SA / BSSID inside `send_setup` |
+| `desc+4` | ebuf pointer P; `*P` holds the header bits, `*(P+4)` the frame bytes |
+| `desc+20`, `desc+40`, `desc+52`, `desc+56` | length, address-shift flag, queue link, state block |
+
+These were derived against **core 3.3.11 / ESP-IDF 5.5.5** and nothing checks them at runtime, so a core
+whose structs moved will silently corrupt memory instead of failing. A `#warning` in `bandwatch.cpp` fires if
+the core is not 3.3.x — treat it as "re-verify every offset in the table above", not as noise. `setup.sh`
+installs the newest `esp32:esp32`, so pin the version there if you need a reproducible build.
+
+Guards that are in place: a null `desc` and a null ebuf pointer `P` both count a TX failure and return rather
+than dereferencing; `serviceDeauth()` stops the attack after `kDeauthMaxMs` so a dead host or unplugged USB
+cable cannot leave it transmitting; `stopDeauth()` restores the 8.2 dBm sniffing TX power that `startDeauth()`
+raised to 16 dBm. Failures are visible as `df` in `d` lines and the 4th element of `deauth` in `hello`.
+
+## 10. Concurrency notes (what may touch what)
+
+Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL timer callback (`uiTimerCb` →
+`hopIfNeeded` / `serviceDeauth` / `refreshUi`) runs in the Arduino loop task, because `Timer_Loop()` calls
+`lv_timer_handler()` from `loop()`. The other two are the Wi‑Fi task (`promiscuousCb`) and a true ISR
+(`esp_ieee802154_receive_done`).
+
+- Device tables and hunt counters are shared with both radio contexts and are only touched under `g_devMux`
+  (`portENTER_CRITICAL_ISR` in the radio paths). `g_accum` likewise under `g_accumMux`.
+- `devSnap` (the union scratch buffer) and `devRows` are loop-task only — `sendDevices()` and `refreshDevices()`
+  cannot interleave, since both run from `loop()`.
+- The capture ring is single-producer (radio) / single-consumer (loop). Freeing it from the loop task
+  (`releaseCapture()`) is safe **only** because this is a single-core part: the radio callbacks re-read
+  `captureEnabled` and `capRing` on entry and run to completion, so they can never be suspended holding a
+  pointer that the loop task then frees. Do not move that free anywhere else, and do not cache `capRing` in a
+  local inside the producers.
+- Strings captured off the air (SSID, BLE name, country code) are stripped of control characters at ingest
+  (`sanitizeText`) so `printJsonStr` cannot expand them into `\u00xx` escapes that overshoot the `serialRoom()`
+  budget for a line. The budgets (`40 + n*110` Wi‑Fi, `40 + n*95` BLE) are estimates, not exact lengths: a full
+  64-device table already needs ~7 KB of the 8 KB TX buffer, so raising them is not free.

@@ -128,6 +128,9 @@ constexpr RgbColor LED_YELLOW = {255, 200, 0};
 constexpr RgbColor LED_ORANGE = {255, 120, 0};
 constexpr RgbColor LED_RED    = {255, 24, 0};
 constexpr RgbColor LED_BLUE   = {0, 60, 255};
+constexpr RgbColor LED_CYAN_L = {0, 190, 210};   // recording pcap to the host (Mac)
+constexpr RgbColor LED_MAGENTA= {220, 0, 180};   // recording pcap to the microSD card
+constexpr RgbColor LED_WHITE  = {210, 210, 210}; // both sinks at once
 
 // ---------------------------------------------------------------------------------------------
 // State
@@ -2365,12 +2368,20 @@ void buildUi() {
     showPage(PAGE_OVERVIEW);
 }
 
+// "SD", "USB" or "REC" (both) while a capture is running; empty otherwise.
+const char* recTag() {
+    if (sdCapEnabled && captureEnabled) return " REC";
+    if (sdCapEnabled) return " SD";
+    if (captureEnabled) return " USB";
+    return "";
+}
+
 void chanHeaderText(char* buf, size_t n) {
     if (!hopMode()) { snprintf(buf, n, "BLE"); return; }
     const char* band = (currentIdx >= 0 && is154(currentIdx)) ? "15.4" : (currentIdx >= 0 && is5g(currentIdx)) ? "5G" : "2.4G";
-    if (!monitorReady)       snprintf(buf, n, "no ch");
-    else if (parkedIdx >= 0) snprintf(buf, n, "park %u", kChannels[currentIdx]);
-    else                     snprintf(buf, n, "%s ch%u", band, kChannels[currentIdx]);
+    if (!monitorReady)       snprintf(buf, n, "no ch%s", recTag());
+    else if (parkedIdx >= 0) snprintf(buf, n, "park %u%s", kChannels[currentIdx], recTag());
+    else                     snprintf(buf, n, "%s ch%u%s", band, kChannels[currentIdx], recTag());
 }
 
 void refreshOverview(float global) {
@@ -2537,7 +2548,7 @@ void refreshDevices() {
     }
     char buf[48];
     const int n = devRowCount;
-    snprintf(buf, sizeof(buf), "%s %d", mode154() ? "15.4" : wifiMode() ? "WiFi" : "BLE", n);
+    snprintf(buf, sizeof(buf), "%s %d%s", mode154() ? "15.4" : wifiMode() ? "WiFi" : "BLE", n, recTag());
     lv_label_set_text(devHdrRight, buf);
     for (int i = 0; i < kDevRows; i++) {
         if (i >= n) { lv_obj_add_flag(devRow[i], LV_OBJ_FLAG_HIDDEN); continue; }
@@ -2634,9 +2645,9 @@ void refreshSystem(float global) {
     if (parkedIdx >= 0) snprintf(buf, sizeof(buf), "park: ch%u", kChannels[parkedIdx]);
     else snprintf(buf, sizeof(buf), "park: off (hopping)");
     lv_label_set_text(sysLines[n++], buf);
-    if (captureEnabled) snprintf(buf, sizeof(buf), "capture: on  %lu sent  %lu drop", static_cast<unsigned long>(capSent),
+    if (captureEnabled) snprintf(buf, sizeof(buf), "usb rec: %lu sent  %lu drop", static_cast<unsigned long>(capSent),
                                  static_cast<unsigned long>(capDropped));
-    else snprintf(buf, sizeof(buf), "capture: off (host: cap 1)");
+    else snprintf(buf, sizeof(buf), "usb rec: off (host: cap 1)");
     lv_label_set_text(sysLines[n++], buf);
     if (sdCapEnabled) snprintf(buf, sizeof(buf), "sd: rec %lu fr  %lu kB", static_cast<unsigned long>(sdFrames),
                                static_cast<unsigned long>(sdBytes / 1024));
@@ -2672,6 +2683,15 @@ void driveLed(float global) {
         else if (r >= -75) setLedColor(LED_YELLOW, 60);
         else if (r >= -88) setLedColor(LED_GREEN, 40);
         else               setLedColor(LED_BLUE, 30);
+        return;
+    }
+    if (sdCapEnabled || captureEnabled) {
+        // ~1.2 s breathing pulse so "recording" reads at a glance; colour says which sink.
+        const uint32_t phase = millis() % 1200;
+        const uint32_t tri = phase < 600 ? phase : (1200 - phase);          // 0..600
+        const uint8_t bright = static_cast<uint8_t>(10 + (tri * 60) / 600); // 10..70
+        setLedColor((sdCapEnabled && captureEnabled) ? LED_WHITE
+                    : sdCapEnabled ? LED_MAGENTA : LED_CYAN_L, bright);
         return;
     }
     if (!hopMode()) { setLedColor(LED_BLUE, 25); return; }

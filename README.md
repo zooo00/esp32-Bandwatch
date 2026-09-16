@@ -111,7 +111,12 @@ per channel. Throughput is bounded by USB CDC (~300 KB/s of frame data); the dev
 reports bad FCS on every frame, run with `--no-fcs`.
 
 **microSD recording.** `sdcap 1` starts recording pcap directly to the card (`sdcap 0` stops); the *Record to
-SD* button on the dashboard does the same. The device writes the same radiotap / 802.15.4‑TAP format the host
+SD* button on the dashboard does the same. Both sinks give immediate feedback: the button latches to
+"Starting…"/"Stopping…" on press rather than waiting for the next poll, a toast reports the start and then the
+saved file with its frame count and size, and each sink shows how many files it has written this session. The
+RGB LED **pulses while recording** — cyan for the Mac, magenta for the card, white when both are running — and
+the LCD header shows `USB`, `SD` or `REC`. Capture is Wi‑Fi/802.15.4 only, so both controls are hidden in
+Bluetooth LE mode. The device writes the same radiotap / 802.15.4‑TAP format the host
 tool writes, so the files open in Wireshark unchanged. `sdinfo` reports card size and progress, `sdls` lists
 files and `sdread <path>` streams one back over serial so captures can be retrieved without ejecting the card.
 

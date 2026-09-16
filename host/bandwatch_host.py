@@ -290,6 +290,9 @@ class Bandwatch:
             "deauth": None,          # {"mac", "ch", "sent"} while a deauth attack runs
             "ble": {"devs": 0, "cycles": 0},
             "sd": None,              # {"mounted","mb","cap","file","frames","bytes","err","clock"}
+            # completed captures this session, per sink, for the dashboard counters
+            "saved": {"usb": {"count": 0, "last": None, "frames": 0, "bytes": 0},
+                      "sd":  {"count": 0, "last": None, "frames": 0, "bytes": 0}},
         }
         self.wifi_devs = {}
         self.ble_devs = {}
@@ -377,6 +380,25 @@ class Bandwatch:
         elif not mac:
             st["hunt"] = None
 
+    def _sd_track(self, sd):
+        """Watch the device's SD block for a recording that has just finished, so the dashboard can
+        show a count of completed files and the name of the last one."""
+        if not sd:
+            return
+        prev = getattr(self, "_sd_prev", None)
+        if sd.get("cap"):
+            # remember progress while it runs; the counters reset when the next capture starts
+            self._sd_prev = {"file": sd.get("file") or (prev or {}).get("file"),
+                             "frames": sd.get("frames", 0), "bytes": sd.get("bytes", 0)}
+        elif prev and prev.get("file"):
+            sv = self.state["saved"]["sd"]
+            sv["count"] += 1
+            sv["last"] = prev["file"]
+            sv["frames"] = prev.get("frames", 0)
+            sv["bytes"] = prev.get("bytes", 0)
+            self.state["log"].append(f"sd capture saved: {prev['file']} ({prev.get('frames', 0)} frames)")
+            self._sd_prev = None
+
     def _set_deauth(self, d):
         # device sends [bssid, park channel (0 if hopping), frames sent, frames failed] or null;
         # ack lines may carry a bare mac string. fail is optional for compatibility with older firmware.
@@ -440,6 +462,7 @@ class Bandwatch:
             self._set_deauth(msg.get("deauth"))
             if msg.get("sd") is not None:
                 st["sd"] = msg["sd"]
+                self._sd_track(st["sd"])
         elif t == "d":
             c = msg["c"]
             st["channels"][c] = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
@@ -462,6 +485,7 @@ class Bandwatch:
                 sd.update({"cap": msg["sdc"], "frames": msg.get("sdf", sd.get("frames", 0)),
                            "bytes": msg.get("sdb", sd.get("bytes", 0))})
                 st["sd"] = sd
+                self._sd_track(sd)
             self._hunt_update(msg.get("h"))
         elif t == "s":
             st["sweep"] = msg["n"]
@@ -509,6 +533,7 @@ class Bandwatch:
                     if k in msg:
                         sd["mounted" if k == "sd" else k] = msg[k]
                 st["sd"] = sd
+                self._sd_track(sd)
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
 
@@ -636,6 +661,11 @@ class Bandwatch:
         if self.pcap:
             self.pcap.close()
             self.state["log"].append(f"capture stopped: {self.pcap.path} ({self.pcap.frames} frames)")
+            sv = self.state["saved"]["usb"]
+            sv["count"] += 1
+            sv["last"] = self.pcap.path
+            sv["frames"] = self.pcap.frames
+            sv["bytes"] = self.pcap.bytes
             self.pcap = None
         self.state["capture"] = None
 
@@ -673,7 +703,7 @@ class Bandwatch:
             "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
             "channels": chans, "history": list(self.history), "capture": st["capture"],
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
+            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"], "saved": st["saved"],
             "oui_source": self.oui.source,
         }
 

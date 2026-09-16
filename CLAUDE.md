@@ -73,7 +73,10 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 - Serial protocol: `sendHello/sendDwell/sendSweep/sendDevices/sendBleStatus`, `handleCommand`. Keep it in sync
   with `host/bandwatch_host.py` (`handle_line`, `merge_*`) and `docs/DEVELOPER.md`.
 - LCD pages: `build*Page()` + `refresh*()`; add a page in the `Page` enum and `showPage()`.
-- Dashboard: `host/dashboard.html`, one `render*()` per section, polled from `/api/state` once a second.
+- Dashboard: `host/dashboard.html`, one `render*()` per section, polled from `/api/state` once a second. The
+  poll is only 1 Hz, so anything the user clicks must latch a local pending state (see `armPending`) or it
+  looks dead. `.capinfo` also carries `.control`, which is `display:grid` — override to block or inline
+  content lands on separate rows.
 
 ## Testing without the LCD
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON

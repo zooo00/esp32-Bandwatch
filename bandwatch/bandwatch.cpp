@@ -993,7 +993,8 @@ void releaseCapture() {
     CapFrame* r = capRing;
     capRing = nullptr;
     capSlots = 0;
-    capHead = capTail = 0;
+    capHead = 0;      // separate stores: chaining them reads back a volatile, which C++20 deprecates
+    capTail = 0;
     free(r);
 }
 

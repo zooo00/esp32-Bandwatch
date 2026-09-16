@@ -36,8 +36,16 @@ USB: the board's USB-C goes to the chip's native **USB-Serial-JTAG** (no externa
   `-DLV_CONF_PATH="<abs path>"` through `compiler.cpp.extra_flags` so the library and the sketch share one config.
   The Arduino **BLE** library (NimBLE backend) ships with the core. The 802.15.4 driver (`esp_ieee802154.h`,
   `libieee802154.a`) ships in the prebuilt IDF libs.
-- Host: Python 3 + `pyserial`. No other dependencies.
-- `setup.sh` installs all of the above on macOS (Homebrew) or a Linux box with arduino-cli on PATH.
+- Host: Python 3 + `pyserial`. No other dependencies. On a Homebrew Python (PEP 668 "externally managed")
+  a plain `pip install --user` is refused and there is no brew formula, so `setup.sh` falls back to
+  `--user --break-system-packages`.
+- `setup.sh` installs all of the above on macOS (Homebrew) or a Linux box with arduino-cli on PATH. The core
+  version is **pinned** there (`ESP32_CORE_VERSION`, default 3.3.11) because of the deauth offsets in §9.
+  On arm64 it also installs universal-ctags unconditionally: `build.sh` always routes ctags through
+  `tools/ctags/ctags`, which fails if universal-ctags is missing, whether or not Rosetta is available.
+- Reference build (core 3.3.11, lvgl 9.3.0): 0 errors, 0 warnings, **1 812 457 B flash (57 % of the 3 MB app
+  partition)** and **78 960 B static RAM (24 %)** — that static figure is close to the ~80 KB ceiling in
+  `CLAUDE.md` rule 4, so watch it when adding globals.
 - The core's `sdkconfig` is fixed (prebuilt). Relevant values: `CONFIG_SOC_WIFI_SUPPORT_5G=y`,
   `CONFIG_BT_NIMBLE_ENABLED=y`, `CONFIG_BT_NIMBLE_EXT_ADV` **not set** (no BLE 5 extended advertising),
   `CONFIG_IEEE802154_ENABLED=y`, `CONFIG_IEEE802154_RX_BUFFER_SIZE=20`, `CONFIG_SPIRAM=y` (harmless

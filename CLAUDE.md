@@ -52,8 +52,10 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    memory instead of failing. A `#warning` fires off 3.3.x; re-verify the offset table in `docs/DEVELOPER.md` §9.
 9. **Strings off the air are hostile input.** SSID / BLE name / country code are control-character-stripped at
    ingest and JSON-escaped on the way out; keep both, or a crafted beacon corrupts a whole protocol line.
-10. Apple Silicon without Rosetta: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags.
-   arduino-cli caches prototype generation — `rm -rf build` after touching the wrapper.
+10. Apple Silicon: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags. `build.sh`
+   routes ctags through that wrapper **always**, so `brew install universal-ctags` is required on arm64 even
+   when Rosetta is present (the wrapper exits if it cannot find it). arduino-cli caches prototype generation —
+   `rm -rf build` after touching the wrapper.
 
 ## Where to change things
 - Channel lists / dwell / scoring: top of `bandwatch.cpp` (`kChannels`, `kChanBand`, `kDwellMs`, `computeBusyScore`).

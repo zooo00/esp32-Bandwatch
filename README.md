@@ -78,8 +78,12 @@ Notes for this board:
 - **Never toggle DTR/RTS on the serial port** — the chip turns those edges into BOOT/EN pulses and reboots.
   The host tool and `build.sh` open the port with both lines held asserted. If you use another terminal:
   `arduino-cli monitor -p /dev/cu.usbmodem* -c baudrate=115200,dtr=on,rts=on`.
-- **Apple Silicon without Rosetta**: Arduino's bundled `ctags` is x86_64. `tools/ctags/ctags` wraps native
-  Universal Ctags (`brew install universal-ctags`, done by `setup.sh`).
+- **Apple Silicon**: Arduino's bundled `ctags` is x86_64. `build.sh` always routes ctags through
+  `tools/ctags/ctags`, which wraps native Universal Ctags, so `brew install universal-ctags` is needed on
+  arm64 even with Rosetta installed (`setup.sh` does it).
+- **Core version is pinned** to `esp32:esp32` **3.3.11** in `setup.sh` (override with `ESP32_CORE_VERSION=…`).
+  The deauth path depends on offsets inside that core's prebuilt `libnet80211.a`; see
+  [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §9 before bumping it.
 
 ## Host dashboard and pcap capture
 

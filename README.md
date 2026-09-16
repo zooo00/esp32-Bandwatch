@@ -28,11 +28,12 @@ a deauth attack is running — it never transmits.
   6LoWPAN, MAC‑secured), role (beaconing coordinator/router), **permit‑join** flag, LQI.
 - **Hunt**: pick one MAC (Wi‑Fi or BLE) and the LCD shows a big live RSSI with a bar, the LED colour tracks
   distance, the radio parks on the target's channel, and the dashboard plots the RSSI trend.
-- **Deauth**: pick an AP (its BSSID) over serial or from the dashboard and the radio parks on its channel and
-  spams deauth frames with the AP spoofed as sender; connected stations drop off and usually reconnect. Run a
-  capture at the same time to catch WPA2 handshakes. Stations with PMF (802.11w) enabled ignore it. The attack
-  stops itself after 5 minutes (`kDeauthMaxMs`) so a crashed host or an unplugged cable cannot leave the board
-  transmitting; re-send the command to continue. Only point it at networks you are authorised to test.
+- **Deauth** — ⚠️ **does not currently work; see [Known issues](#known-issues).** The intent: pick an AP (its
+  BSSID) over serial or from the dashboard, the radio parks on its channel and sends deauth frames with the AP
+  spoofed as sender, so connected stations drop off and reconnect (run a capture alongside to catch WPA2
+  handshakes). Stations with PMF (802.11w) enabled would ignore it by design. The attack stops itself after
+  5 minutes (`kDeauthMaxMs`) so a crashed host or an unplugged cable cannot leave the board transmitting.
+  Only point it at networks you are authorised to test.
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble → 802.15.4; on the
@@ -128,6 +129,33 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 `kChannels[]`, `kDwellMs` (220), `kStrongThresholdDbm` (−65), `kBusyEmaAlpha` (0.22), `kLongPressMs` (700),
 `kCapSlots` / `kCapMaxLen` (capture ring: 20 × 1600 B), `kCountryCode` ("EU", only affects the regulatory table),
 `kDeauthMaxMs` (5 min, the deauth dead‑man's switch).
+
+## Known issues
+
+**The deauth attack does not work** (as of 1.2.5, verified on hardware against a Ubiquiti AP). Frames are
+built and handed to the driver, the counters climb, no errors are returned — and no station is ever kicked.
+
+What was measured, on a real AP with a station of ours associated to it at −62 dBm:
+
+- The AP's own advertised client count (BSS-load IE) never changed during an attack, and the associated
+  station never dropped. Tried on a DFS channel (64) and a non-DFS channel (2) — no effect on either.
+- **PMF is not the explanation**: the target advertises PMF `none`.
+- **DFS is not the explanation**: it fails identically on a non-DFS channel.
+- The `deauth`/`da` counters mean "frames we handed to the driver", *not* frames that reached the air:
+  `ic_tx_pkt()` returns `void`, and `esp_wifi_80211_tx()` returning `ESP_OK` only means the frame was
+  accepted for queueing. Do not read a rising counter as a working attack.
+
+One real bug was found and fixed on the way: the frame was not a deauthentication frame at all. The code
+overwrote the driver's frame control with `0xC8 0x02` (type 2 / subtype 12 = a **QoS-Null data frame**), and
+the raw fallback used `0x80` (**Beacon**) and `0xD0` (**Action**). All are ignored by stations. The frame is
+now a correct `0xC0 0x00` deauthentication, confirmed by dumping the bytes handed to the MAC — but fixing it
+did not make the attack work, so at least one further cause remains unidentified.
+
+Whether anything is radiated at all is **still unverified in both directions**: the only witness available
+during testing was a macOS Wi-Fi scan, and macOS redacts SSIDs in `system_profiler` output, so a
+beacon-injection self-test (`txtest`) could not be read. Confirming this needs a second radio that can see
+raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mode. See
+[`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11 for the full investigation and the next steps.
 
 ## Limitations
 

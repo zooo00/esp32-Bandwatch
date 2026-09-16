@@ -52,7 +52,13 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    memory instead of failing. A `#warning` fires off 3.3.x; re-verify the offset table in `docs/DEVELOPER.md` §9.
 9. **Strings off the air are hostile input.** SSID / BLE name / country code are control-character-stripped at
    ingest and JSON-escaped on the way out; keep both, or a crafted beacon corrupts a whole protocol line.
-10. Apple Silicon: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags. `build.sh`
+10. **The deauth attack does not work** (verified on hardware, 1.2.5) and the counters do not tell you that:
+   `deauthSent`/`da` counts frames handed to the driver, `ic_tx_pkt()` returns `void`, and an `ESP_OK` from
+   `esp_wifi_80211_tx()` only means "queued". PMF and DFS have been ruled out; the frame itself is now a
+   correct `0xC0 0x00` deauth. Never claim it works without an external witness (a second radio in monitor
+   mode). Full log and next steps: `docs/DEVELOPER.md` §11. Note macOS redacts SSIDs in
+   `system_profiler SPAirPortDataType`, so a Mac Wi-Fi scan cannot identify an injected network by name.
+11. Apple Silicon: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags. `build.sh`
    routes ctags through that wrapper **always**, so `brew install universal-ctags` is required on arm64 even
    when Rosetta is present (the wrapper exits if it cannot find it). arduino-cli caches prototype generation —
    `rm -rf build` after touching the wrapper.
@@ -67,8 +73,12 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 ## Testing without the LCD
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only), `reboot`.
+Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
+SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `softap <ch>|0`
+(**proof of concept**: open SoftAP on that channel, injects from `WIFI_IF_AP`; tears down sniffing while up,
+and its state handling is incomplete — do not build on it as-is).
 Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11.

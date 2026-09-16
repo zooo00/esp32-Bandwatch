@@ -264,3 +264,58 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
   (`sanitizeText`) so `printJsonStr` cannot expand them into `\u00xx` escapes that overshoot the `serialRoom()`
   budget for a line. The budgets (`40 + n*110` Wi‑Fi, `40 + n*95` BLE) are estimates, not exact lengths: a full
   64-device table already needs ~7 KB of the 8 KB TX buffer, so raising them is not free.
+
+## 11. Deauth: why it does not work (investigation log, 1.2.5)
+
+Read this before spending another evening on the deauth path. Tested on hardware against a Ubiquiti AP
+(WPA2-PSK, 5 GHz ch 64 80 MHz, and its 2.4 GHz ch 2 BSS) with a laptop associated to it at −62 dBm.
+
+**Symptom.** Frames are built, handed to the driver and counted; no station is ever kicked. The AP's
+BSS-load client count does not move and the associated laptop stays connected.
+
+**Ruled out** (each tested, not assumed):
+
+| Hypothesis | How it was tested | Result |
+| --- | --- | --- |
+| PMF / 802.11w protecting the BSS | read the RSN capabilities out of the beacon | PMF is `none` — not it |
+| DFS blocking TX on channel 64 | ran the identical attack on non-DFS ch 2 | fails identically — not it |
+| Promiscuous mode blocking TX | `esp_wifi_set_promiscuous(false)` then inject | no change — not it |
+
+**One real bug, found and fixed.** `sendInternalKick()` let the driver build a proper deauth and then
+overwrote the frame control with `0xC8 0x02`. That decodes as type 2 / subtype 12 — a **QoS-Null data
+frame**, which every station ignores. The raw fallback was no better: `0x80` is a **Beacon** and `0xD0` an
+**Action** frame (they were chosen to get past `ieee80211_raw_frame_sanity_check`, which rejects real deauth
+subtypes — i.e. the check was being satisfied with frames that could never work). Both paths now emit a
+correct `0xC0 0x00` deauthentication. Verified by dumping the bytes as handed to the MAC:
+
+```
+c0 00  32 00  ff ff ff ff ff ff  78 8a 20 8e 9e f0  78 8a 20 8e 9e f0  00 00  07 00
+FC     dur    addr1 DA=broadcast  addr2 SA=AP        addr3 BSSID=AP      seq    reason 7
+```
+
+That is a textbook broadcast deauth — and it still kicks nobody, so at least one further cause remains.
+
+**The counters lie.** `deauthSent` (`da`, and element 3 of `deauth`) is incremented at the end of
+`sendInternalKick()` unconditionally; `ic_tx_pkt()` returns `void`. On the raw path, `esp_wifi_80211_tx()`
+returning `ESP_OK` only means the frame was accepted for queueing. **Neither proves anything reached the
+air.** Any future work here needs an external witness before claiming success.
+
+**Unresolved: does the radio transmit at all?** `txtest 1` injects a beacon with SSID `BANDWATCH-TXTEST`,
+and `softap <ch>` (proof of concept only, not a feature) brings up an open SoftAP to give the MAC a real BSS
+context and injects from `WIFI_IF_AP`. Neither could be evaluated: the only witness to hand was a macOS
+Wi-Fi scan, and **macOS redacts every SSID** in `system_profiler SPAirPortDataType` output, so injected
+networks cannot be identified by name. A channel+security signature works around the redaction
+(an open AP on a quiet channel shows up as `Channel: N` + `Security: None`) but the SoftAP PoC's own state
+handling is incomplete, so its result is inconclusive rather than negative. Do not cite it either way.
+
+**Next steps, in order of value:**
+
+1. Get a real witness: a second ESP32 in promiscuous mode, or a USB adapter in monitor mode on the target
+   channel. Everything below is guesswork without one.
+2. With a witness, settle the open question — does *any* frame radiate? Start with `txtest` (plain STA),
+   then the SoftAP PoC. If the SoftAP's own driver-generated beacon is not on the air, the problem is the
+   radio/driver configuration, not this code.
+3. If frames do radiate but stations ignore them, look at the rate/PHY config
+   (`esp_wifi_config_80211_tx()` is pinned to HT20 MCS0) and at whether the sequence number and duration
+   survive the driver's TX path.
+4. Only then revisit the reverse-engineered offsets in §9.

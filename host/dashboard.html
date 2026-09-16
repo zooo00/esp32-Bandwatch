@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bandwatch</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --ink-2: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --series: #2a78d6; --series-soft: #cde2fb; --accent-ink: #1c5cab;
+    --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --page: #0d0d0d; --surface: #1a1a19; --ink: #ffffff; --ink-2: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+      --series: #3987e5; --series-soft: #184f95; --accent-ink: #86b6ef;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 20px 16px 40px; }
+  .wrap { max-width: 1100px; margin: 0 auto; display: grid; gap: 14px; }
+  header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+  header h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; color: var(--ink-2); background: var(--surface); }
+  .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pill.on .dot { background: var(--good); }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; font-weight: 600; color: var(--ink-2); margin: 0 0 8px; letter-spacing: .01em; }
+  .card h2 small { font-weight: 400; color: var(--muted); margin-left: 6px; }
+  .controls { display: flex; flex-wrap: wrap; gap: 18px; align-items: end; }
+  .control { display: grid; gap: 4px; }
+  .control label { font-size: 12px; color: var(--muted); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .seg button { border: 0; background: transparent; color: var(--ink-2); padding: 6px 12px; cursor: pointer; font: inherit; }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button.active { background: var(--series); color: #fff; }
+  select, input[type=number] { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--page); color: var(--ink); }
+  input[type=number] { width: 90px; }
+  button.primary { font: inherit; padding: 7px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--series); color: #fff; cursor: pointer; }
+  button.primary.stop { background: var(--critical); }
+  .capinfo { font-size: 12px; color: var(--ink-2); }
+  .capinfo code { font-size: 12px; }
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .tile { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; display: grid; gap: 2px; }
+  .tile .label { font-size: 12px; color: var(--muted); }
+  .tile .value { font-size: 26px; font-weight: 600; line-height: 1.15; }
+  .tile.hero .value { font-size: 44px; }
+  .tile .sub { font-size: 12px; color: var(--ink-2); }
+  .chart-wrap { position: relative; }
+  svg { width: 100%; height: auto; display: block; overflow: visible; }
+  .bar { fill: var(--series); }
+  .bar.nodata { fill: var(--grid); }
+  .bar.unavail { fill: none; stroke: var(--axis); stroke-dasharray: 0; }
+  .hit { fill: transparent; cursor: default; }
+  .hit:hover + .bar, .bar.hover { filter: brightness(1.15); }
+  .grid line { stroke: var(--grid); stroke-width: 1; }
+  .axis text { fill: var(--muted); font-size: 11px; }
+  .axis .band { fill: var(--ink-2); font-weight: 600; }
+  .marker { fill: var(--ink); }
+  .dl { fill: var(--ink); font-size: 12px; font-weight: 600; }
+  .line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .area { fill: var(--series); opacity: .10; }
+  .cross { stroke: var(--axis); stroke-width: 1; }
+  .enddot { fill: var(--series); stroke: var(--surface); stroke-width: 2; }
+  .tip { position: absolute; pointer-events: none; background: var(--ink); color: var(--page); padding: 6px 9px; border-radius: 6px; font-size: 12px; line-height: 1.35; white-space: nowrap; transform: translate(-50%, -110%); display: none; z-index: 2; }
+  .tip b { font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  th:first-child, td:first-child { text-align: left; }
+  tr.current td:first-child { color: var(--accent-ink); font-weight: 600; }
+  tr.current td:first-child::after { content: " \25C0"; font-size: 10px; }
+  .log { font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink-2); white-space: pre-wrap; max-height: 160px; overflow: auto; }
+  .stale { opacity: .55; }
+  .note { font-size: 12px; color: var(--muted); }
+  .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <header>
+    <h1>Bandwatch</h1>
+    <span class="pill" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
+    <span class="note" id="fw"></span>
+  </header>
+
+  <section class="card">
+    <div class="controls">
+      <div class="control">
+        <label>Band</label>
+        <div class="seg" id="bandSeg">
+          <button data-band="5g">5 GHz</button>
+          <button data-band="2.4g">2.4 GHz</button>
+          <button data-band="both">Both</button>
+        </div>
+      </div>
+      <div class="control">
+        <label>Channel</label>
+        <select id="park"><option value="0">hopping (sweep)</option></select>
+      </div>
+      <div class="control">
+        <label>Snap length (bytes)</label>
+        <input type="number" id="snap" value="1600" min="32" max="1600" step="1">
+      </div>
+      <div class="control">
+        <label>&nbsp;</label>
+        <button class="primary" id="capBtn">Start pcap capture</button>
+      </div>
+      <div class="control capinfo" id="capInfo"></div>
+    </div>
+  </section>
+
+  <section class="tiles">
+    <div class="tile hero"><div class="label">Max busy score</div><div class="value" id="tGlobal">–</div><div class="sub" id="tGlobalSub">maximum of smoothed channel scores</div></div>
+    <div class="tile"><div class="label">Listening on</div><div class="value" id="tCur">–</div><div class="sub" id="tCurSub"></div></div>
+    <div class="tile"><div class="label">Busiest channel</div><div class="value" id="tTop">–</div><div class="sub" id="tTopSub"></div></div>
+    <div class="tile"><div class="label">Sweeps</div><div class="value" id="tSweep">–</div><div class="sub" id="tSweepSub"></div></div>
+    <div class="tile"><div class="label">Transmitters (est.)</div><div class="value" id="tAps">–</div><div class="sub">peak unique senders per 3 s</div></div>
+  </section>
+
+  <section class="card">
+    <h2>Busy score by channel <small>0–100, smoothed · hover for details</small></h2>
+    <div class="chart-wrap"><svg id="bars" viewBox="0 0 1000 300"></svg><div class="tip" id="barTip"></div></div>
+  </section>
+
+  <div class="grid2">
+    <section class="card">
+      <h2>Max busy score over time <small>last 10 minutes</small></h2>
+      <div class="chart-wrap"><svg id="trend" viewBox="0 0 700 180"></svg><div class="tip" id="trendTip"></div></div>
+    </section>
+    <section class="card">
+      <h2>Device log</h2>
+      <div class="log" id="log"></div>
+    </section>
+  </section>
+
+  <section class="card">
+    <h2>Channels <small>last completed dwell per channel</small></h2>
+    <div style="overflow-x:auto"><table id="tbl"><thead><tr>
+      <th>Channel</th><th>Band</th><th>Score</th><th>Raw</th><th>Frames</th><th>pkt/s</th><th>B/s</th><th>Talkers</th><th>Strong</th><th>Updated</th>
+    </tr></thead><tbody></tbody></table></div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const DWELL_S = 0.22;
+  let state = null, dwellS = DWELL_S, lastGood = 0;
+  const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
+  const rate = (n) => n >= 10000 ? (n / 1000).toFixed(0) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n.toFixed(0);
+  const band = (c) => c > 14 ? '5 GHz' : '2.4 GHz';
+  const post = (body) => fetch('/api/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  $('#bandSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) post({ cmd: 'band', value: b.dataset.band }); });
+  $('#park').addEventListener('change', (e) => post({ cmd: 'park', value: +e.target.value }));
+  $('#capBtn').addEventListener('click', () => {
+    const on = !!(state && state.capture);
+    post({ cmd: 'capture', value: !on, snaplen: +$('#snap').value || 1600 });
+  });
+
+  function renderControls(s) {
+    document.querySelectorAll('#bandSeg button').forEach(b => b.classList.toggle('active', b.dataset.band === s.band));
+    const sel = $('#park');
+    const want = ['0', ...s.channels.map(c => String(c.ch))].join(',');
+    if (sel.dataset.chs !== want) {
+      sel.innerHTML = '<option value="0">hopping (sweep)</option>' + s.channels.map(c => `<option value="${c.ch}">park on ch ${c.ch} (${band(c.ch)})</option>`).join('');
+      sel.dataset.chs = want;
+    }
+    if (document.activeElement !== sel) sel.value = String(s.park || 0);
+    const cap = s.capture;
+    $('#capBtn').textContent = cap ? 'Stop capture' : 'Start pcap capture';
+    $('#capBtn').classList.toggle('stop', !!cap);
+    $('#capInfo').innerHTML = cap
+      ? `<b>${fmt(cap.frames)}</b> frames · ${fmt(cap.bytes / 1024, 1)} KB · device drops ${fmt(s.drop)}<br><code>${cap.file}</code>`
+      : `pcap files go to <code>${s.captures_dir}</code> (radiotap, open in Wireshark)`;
+  }
+
+  function renderTiles(s) {
+    $('#tGlobal').textContent = fmt(s.global);
+    const cur = s.channels.find(c => c.ch === s.current);
+    $('#tCur').textContent = s.current ? 'ch ' + s.current : '–';
+    $('#tCurSub').textContent = cur ? `${band(s.current)} · score ${fmt(cur.s)} · ${rate(cur.f / dwellS)} pkt/s${s.park ? ' · parked' : ''}` : (s.park ? 'parked' : 'hopping');
+    const top = [...s.channels].filter(c => c.state === 0).sort((a, b) => b.s - a.s)[0];
+    $('#tTop').textContent = top ? 'ch ' + top.ch : '–';
+    $('#tTopSub').textContent = top ? `score ${fmt(top.s)} · ${rate(top.b / dwellS)} B/s · ${top.u} talkers` : '';
+    $('#tSweep').textContent = fmt(s.sweep);
+    $('#tSweepSub').textContent = `${s.channels.length} channels · ${(s.channels.length * dwellS).toFixed(1)} s per sweep`;
+    $('#tAps').textContent = fmt(s.aps);
+  }
+
+  function renderBars(s) {
+    const svg = $('#bars'), W = 1000, H = 300, padL = 36, padR = 10, padT = 24, padB = 44;
+    const chs = s.channels; if (!chs.length) { svg.innerHTML = ''; return; }
+    const plotW = W - padL - padR, plotH = H - padT - padB;
+    // group gaps between 2.4 GHz / UNII-1+2A / UNII-2C / UNII-3
+    const groupOf = (c) => c <= 14 ? 0 : c <= 64 ? 1 : c <= 144 ? 2 : 3;
+    const gaps = []; let ng = 0;
+    for (let i = 1; i < chs.length; i++) if (groupOf(chs[i].ch) !== groupOf(chs[i - 1].ch)) ng++;
+    const gapW = 14, slot = (plotW - ng * gapW) / chs.length, bw = Math.min(24, Math.max(3, slot - 2));
+    const y = (v) => padT + plotH - (v / 100) * plotH;
+    let x = padL, out = [], xs = [];
+    const maxCh = [...chs].filter(c => c.state === 0).sort((a, b) => b.s - a.s)[0];
+    out.push('<g class="grid">' + [0, 25, 50, 75, 100].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('') + '</g>');
+    out.push('<g class="axis">' + [0, 25, 50, 75, 100].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('') + '</g>');
+    const labels = [];
+    chs.forEach((c, i) => {
+      if (i > 0 && groupOf(c.ch) !== groupOf(chs[i - 1].ch)) x += gapW;
+      const cx = x + slot / 2, bx = cx - bw / 2;
+      xs.push(cx);
+      const v = c.state === 0 ? c.s : 0, top = y(v), h = Math.max(0, y(0) - top), r = Math.min(4, h);
+      const cls = c.state === 2 ? 'bar unavail' : c.state === 1 ? 'bar nodata' : 'bar';
+      const path = c.state === 0 && h > 0
+        ? `M${bx},${y(0)} v${-(h - r)} a${r},${r} 0 0 1 ${r},${-r} h${bw - 2 * r} a${r},${r} 0 0 1 ${r},${r} v${h - r} z`
+        : `M${bx},${y(0) - 2} h${bw} v2 h${-bw} z`;
+      out.push(`<rect class="hit" data-i="${i}" x="${x}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
+      out.push(`<path class="${cls}" data-i="${i}" d="${path}"/>`);
+      if (c.ch === s.current) out.push(`<path class="marker" d="M${cx - 5},${y(0) + 30} l5,-6 l5,6 z"/>`);
+      if (maxCh && c.ch === maxCh.ch && c.s > 0) labels.push(`<text class="dl" x="${cx}" y="${top - 6}" text-anchor="middle">${fmt(c.s)}</text>`);
+      const showTick = chs.length <= 26 || c.ch <= 14 && c.ch % 2 === 1 || c.ch > 14 && [36, 48, 52, 64, 100, 116, 132, 144, 149, 165].includes(c.ch);
+      if (showTick) out.push(`<text class="axis" x="${cx}" y="${y(0) + 16}" text-anchor="middle" style="fill:var(--muted);font-size:11px">${c.ch}</text>`);
+      x += slot;
+    });
+    // band captions
+    const groups = {}; chs.forEach((c, i) => { const g = groupOf(c.ch); (groups[g] = groups[g] || []).push(xs[i]); });
+    const names = { 0: '2.4 GHz', 1: '5 GHz UNII-1 / 2A', 2: 'UNII-2C (DFS)', 3: 'UNII-3' };
+    for (const g in groups) { const a = groups[g]; out.push(`<text class="axis band" x="${(a[0] + a[a.length - 1]) / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">${names[g]}</text>`); }
+    out.push(labels.join(''));
+    svg.innerHTML = out.join('');
+    const tip = $('#barTip'), wrap = svg.parentElement;
+    svg.querySelectorAll('.hit').forEach(h => {
+      h.addEventListener('mousemove', (e) => {
+        const c = chs[+h.dataset.i]; const r = wrap.getBoundingClientRect();
+        tip.style.display = 'block'; tip.style.left = (e.clientX - r.left) + 'px'; tip.style.top = (e.clientY - r.top) + 'px';
+        tip.innerHTML = c.state === 2 ? `<b>ch ${c.ch}</b> rejected by driver` : c.state === 1 ? `<b>ch ${c.ch}</b> no data yet`
+          : `<b>ch ${c.ch}</b> · ${band(c.ch)}<br>score ${fmt(c.s)} (raw ${fmt(c.r)})<br>${rate(c.f / dwellS)} pkt/s · ${rate(c.b / dwellS)} B/s<br>${c.u} talkers · ${c.st} strong of ${c.f}`;
+      });
+      h.addEventListener('mouseleave', () => tip.style.display = 'none');
+    });
+  }
+
+  function renderTrend(s) {
+    const svg = $('#trend'), W = 700, H = 180, padL = 30, padR = 12, padT = 10, padB = 22;
+    const pts = s.history || [];
+    if (pts.length < 2) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:12px">collecting…</text>'; return; }
+    const t0 = pts[0][0], t1 = pts[pts.length - 1][0], span = Math.max(60, t1 - t0);
+    const x = (t) => padL + ((t - t0) / span) * (W - padL - padR), y = (v) => padT + (H - padT - padB) - (v / 100) * (H - padT - padB);
+    const d = pts.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1)).join(' ');
+    const area = d + ` L${x(t1).toFixed(1)},${y(0)} L${x(t0).toFixed(1)},${y(0)} z`;
+    const last = pts[pts.length - 1];
+    svg.innerHTML = `<g class="grid">${[0, 50, 100].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
+      <g class="axis">${[0, 50, 100].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('')}
+      <text x="${padL}" y="${H - 6}">${new Date(t0 * 1000).toLocaleTimeString()}</text><text x="${W - padR}" y="${H - 6}" text-anchor="end">now</text></g>
+      <path class="area" d="${area}"/><path class="line" d="${d}"/>
+      <circle class="enddot" cx="${x(last[0])}" cy="${y(last[1])}" r="4"/>
+      <line class="cross" id="crossLine" x1="0" x2="0" y1="${padT}" y2="${H - padB}" style="display:none"/>`;
+    const tip = $('#trendTip'), wrap = svg.parentElement, cl = svg.querySelector('#crossLine');
+    svg.onmousemove = (e) => {
+      const r = svg.getBoundingClientRect(); const mx = (e.clientX - r.left) / r.width * W;
+      let best = pts[0], bd = 1e9; for (const p of pts) { const dd = Math.abs(x(p[0]) - mx); if (dd < bd) { bd = dd; best = p; } }
+      cl.style.display = 'block'; cl.setAttribute('x1', x(best[0])); cl.setAttribute('x2', x(best[0]));
+      const wr = wrap.getBoundingClientRect();
+      tip.style.display = 'block'; tip.style.left = (x(best[0]) / W * r.width) + 'px'; tip.style.top = (y(best[1]) / H * r.height) + 'px';
+      tip.innerHTML = `<b>${fmt(best[1])}</b> max busy<br>${new Date(best[0] * 1000).toLocaleTimeString()} · on ch ${best[2]} (${fmt(best[3])})`;
+    };
+    svg.onmouseleave = () => { tip.style.display = 'none'; cl.style.display = 'none'; };
+  }
+
+  function renderTable(s) {
+    const tb = $('#tbl tbody'), now = Date.now() / 1000;
+    tb.innerHTML = s.channels.map(c => `<tr class="${c.ch === s.current ? 'current' : ''}">
+      <td>ch ${c.ch}</td><td>${band(c.ch)}</td>
+      ${c.state === 2 ? '<td colspan="8" style="text-align:left;color:var(--muted)">rejected by driver (not selectable)</td>'
+        : c.state === 1 ? '<td colspan="8" style="text-align:left;color:var(--muted)">no data yet</td>'
+        : `<td>${fmt(c.s)}</td><td>${fmt(c.r)}</td><td>${fmt(c.f)}</td><td>${rate(c.f / dwellS)}</td><td>${rate(c.b / dwellS)}</td><td>${c.u}</td><td>${c.st}</td><td>${c.t ? fmt(now - c.t) + ' s ago' : '–'}</td>`}
+    </tr>`).join('');
+  }
+
+  function render(s) {
+    state = s;
+    if (s.hello && s.hello.dwell_ms) dwellS = s.hello.dwell_ms / 1000;
+    $('#conn').classList.toggle('on', !!s.connected);
+    $('#connText').textContent = s.connected ? `${s.port}${s.age != null ? ' · ' + s.age + ' s ago' : ''}` : 'no device';
+    $('#fw').textContent = s.hello ? `firmware ${s.hello.fw} ${s.hello.ver || ''} · band ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
+    renderControls(s); renderTiles(s); renderBars(s); renderTrend(s); renderTable(s);
+    $('#log').textContent = (s.log || []).join('\n');
+    $('#app').classList.toggle('stale', !s.connected);
+  }
+
+  async function tick() {
+    try { const r = await fetch('/api/state', { cache: 'no-store' }); render(await r.json()); lastGood = Date.now(); }
+    catch (e) { if (Date.now() - lastGood > 3000) $('#app').classList.add('stale'); }
+    setTimeout(tick, 1000);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>

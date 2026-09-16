@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+"""Native-arm64 stand-in for Arduino's bundled x86_64 ctags (which needs Rosetta on Apple Silicon).
+
+arduino-cli runs:  ctags -u --language-force=c++ -f - --c++-kinds=svpf --fields=KSTtzns --line-directives <file>
+Universal Ctags (brew install universal-ctags) honours the *filename* of `#line` directives but not the
+line number, and emits `typeref:typename:T` instead of Arduino's patched `returntype:T`. This wrapper
+runs it with --line-directives=no and fixes both up from the source's `#line` directives itself.
+"""
+import os, re, subprocess, sys
+
+CANDIDATES = [os.environ.get("UNIVERSAL_CTAGS", ""), "/opt/homebrew/bin/ctags", "/usr/local/bin/ctags"]
+ct = next((c for c in CANDIDATES if c and os.access(c, os.X_OK)), None)
+if not ct:
+    sys.exit("universal-ctags not found (brew install universal-ctags)")
+
+args = [a for a in sys.argv[1:] if not a.startswith("--line-directives")]
+src = args[-1]
+
+# physical line -> (logical file, logical line)
+mapping = {}
+cur_file, cur_line = src, 1
+# Handles both `#line N "file"` and GCC preprocessor linemarkers `# N "file" flags`.
+line_re = re.compile(r'^\s*#\s*(?:line\s+)?(\d+)(?:\s+"([^"]*)")?')
+with open(src, encoding="utf-8", errors="replace") as f:
+    for phys, text in enumerate(f, 1):
+        m = line_re.match(text)
+        if m:
+            cur_line = int(m.group(1))
+            if m.group(2):
+                cur_file = m.group(2)
+            mapping[phys] = None
+            continue
+        mapping[phys] = (cur_file, cur_line)
+        cur_line += 1
+
+out = subprocess.run([ct, *args[:-1], "--line-directives=no", src], capture_output=True, text=True)
+sys.stderr.write(out.stderr)
+for row in out.stdout.splitlines():
+    cols = row.split("\t")
+    if len(cols) < 3 or row.startswith("!_TAG"):
+        continue
+    fixed = []
+    logical = None
+    for c in cols:
+        if c.startswith("line:"):
+            phys = int(c[5:])
+            logical = mapping.get(phys)
+            if logical:
+                c = f"line:{logical[1]}"
+        elif c.startswith("typeref:typename:"):
+            c = "returntype:" + c[len("typeref:typename:"):]
+        fixed.append(c)
+    if logical:
+        fixed[1] = logical[0]
+    print("\t".join(fixed))
+sys.exit(out.returncode)

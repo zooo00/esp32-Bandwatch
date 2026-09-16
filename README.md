@@ -48,6 +48,11 @@ a deauth attack is running — it never transmits.
 - **RGB LED** mirrors the max busy score (green → yellow → orange → red).
 - **USB serial protocol** (JSON lines) for the host tool: live stats, band/park/capture commands, and raw
   802.11 frames streamed as base64 so the Mac writes standard **pcap** files.
+- **BLE capture**: Bluetooth LE advertising packets record to pcap too (link type 256, BLE LL with
+  pseudo-header) and dissect in Wireshark with correct PDU types, addresses and manufacturer data.
+  Advertising only — reconstructed from HCI reports, so no connections, no channel number and no real CRC;
+  see [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §13. `blescan passive|active` trades silence for the device
+  names that only appear in scan responses.
 - **microSD pcap recording**: the device writes the pcap itself (`sdcap 1`), so a capture does not depend on
   USB throughput. The two sinks are independent — record to card and watch live in Wireshark at the same
   time. Files can be listed and pulled back over serial without ejecting the card.

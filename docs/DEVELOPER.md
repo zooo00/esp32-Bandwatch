@@ -374,3 +374,50 @@ every `kSdFlushMs` (5 s), so a power cut costs at most a few seconds. Because ca
 tens of milliseconds and `hopIfNeeded()` shares this task, `drainCapture()` gives SD at most `kSdBudgetUs`
 (8 ms) per loop iteration. Park on one channel for long captures; while hopping, heavy SD load will skew
 dwell timing and therefore the busy score.
+
+
+## 13. BLE capture (1.4)
+
+BLE records as `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR` (256). Verified with Wireshark: 2276/2276 packets
+dissected, zero malformed, correct `ADV_IND` / `ADV_NONCONN_IND` / `SCAN_RSP` types, addresses and company
+IDs resolved.
+
+**Why the Arduino BLEScan wrapper had to go.** `BLEAdvertisedDevice` cannot give packet-accurate data:
+`parseAdvertisement()` *merges* every payload from an address into one growing buffer (its own comment:
+"handles both ADV and Scan Response packets by merging them"), so `getPayload()` is an accumulation rather
+than a packet; with active scanning `onResult()` fires only once the scan response arrives, with the merged
+device; and `setAdvType()` is recorded only when the device is first created, so the PDU type goes stale.
+There is no `setMaxResults()` in the wrapper's public API to force per-report objects. Bandwatch therefore
+drives `ble_gap_disc()` directly (`host/ble_gap.h` ships with the core) with its own GAP event handler, and
+parses AD structures itself (`parseAdStructures`). Approach borrowed from
+[shermanatoor/ouispy-blesniff](https://github.com/shermanatoor/ouispy-blesniff).
+
+Side benefits: no library result cache, so the heap-floor dance `serviceBle()` used to do is gone and BLE
+mode now idles at ~95 kB free instead of ~58 kB, and the device table sees slightly more devices.
+
+**Record layout** — 10-byte pseudo-header written by the pcap writers from `f.channel`/`f.rssi`, then the
+reconstructed LL packet built by `buildBleLlFrame()`:
+
+| field | value |
+| --- | --- |
+| phdr channel | 39 — the HCI report does not say which of 37/38/39 it arrived on |
+| phdr flags | `0x0013` dewhitened + signal-power-valid + ref-AA-valid; `0x0011` when RSSI is 127 (the HCI "not available" sentinel) |
+| CRC-checked / CRC-valid flags | **deliberately clear** — we synthesize a zero CRC, and claiming "checked" would make Wireshark mark every frame CRC-bad |
+| access address | `0x8E89BED6` (advertising channel) |
+| LL header | PDU type in bits 0-3, TxAdd set when AdvA is random. RxAdd left clear: the report never carries TargetA's type, and guessing writes a fabricated fact into the capture |
+| length field | 6 bits covering AdvA + AdvData, so AdvData is **truncated** at 57 — masking an over-long length wraps it to a bogus value and Wireshark mis-dissects the record |
+| CRC | three zero bytes |
+
+HCI event types are **not** the same numbers as LL PDU types (`ADV_SCAN_IND` is HCI 2 but LL 0x6,
+`ADV_NONCONN_IND` is HCI 3 but LL 0x2) — `llPduTypeFromHci()` maps them.
+
+**What this is not.** Advertising packets only, reconstructed from HCI reports. No connection or data-channel
+traffic, no real channel number, no real CRC, legacy advertising only (extended advertising is compiled out
+of the core). It is not a BLE sniffer in the Ubertooth/nRF sense and must not be described as one.
+
+**Passive vs active** (`blescan passive|active`, default passive). Passive only listens, so we never
+transmit, but most device names live in scan responses that only arrive if something sends `SCAN_REQ` —
+measured: 2 named devices passive vs. many more active. Active scanning solicits them, which both fills in
+names and puts genuine `SCAN_RSP` packets in the capture as their own records; the cost is that the board is
+transmitting. Note the pre-1.4 code used active scanning unconditionally, so the README's "never transmits"
+claim was already inaccurate in BLE mode.

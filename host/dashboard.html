@@ -156,7 +156,7 @@
       </div>
       <div class="control capinfo" id="capInfo"></div>
       <div class="control capinfo" id="sdInfo"></div>
-      <div class="control capinfo" id="bleCapNote" style="display:none">pcap capture (Mac or microSD) is available in Wi‑Fi and 802.15.4 modes, not in Bluetooth LE</div>
+      <div class="control capinfo" id="bleCapNote" style="display:none">BLE capture records <b>advertising packets only</b>, reconstructed from HCI reports — no connections, no channel number. See DEVELOPER.md §13.</div>
     </div>
   </section>
 
@@ -346,9 +346,10 @@
   function renderControls(s) {
     document.querySelectorAll('#bandSeg button').forEach(b => b.classList.toggle('active', b.dataset.band === s.band));
     const wifi = s.band !== 'ble';
-    // Capture (either sink) needs a hopping mode; BLE has neither channels nor a pcap link type.
-    for (const id of ['#parkCtl', '#snapCtl', '#capCtl', '#sdCtl', '#capInfo', '#sdInfo'])
-      $(id).style.display = wifi ? '' : 'none';
+    // Capture works in every mode now (radiotap / 802.15.4-TAP / BLE LL). Only channel parking is
+    // meaningless in BLE, which has no channel list of its own.
+    $('#parkCtl').style.display = wifi ? '' : 'none';
+    for (const id of ['#snapCtl', '#capCtl', '#sdCtl', '#capInfo', '#sdInfo']) $(id).style.display = '';
     $('#bleCapNote').style.display = wifi ? 'none' : '';
     const sel = $('#park');
     const want = ['0', ...s.channels.map(c => String(c.ch))].join(',');

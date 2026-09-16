@@ -22,6 +22,9 @@ Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "
 "deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), "sdcap 0|1" (record pcap on the
 device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info".
 
+pcap link types written: 127 radiotap (Wi-Fi), 283 IEEE 802.15.4-TAP, 256 BLE LL with pseudo-header. BLE
+records are advertising packets reconstructed from HCI reports - see docs/DEVELOPER.md section 13.
+
 The device has no RTC, so this tool sends "time <epoch>" on connect; without it the device names SD captures
 with a counter and timestamps them from uptime. Device-written filenames use UTC; files written here use
 local time.
@@ -233,6 +236,7 @@ class PcapWriter:
 
     RT_PRESENT = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 5)
     RT_LEN = 24
+    ADV_ACCESS_ADDR = 0x8E89BED6      # BLE advertising-channel access address
 
     def __init__(self, path, fcs_present=True, link="wifi"):
         self.path = path
@@ -241,11 +245,19 @@ class PcapWriter:
         self.frames = 0
         self.bytes = 0
         self.f = open(path, "wb")
-        self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 283 if link == "154" else 127))
+        linktype = {"154": 283, "ble": 256}.get(link, 127)   # 802.15.4-TAP / BLE LL w/ phdr / radiotap
+        self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, linktype))
         self.lock = threading.Lock()
 
     def write(self, ch, rssi, ts_us, orig_len, data):
-        if self.link == "154":
+        if self.link == "ble":
+            # LE_LL_WITH_PHDR: channel, signal power, noise, AA offenses, reference AA, flags.
+            # CRC-checked/valid bits stay clear - the device synthesizes a zero CRC, and claiming
+            # "checked" would make Wireshark flag every frame as CRC-bad. 127 = RSSI not available.
+            flags = 0x0011 if rssi == 127 else 0x0013
+            rt = struct.pack("<BbBBIH", ch if ch <= 39 else 39, max(-128, min(127, rssi)), 0, 0,
+                             self.ADV_ACCESS_ADDR, flags)
+        elif self.link == "154":
             # TAP header: version, reserved, total length; TLVs padded to 4 bytes
             rt = struct.pack("<BBH", 0, 0, 28)
             rt += struct.pack("<HHB3x", 0, 1, 0)                                   # FCS type: none (radio strips it)
@@ -645,8 +657,10 @@ class Bandwatch:
             return self.state["capture"]
         os.makedirs(self.captures_dir, exist_ok=True)
         band = self.state["band"]
-        link = "154" if band == "154" else "wifi"
-        path = os.path.join(self.captures_dir, time.strftime("bandwatch-%s-%%Y%%m%%d-%%H%%M%%S.pcap" % ("802154" if link == "154" else "wifi")))
+        link = "154" if band == "154" else "ble" if band == "ble" else "wifi"
+        path = os.path.join(self.captures_dir,
+                            time.strftime("bandwatch-%s-%%Y%%m%%d-%%H%%M%%S.pcap"
+                                          % ({"154": "802154", "ble": "ble"}.get(link, "wifi"))))
         self.pcap = PcapWriter(path, fcs_present=self.fcs_present, link=link)
         self.cap_band = band
         self.state["capture"] = {"file": path, "frames": 0, "bytes": 0, "started": time.time()}

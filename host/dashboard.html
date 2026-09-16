@@ -76,7 +76,8 @@
   th.l, td.l { text-align: left; }
   td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
   td .sub { color: var(--muted); font-size: 11px; }
-  tr.hunted td.l:first-child { color: var(--accent-ink); font-weight: 600; }
+  tr.hunted td.l:first-child, tr.kicked td.l:first-child { color: var(--accent-ink); font-weight: 600; }
+  tr.kicked td.l:first-child { color: var(--critical); }
   tr.current td:first-child { color: var(--accent-ink); font-weight: 600; }
   tr.stale td { color: var(--muted); }
   .spark { width: 90px; height: 20px; vertical-align: middle; }
@@ -151,6 +152,20 @@
     </div>
   </section>
 
+  <section class="card hunt" id="deauthCard" hidden>
+    <div>
+      <div class="note">Deauthing</div>
+      <div class="big"><span id="deauthSent">0</span><small>frames sent</small></div>
+      <div class="meter"><div id="deauthMeter" style="width:100%;background:var(--critical)"></div></div>
+      <div class="note" id="deauthCh"></div>
+    </div>
+    <div>
+      <div class="meta">spoofing <b id="deauthMac"></b><br><span id="deauthHint"></span></div>
+      <div style="margin-top:8px"><button class="small stop" id="deauthStop">Stop deauth</button>
+        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel, so every client of that network drops and usually reconnects. Run a capture at the same time to grab WPA2 handshakes; clients with PMF (802.11w) enabled ignore it.</span></div>
+    </div>
+  </section>
+
   <nav class="tabs" id="tabs">
     <button data-tab="overview" class="active">Overview</button>
     <button data-tab="wifi">Wi‑Fi devices<span class="n" id="nWifi">0</span></button>
@@ -200,7 +215,7 @@
         <th data-k="util">AP load</th><th data-k="stations">Clients</th><th data-k="rssi" class="sorted">RSSI</th><th data-k="max">Max</th>
         <th>Trend</th><th data-k="frames">Frames</th><th data-k="age">Seen</th><th></th>
       </tr></thead><tbody></tbody></table></div>
-      <p class="note">Rows keep their order while the mouse is over a table, so the Hunt button stays put. Roles: <b>AP</b> sent beacons or probe responses; everything else is a client or a non-beaconing radio. Security, PHY, width, AP load (the AP's own BSS-load channel utilisation) and client count come from beacon information elements. Randomized MACs (locally administered bit) have no vendor.</p>
+      <p class="note">Rows keep their order while the mouse is over a table, so the Hunt and Deauth buttons stay put. Roles: <b>AP</b> sent beacons or probe responses; everything else is a client or a non-beaconing radio. Security, PHY, width, AP load (the AP's own BSS-load channel utilisation) and client count come from beacon information elements. Randomized MACs (locally administered bit) have no vendor.</p>
     </section>
   </div>
 
@@ -255,10 +270,12 @@
   $('#park').addEventListener('change', (e) => post({ cmd: 'park', value: +e.target.value }));
   $('#capBtn').addEventListener('click', () => post({ cmd: 'capture', value: !(state && state.capture), snaplen: +$('#snap').value || 1600 }));
   $('#huntStop').addEventListener('click', () => post({ cmd: 'hunt', mac: null }));
+  $('#deauthStop').addEventListener('click', () => post({ cmd: 'deauth', mac: null }));
   $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (!b) return; tab = b.dataset.tab; document.querySelectorAll('#tabs button[data-tab]').forEach(x => x.classList.toggle('active', x === b)); ['overview', 'wifi', 'ble', 'zig'].forEach(t => $('#tab-' + t).hidden = t !== tab); if (state) render(state); });
   $('#pauseBtn').addEventListener('click', () => { paused = !paused; $('#pauseBtn').textContent = paused ? 'Resume updates' : 'Pause updates'; $('#pauseBtn').classList.toggle('stop', paused); if (!paused && state) render(state); });
   document.addEventListener('keydown', (e) => { if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('#pauseBtn').click(); } });
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
+  document.addEventListener('click', (e) => { const k = e.target.closest('button[data-deauth]'); if (k) post({ cmd: 'deauth', mac: k.dataset.deauth || null }); });
   for (const t of ['wifi', 'ble', 'zig']) {
     const tbl = $('#' + t + 'Tbl');
     tbl.addEventListener('mouseenter', () => frozen[t] = true);
@@ -309,6 +326,15 @@
     svg.innerHTML = `<g class="grid">${[-100, -65, -30].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
       <g class="axis">${[-100, -65, -30].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('')}<text x="${W - padR}" y="${H - 4}" text-anchor="end">last ${fmt(span)} s</text></g>
       <path class="line" d="${d}"/><circle class="enddot" cx="${x(last[0])}" cy="${y(last[1])}" r="4"/>`;
+  }
+
+  function renderDeauth(s) {
+    const k = s.deauth; $('#deauthCard').hidden = !k; if (!k) return;
+    $('#deauthMac').textContent = k.mac;
+    $('#deauthSent').textContent = fmt(k.sent);
+    $('#deauthCh').textContent = k.ch ? `parked on ch ${k.ch} (${band(k.ch)})` : 'channel unknown — hopping';
+    const d = (s.wifi_devs || []).find(x => x.mac === k.mac);
+    $('#deauthHint').textContent = [d && (d.ssid || '(hidden SSID)'), d && d.sec].filter(Boolean).join(' · ');
   }
 
   function renderTiles(s) {
@@ -433,6 +459,7 @@
     if (!freeze) for (const [k, tr] of existing) if (!seen.has(k)) tr.remove();
   }
   function huntBtn(mac, ch, s) { const on = s.hunt && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : mac}" ${ch ? `data-ch="${ch}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
+  function deauthBtn(d, s) { const on = s.deauth && s.deauth.mac === d.mac; return `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : d.mac}" title="Spoof this BSSID and kick its stations">${on ? 'Stop' : 'Deauth'}</button>`; }
 
   function renderWifi(s) {
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
@@ -444,8 +471,8 @@
       <td class="l mono">${d.mac}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? d.bw + ' MHz' : ''}</td><td>${d.ch}</td>
       <td>${d.util != null ? d.util + ' %' : ''}</td><td>${d.stations != null && d.ap ? d.stations : ''}</td>
-      <td>${rssiCell(d.rssi)}</td><td>${fmt(d.max)}</td><td>${spark(d.hist)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td>${huntBtn(d.mac, d.ch, s)}</td>`, frozen.wifi || paused);
-    for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${d.age > 60 ? 'stale' : ''}`; }
+      <td>${rssiCell(d.rssi)}</td><td>${fmt(d.max)}</td><td>${spark(d.hist)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td>${huntBtn(d.mac, d.ch, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, frozen.wifi || paused);
+    for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.deauth && s.deauth.mac === d.mac ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
   function renderBle(s) {
@@ -481,7 +508,7 @@
     $('#conn').classList.toggle('on', !!s.connected);
     $('#connText').textContent = s.connected ? `${s.port}${s.age != null ? ' · ' + s.age + ' s ago' : ''}` : 'no device';
     $('#fw').textContent = s.hello ? `firmware ${s.hello.fw} ${s.hello.ver || ''} · mode ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
-    renderControls(s); renderHunt(s);
+    renderControls(s); renderHunt(s); renderDeauth(s);
     $('#nWifi').textContent = s.wifi_devs.filter(d => d.age < 60).length; $('#nBle').textContent = s.ble_devs.filter(d => d.age < 60).length;
     $('#nZig').textContent = s.z_devs.filter(d => d.age < 60).length;
     $('#app').classList.toggle('stale', !s.connected);

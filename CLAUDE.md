@@ -58,9 +58,9 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 
 ## Testing without the LCD
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
-lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `reboot`.
+lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only), `reboot`.
 Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations).

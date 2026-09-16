@@ -17,7 +17,8 @@ Serial protocol (one line each):
     {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
-Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0", "info".
+Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
+"deauth <bssid>" / "deauth 0" (Wi-Fi modes: spoof the BSSID and kick its stations), "info".
 
 Vendor names come from the IEEE OUI registry: the first run downloads oui.csv (~3 MB) into ~/.cache/bandwatch/
 in the background; until then (or offline) a small built-in table is used.
@@ -280,6 +281,7 @@ class Bandwatch:
             "current": None, "global": 0.0, "sweep": 0, "aps": 0, "park": 0, "cap": 0, "drop": 0, "heap": None,
             "last_rx": 0, "log": deque(maxlen=60), "capture": None,
             "hunt": None,            # {"mac", "rssi", "age_ms", "count", "hist": deque}
+            "deauth": None,          # {"mac", "ch", "sent"} while a deauth attack runs
             "ble": {"devs": 0, "cycles": 0},
         }
         self.wifi_devs = {}
@@ -364,6 +366,16 @@ class Bandwatch:
         elif not mac:
             st["hunt"] = None
 
+    def _set_deauth(self, d):
+        # device sends [bssid, park channel (0 if hopping), frames sent] or null; ack lines may carry a bare mac string
+        st = self.state
+        if isinstance(d, str):
+            d = [d, 0, 0]
+        if d and (st["deauth"] is None or st["deauth"]["mac"] != d[0]):
+            st["deauth"] = {"mac": d[0], "ch": d[1], "sent": d[2]}
+        elif not d:
+            st["deauth"] = None
+
     def _hunt_update(self, h):
         hu = self.state["hunt"]
         if h is None or hu is None:
@@ -401,6 +413,7 @@ class Bandwatch:
                 st["channels"].setdefault(c, {"s": 0.0, "r": 0.0, "f": 0, "b": 0, "st": 0, "u": 0, "state": 1, "t": 0})
             self._set_hunt(msg.get("hunt"))
             self._hunt_update(msg.get("h"))
+            self._set_deauth(msg.get("deauth"))
         elif t == "d":
             c = msg["c"]
             st["channels"][c] = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
@@ -415,6 +428,8 @@ class Bandwatch:
             if now - self._last_hist >= 1.0:
                 self.history.append((round(now, 1), msg["g"], c, msg["s"]))
                 self._last_hist = now
+            if msg.get("da") is not None and st["deauth"]:
+                st["deauth"]["sent"] = msg["da"]
             self._hunt_update(msg.get("h"))
         elif t == "s":
             st["sweep"] = msg["n"]
@@ -454,6 +469,8 @@ class Bandwatch:
                 st["cap"] = msg["cap"]
             if msg.get("cmd") == "hunt":
                 self._set_hunt(msg.get("hunt"))
+            if msg.get("cmd") == "deauth":
+                self._set_deauth(msg.get("deauth"))
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
 
@@ -617,7 +634,8 @@ class Bandwatch:
             "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
             "channels": chans, "history": list(self.history), "capture": st["capture"],
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "ble": st["ble"], "oui_source": self.oui.source,
+            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"],
+            "oui_source": self.oui.source,
         }
 
 
@@ -675,6 +693,8 @@ def make_handler(bw, html_path):
                     bw.stop_capture()
             elif cmd == "hunt":
                 bw.hunt(req.get("mac"), req.get("ch"))
+            elif cmd == "deauth":
+                bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
             elif cmd == "info":
                 bw.send("info")
             else:

@@ -111,8 +111,8 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null) |
-| `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `h` |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent]` or null) |
+| `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc]`; flags bit0 AP, bit1 IEs parsed; `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
 | `{"t":"b","dev":[...]}` | every 2 s in BLE mode | rows `[mac, rssi, max, adverts, age_ms, addrType, company, name, appearance, txPower(127=none), svcUuid16, svcDataUuid16, appleType, flags]`; flags bit0 connectable, bit1 legacy adv, bit2 scannable |
@@ -122,19 +122,21 @@ Device → host, one JSON object per line unless noted:
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
 
 Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
-`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, `info`, `reboot`.
+`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, `deauth <bssid>` (Wi‑Fi modes only —
+parks on the AP's channel and spams spoofed deauth frames at its stations) / `deauth 0`, `info`, `reboot`.
 
 ## 5. Host tool (`host/`)
 
 `bandwatch_host.py`: a reader thread parses lines into a state dict (channels, history, device tables with
 per-device RSSI history, hunt state), an HTTP server exposes `GET /api/state` (everything, JSON) and
-`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
+`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
 for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Vendor names: IEEE OUI CSV cached in `~/.cache/bandwatch/oui.csv`
 (downloaded once in the background) with a built-in fallback; Bluetooth company ids, Apple continuity types,
 GAP appearance categories and common service UUIDs are small tables at the top of the file.
 
 `dashboard.html`: no framework, polls `/api/state` once a second. Tabs: Overview (bar chart, trend, channel
-table), Wi‑Fi devices, Bluetooth LE, Zigbee/Thread; a hunt panel appears when a hunt is active. Tables are
+table), Wi‑Fi devices, Bluetooth LE, Zigbee/Thread; a hunt panel appears when a hunt is active and a red deauth
+card with the frame counter while an attack runs. Tables are
 rendered keyed by device id so rows keep identity; while the mouse is over a table (or the page is paused with
 the button / space bar) rows neither move nor re-render, so buttons stay put. Colours follow a light/dark token
 set; charts are inline SVG.

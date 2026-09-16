@@ -3,15 +3,16 @@
 A Wi‑Fi **activity** meter and device finder for the dual‑band ESP32‑C5. Port of
 [PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD)'s *Bandwatch* (2.4 GHz,
 ESP32‑C6) to the **Waveshare ESP32-C5-LCD-1.47**, extended with 5 GHz sweeping, Bluetooth LE scanning, IEEE 802.15.4 (Zigbee / Thread) sniffing, device tables
-for all three radios, a "hunt" mode for locating one device by signal strength, an LCD UI driven by the BOOT
-button, and a host‑side web dashboard with pcap capture.
+for all three radios, a "hunt" mode for locating one device by signal strength, a deauth attack that kicks
+an AP's clients off their network, an LCD UI driven by the BOOT button, and a host‑side web dashboard with
+pcap capture.
 
 Developer documentation (architecture, serial protocol, hardware references, board quirks): [`docs/DEVELOPER.md`](docs/DEVELOPER.md).
 A short orientation for AI assistants is in [`CLAUDE.md`](CLAUDE.md).
 
 Bandwatch listens to 802.11 traffic in promiscuous mode and reports a **busy score** (0–100) per channel as a proxy
-for channel load. It does **not** measure RF power, true airtime occupancy, or non‑Wi‑Fi interference, and it
-never transmits.
+for channel load. It does **not** measure RF power, true airtime occupancy, or non‑Wi‑Fi interference, and — unless
+a deauth attack is running — it never transmits.
 
 ## What it does
 
@@ -27,6 +28,9 @@ never transmits.
   6LoWPAN, MAC‑secured), role (beaconing coordinator/router), **permit‑join** flag, LQI.
 - **Hunt**: pick one MAC (Wi‑Fi or BLE) and the LCD shows a big live RSSI with a bar, the LED colour tracks
   distance, the radio parks on the target's channel, and the dashboard plots the RSSI trend.
+- **Deauth**: pick an AP (its BSSID) over serial or from the dashboard and the radio parks on its channel and
+  spams deauth frames with the AP spoofed as sender; connected stations drop off and usually reconnect. Run a
+  capture at the same time to catch WPA2 handshakes. Stations with PMF (802.11w) enabled ignore it.
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble → 802.15.4; on the
@@ -43,7 +47,8 @@ never transmits.
   802.11 frames streamed as base64 so the Mac writes standard **pcap** files.
 - **Host dashboard** (`host/bandwatch_host.py`): Overview tab (bar chart per channel, trend, table), **Wi‑Fi devices**
   **Bluetooth LE** and **Zigbee / Thread** tabs (sortable, filterable, vendor names from the IEEE OUI registry,
-  RSSI sparklines, a *Hunt* button per row), a hunt panel with live RSSI trend, mode/park/capture controls.
+  RSSI sparklines, a *Hunt* button per row and a *Deauth* button per AP row), a hunt panel with live RSSI trend,
+  a red deauth card with a frame counter while an attack runs, mode/park/capture controls.
   Tables freeze while the mouse is over them and there is a Pause button (space bar), so buttons stay put.
 
 ## Hardware
@@ -93,7 +98,8 @@ per channel. Throughput is bounded by USB CDC (~300 KB/s of frame data); the dev
 reports bad FCS on every frame, run with `--no-fcs`.
 
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
-`cap 0|1`, `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `info`, `reboot`.
+`cap 0|1`, `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
+modes only — parks on the AP's channel and kicks its stations), `info`, `reboot`.
 802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need
 the network key, Wireshark knows the default Zigbee trust‑centre key).
 
@@ -126,6 +132,9 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
 ## Versions
 
+- **1.2.2** — deauth attack: `deauth <bssid>` parks on the AP's channel and spams spoofed deauth frames until its
+  stations drop (run a capture alongside to catch WPA2 handshakes); *Deauth* button per AP row in the dashboard,
+  frame‑counter card while it runs.
 - **1.2** — 802.15.4 (Zigbee / Thread) sniff mode with node table and pcap, Zigbee/Thread dashboard tab, pause /
   hover‑freeze for device tables, `reboot` command, developer docs.
 - **1.1** — Bluetooth LE mode, Wi‑Fi/BLE device tables with beacon and advertisement details, hunt mode, Devices

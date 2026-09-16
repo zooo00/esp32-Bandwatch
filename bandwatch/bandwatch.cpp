@@ -12,6 +12,7 @@
 #include <string.h>
 #include <sdkconfig.h>
 #include <esp_system.h>
+#include <esp_ieee802154.h>
 
 #if !CONFIG_SOC_WIFI_SUPPORT_5G
 #error "Bandwatch needs a 5 GHz capable target (ESP32-C5). Select 'ESP32C5 Dev Module'."
@@ -22,7 +23,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.1";
+constexpr const char* kVersion = "1.2";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -44,20 +45,30 @@ constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table
 // 5 GHz: UNII-1 (36–48), UNII-2A (52–64, DFS), UNII-2C (100–144, DFS), UNII-3 (149–165).
 // Receiving on DFS channels is passive; the radio never transmits in promiscuous mode.
 // Channels the driver refuses (ESP_ERR_INVALID_ARG) are skipped automatically.
-enum BandMode : uint8_t { BAND_5G = 0, BAND_24G = 1, BAND_BOTH = 2, BAND_BLE = 3 };
-constexpr int kBandModes = 4;
-constexpr const char* kBandName[] = {"5g", "2.4g", "both", "ble"};
+// Modes: three Wi-Fi sweeps, Bluetooth LE scanning, and IEEE 802.15.4 (Zigbee / Thread) sniffing on
+// channels 11-26. All share the single 2.4/5 GHz radio, so only one runs at a time.
+enum BandMode : uint8_t { BAND_5G = 0, BAND_24G = 1, BAND_BOTH = 2, BAND_BLE = 3, BAND_154 = 4 };
+constexpr int kBandModes = 5;
+constexpr const char* kBandName[] = {"5g", "2.4g", "both", "ble", "154"};
+enum ChanBand : uint8_t { CB_24G = 0, CB_5G = 1, CB_154 = 2 };
 constexpr uint8_t kChannels[] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
     36, 40, 44, 48,
     52, 56, 60, 64,
     100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
     149, 153, 157, 161, 165,
+    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,   // 802.15.4
+};
+constexpr uint8_t kChanBand[] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
 };
 constexpr int kChannelCount = sizeof(kChannels) / sizeof(kChannels[0]);
-constexpr int kFirst5gIdx = 13;
-inline bool is5g(int idx) { return idx >= kFirst5gIdx; }
-constexpr int kGroupStart[] = {0, 13, 21, 33};
+static_assert(sizeof(kChanBand) == kChannelCount, "channel tables out of sync");
+inline bool is5g(int idx) { return kChanBand[idx] == CB_5G; }
+inline bool is154(int idx) { return kChanBand[idx] == CB_154; }
+constexpr int kGroupStart[] = {0, 13, 21, 33, 38};
 
 // Allow every 5 GHz channel the driver knows about (bits 1..28, see wifi_5g_channel_bit_t).
 constexpr uint32_t kAll5gChannelMask = 0x1FFFFFFEu;
@@ -162,9 +173,13 @@ portMUX_TYPE g_devMux = portMUX_INITIALIZER_UNLOCKED;
 
 WifiDev wifiDevs[kWifiDevSlots];
 BleDev bleDevs[kBleDevSlots];
+Dev154 devs154[kDev154Slots];
 
-// Hunt target (one MAC, tracked from both radios)
+// Hunt target, tracked from all three radios. huntMac = 6-byte MAC (Wi-Fi/BLE);
+// huntKey = 802.15.4 key (extended address, or 0xFF 0xFE pan short marker form).
 uint8_t huntMac[6] = {0};
+uint8_t huntKey[8] = {0};
+uint8_t huntKind = 0;   // 0 MAC, 1 802.15.4 key
 volatile bool huntActive = false;
 volatile int8_t huntRssi = -127;
 volatile uint32_t huntLastMs = 0;
@@ -185,11 +200,18 @@ uint32_t capSent = 0;
 volatile uint8_t currentChannelNum = 0;
 BandMode bandMode = BAND_5G;
 
-inline bool wifiMode() { return bandMode != BAND_BLE; }
+bool r154Running = false;
+inline bool wifiMode() { return bandMode <= BAND_BOTH; }
+inline bool mode154() { return bandMode == BAND_154; }
+inline bool hopMode() { return wifiMode() || mode154(); }   // modes that sweep channels
 inline bool chanEnabled(int idx) {
-    if (bandMode == BAND_BLE) return false;
-    if (bandMode == BAND_BOTH) return true;
-    return (bandMode == BAND_5G) == is5g(idx);
+    switch (bandMode) {
+        case BAND_5G:   return is5g(idx);
+        case BAND_24G:  return kChanBand[idx] == CB_24G;
+        case BAND_BOTH: return !is154(idx);
+        case BAND_154:  return is154(idx);
+        default:        return false;
+    }
 }
 int enabledCount() {
     int n = 0;
@@ -622,9 +644,188 @@ void serviceBle() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// IEEE 802.15.4 (Zigbee / Thread) sniffing. The driver's callbacks run in ISR context.
+// ---------------------------------------------------------------------------------------------
+volatile uint32_t rx154Count = 0;
+
+// Classify the MAC payload: Zigbee NWK header, Zigbee Green Power, or 6LoWPAN (Thread).
+inline uint8_t IRAM_ATTR classify154(const uint8_t* pl, uint16_t n, bool macSecured) {
+    if (macSecured) return 4;                       // encrypted at MAC level: Thread does this, Zigbee does not
+    if (n < 2) return 0;
+    const uint8_t b = pl[0];
+    if ((b & 0xE0) == 0x60 || (b & 0xF8) == 0xC0 || (b & 0xF8) == 0xE0 || (b & 0xC0) == 0x80 || b == 0x41) return 3; // 6LoWPAN IPHC / FRAG / mesh / IPv6
+    const uint8_t ver = (b >> 2) & 0x0F;
+    if (ver == 2) return 1;                         // Zigbee (Pro)
+    if (ver == 3) return 2;                         // Zigbee Green Power
+    return 0;
+}
+
+void IRAM_ATTR track154(const uint8_t* key, bool hasExt, uint16_t pan, uint16_t shortAddr, int8_t rssi, uint8_t lqi,
+                        uint8_t proto, uint8_t flagBits) {
+    const uint32_t now = millis();
+    portENTER_CRITICAL_ISR(&g_devMux);
+    const int i = dev154FindSlot(devs154, kDev154Slots, key);
+    Dev154& d = devs154[i];
+    if (d.lastMs == 0 || !key8Eq(d.key, key)) {
+        memset(&d, 0, sizeof(d));
+        memcpy(d.key, key, 8);
+        d.maxRssi = rssi;
+        d.shortAddr = 0xFFFF;
+        d.pan = 0xFFFF;
+    }
+    d.rssi = rssi;
+    if (rssi > d.maxRssi) d.maxRssi = rssi;
+    if (d.frames < 65535) d.frames++;
+    d.lastMs = now;
+    d.ch = currentChannelNum;
+    d.lqi = lqi;
+    if (hasExt) d.flags |= 1;
+    if (shortAddr != 0xFFFF) d.shortAddr = shortAddr;
+    if (pan != 0xFFFF) d.pan = pan;
+    if (proto) d.proto = proto;
+    d.flags |= flagBits;
+    if (huntActive && huntKind == 1 && key8Eq(huntKey, key)) {
+        huntRssi = rssi;
+        huntLastMs = now;
+        huntCount = huntCount + 1;
+    }
+    portEXIT_CRITICAL_ISR(&g_devMux);
+}
+
+} // namespace (the driver callback needs C linkage)
+
+extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t* frame, esp_ieee802154_frame_info_t* info) {
+    // frame[0] = PSDU length incl. the 2 FCS bytes, which the radio replaces with RSSI/LQI.
+    const uint16_t len = frame[0];
+    const uint8_t* p = frame + 1;
+    const int8_t rssi = info->rssi;
+    if (len >= 5) {
+        const uint16_t n = len - 2;   // MHR + payload, without the pseudo-FCS
+        const uint16_t fc = p[0] | (p[1] << 8);
+        const uint8_t ftype = fc & 0x07;
+        const bool secured = fc & 0x08;
+        const bool panComp = fc & 0x40;
+        const uint8_t dstMode = (fc >> 10) & 3;
+        const uint8_t srcMode = (fc >> 14) & 3;
+        const uint8_t ver = (fc >> 12) & 3;
+        uint16_t off = 3;   // fc + seq
+
+        portENTER_CRITICAL_ISR(&g_accumMux);
+        g_accum.frames += 1;
+        g_accum.bytes += n;
+        if (rssi >= kStrongThresholdDbm) g_accum.strong += 1;
+        portEXIT_CRITICAL_ISR(&g_accumMux);
+
+        uint16_t dstPan = 0xFFFF, srcPan = 0xFFFF, shortAddr = 0xFFFF;
+        uint8_t key[8];
+        bool haveSrc = false, hasExt = false;
+        if (ver <= 1) {
+            if (dstMode) { if (off + 2 <= n) { dstPan = p[off] | (p[off + 1] << 8); } off += 2; off += (dstMode == 2) ? 2 : 8; }
+            if (srcMode) {
+                if (!panComp) { if (off + 2 <= n) srcPan = p[off] | (p[off + 1] << 8); off += 2; }
+                else srcPan = dstPan;
+                if (srcMode == 2 && off + 2 <= n) {
+                    shortAddr = p[off] | (p[off + 1] << 8);
+                    key[0] = 0xFF; key[1] = 0xFE; key[2] = srcPan & 0xFF; key[3] = srcPan >> 8;
+                    key[4] = shortAddr & 0xFF; key[5] = shortAddr >> 8; key[6] = 0; key[7] = 0;
+                    haveSrc = true;
+                    off += 2;
+                } else if (srcMode == 3 && off + 8 <= n) {
+                    for (int i = 0; i < 8; i++) key[i] = p[off + 7 - i];   // big-endian display order
+                    haveSrc = hasExt = true;
+                    off += 8;
+                }
+            }
+            if (haveSrc) {
+                if (secured) {
+                    // auxiliary security header: 1 control byte + 4 frame counter + key identifier
+                    if (off < n) {
+                        const uint8_t sc = p[off];
+                        const uint8_t kim = (sc >> 3) & 3;
+                        off += 5 + (kim == 0 ? 0 : kim == 1 ? 1 : kim == 2 ? 5 : 9);
+                    }
+                }
+                uint8_t proto = 0, flagBits = 0;
+                if (ftype == 0) {                       // beacon
+                    flagBits |= 2;
+                    if (off + 2 <= n) {
+                        const uint16_t sf = p[off] | (p[off + 1] << 8);
+                        if (sf & 0x8000) flagBits |= 4;  // association permit
+                        uint16_t q = off + 2;
+                        if (q < n) { const uint8_t gts = p[q]; q += 1 + ((gts & 7) ? 1 + 3 * (gts & 7) : 0); }
+                        if (q < n) { const uint8_t pa = p[q]; q += 1 + 2 * (pa & 7) + 8 * ((pa >> 4) & 7); }
+                        if (q < n) {
+                            const uint8_t pid = p[q];
+                            if (pid == 0x00) proto = 1;      // Zigbee beacon payload (protocol id 0)
+                            else if (pid == 0x03) proto = 3; // Thread beacon
+                        }
+                    }
+                } else if (ftype == 1) {                // data
+                    flagBits |= 16;
+                    if (!secured && off < n) proto = classify154(p + off, n - off, false);
+                    else if (secured) { proto = 4; flagBits |= 8; }
+                } else if (ftype == 3) {                // MAC command
+                    if (secured) flagBits |= 8;
+                }
+                track154(key, hasExt, srcPan, shortAddr, rssi, info->lqi, proto, flagBits);
+            }
+        }
+
+        if (captureEnabled && capRing) {
+            const uint8_t head = capHead;
+            const uint8_t next = (head + 1) % capSlots;
+            if (next == capTail) {
+                capDropped = capDropped + 1;
+            } else {
+                CapFrame& f = capRing[head];
+                uint16_t c = n;
+                if (c > capSnapLen) c = capSnapLen;
+                if (c > kCapMaxLen) c = kCapMaxLen;
+                f.ts_us = static_cast<uint32_t>(info->timestamp);
+                f.len = n;
+                f.capLen = c;
+                f.rssi = rssi;
+                f.channel = currentChannelNum;
+                memcpy(f.data, p, c);
+                capHead = next;
+            }
+        }
+        rx154Count = rx154Count + 1;
+    }
+    esp_ieee802154_receive_handle_done(frame);
+}
+
+namespace {
+
+void start154() {
+    if (r154Running) return;
+    esp_ieee802154_enable();
+    esp_ieee802154_set_promiscuous(true);
+    esp_ieee802154_set_rx_when_idle(true);
+    r154Running = true;
+}
+
+void stop154() {
+    if (!r154Running) return;
+    esp_ieee802154_set_rx_when_idle(false);
+    esp_ieee802154_sleep();
+    esp_ieee802154_disable();
+    r154Running = false;
+    currentChannelNum = 0;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Channel control / Wi-Fi lifecycle
 // ---------------------------------------------------------------------------------------------
 bool applyChannelIdx(int idx) {
+    if (is154(idx)) {
+        if (!r154Running) return false;
+        esp_ieee802154_set_channel(kChannels[idx]);
+        esp_ieee802154_receive();
+        currentChannelNum = kChannels[idx];
+        dwellStartedMs = millis();
+        return true;
+    }
     const esp_err_t err = esp_wifi_set_channel(kChannels[idx], WIFI_SECOND_CHAN_NONE);
     if (err != ESP_OK) {
         if (serialRoom(120))
@@ -639,7 +840,7 @@ bool applyChannelIdx(int idx) {
 }
 
 bool advanceChannel() {
-    if (!wifiMode() || !wifiRunning) return false;
+    if (!(wifiMode() && wifiRunning) && !(mode154() && r154Running)) return false;
     if (parkedIdx >= 0 && chanEnabled(parkedIdx) && !channels[parkedIdx].unavailable) {
         currentIdx = parkedIdx;
         return applyChannelIdx(currentIdx);
@@ -653,8 +854,12 @@ bool advanceChannel() {
     return false;
 }
 
-int indexOfChannel(int ch) {
-    for (int i = 0; i < kChannelCount; i++) if (kChannels[i] == ch) return i;
+int indexOfChannel(int ch) {   // in the current mode's channel set
+    for (int i = 0; i < kChannelCount; i++) if (kChannels[i] == ch && chanEnabled(i)) return i;
+    return -1;
+}
+int indexOfChannel154(int ch) {
+    for (int i = 0; i < kChannelCount; i++) if (kChannels[i] == ch && is154(i)) return i;
     return -1;
 }
 
@@ -723,17 +928,26 @@ void stopWifi() {
 // Switch band mode at runtime: clears per-channel history and restarts the sweep (or swaps radios).
 void setBandMode(BandMode m) {
     const BandMode prev = bandMode;
+    if (m == prev) return;
     bandMode = m;
-    if (m == BAND_BLE) {
-        if (prev != BAND_BLE) { stopWifi(); startBle(); }
-        return;
-    }
-    if (prev == BAND_BLE) {
-        stopBle();
+    captureEnabled = false;   // the host restarts a capture if it wants one (link type differs per radio)
+    if (parkedIdx >= 0 && !chanEnabled(parkedIdx)) parkedIdx = -1;
+    const bool radioChange = (prev == BAND_BLE) || (prev == BAND_154) || (m == BAND_BLE) || (m == BAND_154);
+    if (radioChange) {
+        if (prev == BAND_BLE) stopBle();
+        else if (prev == BAND_154) stop154();
+        else stopWifi();
+        if (m == BAND_BLE) { startBle(); return; }
+        if (m == BAND_154) {
+            start154();
+            resetChannelStats();
+            currentIdx = -1;
+            monitorReady = advanceChannel();
+            return;
+        }
         startWifi();
         return;
     }
-    if (parkedIdx >= 0 && !chanEnabled(parkedIdx)) parkedIdx = -1;
     errBand = esp_wifi_set_band_mode(toDriverBand(m));
     delay(100);
     applyProtocols();
@@ -750,8 +964,10 @@ float computeBusyScore(const ChannelMetrics& m) {
     const float pps = m.frames / dwellSec;
     const float bps = m.bytes / dwellSec;
     const float strongRatio = (m.frames > 0) ? (static_cast<float>(m.strong) / static_cast<float>(m.frames)) : 0.0f;
-    const float ppsScore = clamp01(log1pf(pps) / logf(600.0f));
-    const float bpsScore = clamp01(log1pf(bps) / logf(50000.0f));
+    const float ppsRef = mode154() ? 120.0f : 600.0f;      // 802.15.4 is a 250 kbit/s radio
+    const float bpsRef = mode154() ? 12000.0f : 50000.0f;
+    const float ppsScore = clamp01(log1pf(pps) / logf(ppsRef));
+    const float bpsScore = clamp01(log1pf(bps) / logf(bpsRef));
     const float uniqueScore = clamp01(log1pf(static_cast<float>(m.unique)) / logf(20.0f));
     const float raw = 0.40f * ppsScore + 0.30f * bpsScore + 0.20f * strongRatio + 0.10f * uniqueScore;
     return clamp01(raw) * 100.0f;
@@ -781,7 +997,7 @@ void sortTop3(int outIdx[3]) {
 
 // Snapshot helpers for device tables (copy under lock, then sort outside). One shared scratch buffer,
 // used from the loop task only (UI timer and host output both run there).
-union DevSnap { WifiDev w[kWifiDevSlots]; BleDev b[kBleDevSlots]; };
+union DevSnap { WifiDev w[kWifiDevSlots]; BleDev b[kBleDevSlots]; Dev154 z[kDev154Slots]; };
 DevSnap devSnap;
 
 int snapshotWifi(WifiDev* out, int maxN, uint32_t freshMs) {
@@ -804,6 +1020,20 @@ int snapshotBle(BleDev* out, int maxN, uint32_t freshMs) {
     portEXIT_CRITICAL(&g_devMux);
     return n;
 }
+int snapshot154(Dev154* out, int maxN, uint32_t freshMs) {
+    const uint32_t now = millis();
+    int n = 0;
+    portENTER_CRITICAL(&g_devMux);
+    for (int i = 0; i < kDev154Slots && n < maxN; i++) {
+        if (devs154[i].lastMs && (now - devs154[i].lastMs) <= freshMs) out[n++] = devs154[i];
+    }
+    portEXIT_CRITICAL(&g_devMux);
+    return n;
+}
+void fmtKey154(char* out, size_t n, const Dev154& d) {
+    if (d.flags & 1) snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x", d.key[0], d.key[1], d.key[2], d.key[3], d.key[4], d.key[5], d.key[6], d.key[7]);
+    else snprintf(out, n, "%04x/%04x", d.pan, d.shortAddr);
+}
 template <typename T>
 void sortByRssi(T* a, int n) {   // insertion sort, n <= 96
     for (int i = 1; i < n; i++) {
@@ -817,6 +1047,18 @@ void sortByRssi(T* a, int n) {   // insertion sort, n <= 96
 // ---------------------------------------------------------------------------------------------
 // Host protocol (USB serial, one JSON object per line; frames as "P ..." base64 lines)
 // ---------------------------------------------------------------------------------------------
+void huntIdText(char* out, size_t n) {
+    if (huntKind == 1) {
+        if (huntKey[0] == 0xFF && huntKey[1] == 0xFE)
+            snprintf(out, n, "%04x/%04x", huntKey[2] | (huntKey[3] << 8), huntKey[4] | (huntKey[5] << 8));
+        else
+            snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x", huntKey[0], huntKey[1], huntKey[2], huntKey[3],
+                     huntKey[4], huntKey[5], huntKey[6], huntKey[7]);
+    } else {
+        fmtMac(out, n, huntMac);
+    }
+}
+
 void printHunt() {
     if (!huntActive) { Serial.print("\"h\":null"); return; }
     const uint32_t last = huntLastMs;
@@ -836,8 +1078,8 @@ void sendHello() {
         Serial.printf("%s%u", first ? "" : ",", kChannels[i]);
         first = false;
     }
-    char mac[18];
-    fmtMac(mac, sizeof(mac), huntMac);
+    char mac[26];
+    huntIdText(mac, sizeof(mac));
     static const char* const kRst[] = {"unknown", "poweron", "ext", "sw", "panic", "int_wdt", "task_wdt", "wdt",
                                        "deepsleep", "brownout", "sdio", "usb", "jtag", "efuse", "pwr_glitch", "cpu_lockup"};
     const int rr = static_cast<int>(esp_reset_reason());
@@ -900,7 +1142,22 @@ void sendBleStatus() {
 // Device tables -> host. Wi-Fi: [mac, rssi, max, frames, age_ms, ch, flags, ssid]; BLE: [mac, rssi, max, adv, age_ms, addrType, company, name]
 void sendDevices() {
     const uint32_t now = millis();
-    char mac[18];
+    char mac[24];
+    if (mode154()) {
+        Dev154* snap = devSnap.z;
+        const int n = snapshot154(snap, kDev154Slots, kDevFreshMs);
+        if (!serialRoom(40 + n * 80)) return;
+        // [id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]
+        Serial.print("{\"t\":\"z\",\"dev\":[");
+        for (int i = 0; i < n; i++) {
+            const Dev154& d = snap[i];
+            fmtKey154(mac, sizeof(mac), d);
+            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,%u,%u,%u,%u]", i ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
+                          static_cast<unsigned long>(now - d.lastMs), d.ch, d.pan, d.shortAddr, d.proto, d.flags, d.lqi);
+        }
+        Serial.print("]}\n");
+        return;
+    }
     if (wifiMode()) {
         WifiDev* snap = devSnap.w;
         const int n = snapshotWifi(snap, kWifiDevSlots, kDevFreshMs);
@@ -973,13 +1230,24 @@ void drainCapture() {
 
 void setPark(int idx) {
     parkedIdx = idx;
-    if (parkedIdx >= 0 && wifiMode()) monitorReady = advanceChannel();
+    if (parkedIdx >= 0 && hopMode()) monitorReady = advanceChannel();
 }
 
 void showPage(int n);
 
 void lookupHuntLabel() {
     huntLabel[0] = 0;
+    if (huntKind == 1) {
+        portENTER_CRITICAL(&g_devMux);
+        for (int i = 0; i < kDev154Slots; i++)
+            if (devs154[i].lastMs && key8Eq(devs154[i].key, huntKey)) {
+                static const char* const kProto[] = {"802.15.4", "Zigbee", "Zigbee GP", "Thread", "MAC-secured"};
+                snprintf(huntLabel, sizeof(huntLabel), "%s pan %04x", kProto[devs154[i].proto < 5 ? devs154[i].proto : 0], devs154[i].pan);
+                break;
+            }
+        portEXIT_CRITICAL(&g_devMux);
+        return;
+    }
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kWifiDevSlots; i++)
         if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, huntMac) && wifiDevs[i].ssid[0]) { strncpy(huntLabel, wifiDevs[i].ssid, 32); break; }
@@ -989,9 +1257,40 @@ void lookupHuntLabel() {
     portEXIT_CRITICAL(&g_devMux);
 }
 
+// Parse "aa:bb:cc:dd:ee:ff:00:11" (extended address) or "pan/short" (hex) into an 802.15.4 key.
+bool parseKey154(const char* s, uint8_t* key) {
+    unsigned v[8];
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x:%2x:%2x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) {
+        for (int i = 0; i < 8; i++) key[i] = static_cast<uint8_t>(v[i]);
+        return true;
+    }
+    unsigned pan, sh;
+    if (sscanf(s, "%4x/%4x", &pan, &sh) == 2) {
+        key[0] = 0xFF; key[1] = 0xFE; key[2] = pan & 0xFF; key[3] = (pan >> 8) & 0xFF;
+        key[4] = sh & 0xFF; key[5] = (sh >> 8) & 0xFF; key[6] = 0; key[7] = 0;
+        return true;
+    }
+    return false;
+}
+
+void startHunt154(const uint8_t* key) {
+    portENTER_CRITICAL(&g_devMux);
+    memcpy(huntKey, key, 8);
+    huntKind = 1;
+    huntRssi = -127;
+    huntLastMs = 0;
+    huntCount = 0;
+    huntActive = true;
+    portEXIT_CRITICAL(&g_devMux);
+    huntLabel[0] = 0;
+    huntParked = false;
+    showPage(PAGE_HUNT);
+}
+
 void startHunt(const uint8_t* mac, int ch) {
     portENTER_CRITICAL(&g_devMux);
     memcpy(huntMac, mac, 6);
+    huntKind = 0;
     huntRssi = -127;
     huntLastMs = 0;
     huntCount = 0;
@@ -1009,7 +1308,7 @@ void startHunt(const uint8_t* mac, int ch) {
 void stopHunt() {
     huntActive = false;
     if (huntParked) { setPark(-1); huntParked = false; }
-    if (currentPage == PAGE_HUNT) showPage(wifiMode() ? PAGE_OVERVIEW : PAGE_DEVICES);
+    if (currentPage == PAGE_HUNT) showPage(hopMode() ? PAGE_OVERVIEW : PAGE_DEVICES);
 }
 
 void handleCommand(char* line) {
@@ -1018,7 +1317,7 @@ void handleCommand(char* line) {
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
     if (!strcmp(line, "cap")) {
-        const bool on = atoi(arg) != 0 && wifiMode();
+        const bool on = atoi(arg) != 0 && hopMode();
         if (on && !captureEnabled) {
             capDropped = 0; capSent = 0; capHead = 0; capTail = 0;
             if (!capRing) {
@@ -1054,7 +1353,8 @@ void handleCommand(char* line) {
         else if (!strcmp(arg, "2.4g") || !strcmp(arg, "24g")) setBandMode(BAND_24G);
         else if (!strcmp(arg, "both")) setBandMode(BAND_BOTH);
         else if (!strcmp(arg, "ble")) setBandMode(BAND_BLE);
-        if (!wifiMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
+        else if (!strcmp(arg, "154") || !strcmp(arg, "zigbee") || !strcmp(arg, "thread")) setBandMode(BAND_154);
+        if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
         sendHello();
     } else if (!strcmp(line, "hunt")) {
@@ -1062,15 +1362,29 @@ void handleCommand(char* line) {
         char* sp2 = strchr(arg, ' ');
         int ch = 0;
         if (sp2) { *sp2 = 0; ch = atoi(sp2 + 1); }
+        uint8_t key[8];
         if (parseMac(arg, mac)) startHunt(mac, ch);
+        else if (parseKey154(arg, key)) { startHunt154(key); if (ch > 0) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); huntParked = true; } } }
         else stopHunt();
-        char m[18];
-        fmtMac(m, sizeof(m), huntMac);
+        char m[26];
+        huntIdText(m, sizeof(m));
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":%s%s%s,\"park\":%d}\n", huntActive ? "\"" : "null",
                       huntActive ? m : "", huntActive ? "\"" : "", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
+        if (huntActive && huntKind == 1 && mode154()) {
+            // park on the channel the node was last seen on
+            portENTER_CRITICAL(&g_devMux);
+            int ch = 0;
+            for (int i = 0; i < kDev154Slots; i++) if (devs154[i].lastMs && key8Eq(devs154[i].key, huntKey)) { ch = devs154[i].ch; break; }
+            portEXIT_CRITICAL(&g_devMux);
+            if (ch && parkedIdx < 0) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); huntParked = true; } }
+        }
+    } else if (!strcmp(line, "reboot")) {
+        Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
+        delay(50);
+        ESP.restart();
     } else if (!strcmp(line, "info")) {
         sendHello();
-        if (wifiMode()) sendSweep();
+        if (hopMode()) sendSweep();
         sendDevices();
     } else {
         Serial.printf("{\"t\":\"err\",\"msg\":\"unknown command\"}\n");
@@ -1116,7 +1430,7 @@ void finishDwell() {
 }
 
 void hopIfNeeded() {
-    if (!wifiMode() || !wifiRunning) return;
+    if (!((wifiMode() && wifiRunning) || (mode154() && r154Running))) return;
     const uint32_t now = millis();
     if (!monitorReady) {
         if ((now - dwellStartedMs) < kDwellMs) return;
@@ -1252,7 +1566,7 @@ void buildOverviewPage(lv_obj_t* page) {
         lv_obj_set_style_radius(b, 1, 0);
         lv_obj_set_style_pad_all(b, 0, 0);
         lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-        for (int g = 1; g < 4; g++) if (i == kGroupStart[g]) lv_obj_set_style_margin_left(b, 3, 0);
+        for (int g = 1; g < 5; g++) if (i == kGroupStart[g]) lv_obj_set_style_margin_left(b, 3, 0);
         specBars[i] = b;
     }
     specLabel = make_label(spec, "", c565(GREY_565), &lv_font_montserrat_12);
@@ -1373,7 +1687,7 @@ void buildSystemPage(lv_obj_t* page) {
 }
 
 bool pageAvailable(int n) {
-    if (n == PAGE_OVERVIEW || n == PAGE_CHANNELS) return wifiMode();
+    if (n == PAGE_OVERVIEW || n == PAGE_CHANNELS) return hopMode();
     if (n == PAGE_HUNT) return huntActive;
     return true;
 }
@@ -1407,8 +1721,8 @@ void buildUi() {
 }
 
 void chanHeaderText(char* buf, size_t n) {
-    if (!wifiMode()) { snprintf(buf, n, "BLE"); return; }
-    const char* band = (currentIdx >= 0 && is5g(currentIdx)) ? "5G" : "2.4G";
+    if (!hopMode()) { snprintf(buf, n, "BLE"); return; }
+    const char* band = (currentIdx >= 0 && is154(currentIdx)) ? "15.4" : (currentIdx >= 0 && is5g(currentIdx)) ? "5G" : "2.4G";
     if (!monitorReady)       snprintf(buf, n, "no ch");
     else if (parkedIdx >= 0) snprintf(buf, n, "park %u", kChannels[currentIdx]);
     else                     snprintf(buf, n, "%s ch%u", band, kChannels[currentIdx]);
@@ -1467,6 +1781,7 @@ void refreshOverview(float global) {
     }
     lv_label_set_text(specLabel, bandMode == BAND_5G ? "36-64   100-144   149-165"
                                  : bandMode == BAND_24G ? "2.4 GHz channels 1-13"
+                                 : bandMode == BAND_154 ? "802.15.4 channels 11-26"
                                  : "1-13 | 36-64 | 100-144 | 149-165");
 
     const ChannelState& cur = channels[currentIdx < 0 ? 0 : currentIdx];
@@ -1538,7 +1853,21 @@ void refreshDevices() {
     const uint32_t now = millis();
     if (now - lastSortMs >= 500) {
         lastSortMs = now;
-        if (wifiMode()) {
+        if (mode154()) {
+            static const char* const kProto[] = {"15.4", "ZigB", "ZGP", "Thrd", "sec"};
+            const int zn = snapshot154(devSnap.z, kDev154Slots, kDevLcdFreshMs);
+            sortByRssi(devSnap.z, zn);
+            devRowCount = zn < kDevRows ? zn : kDevRows;
+            for (int i = 0; i < devRowCount; i++) {
+                const Dev154& d = devSnap.z[i];
+                memcpy(devRows[i].mac, d.key, 6);
+                devRows[i].rssi = d.rssi;
+                devRows[i].ap = d.flags & 2;
+                if (d.flags & 1) snprintf(devRows[i].label, 33, "%s %02x%02x%02x", kProto[d.proto < 5 ? d.proto : 0], d.key[5], d.key[6], d.key[7]);
+                else snprintf(devRows[i].label, 33, "%s %04x", kProto[d.proto < 5 ? d.proto : 0], d.shortAddr);
+                if (d.flags & 4) strncat(devRows[i].label, " join", 32 - strlen(devRows[i].label));
+            }
+        } else if (wifiMode()) {
             const int wn = snapshotWifi(devSnap.w, kWifiDevSlots, kDevLcdFreshMs);
             sortByRssi(devSnap.w, wn);
             devRowCount = wn < kDevRows ? wn : kDevRows;
@@ -1562,7 +1891,7 @@ void refreshDevices() {
     }
     char buf[48];
     const int n = devRowCount;
-    snprintf(buf, sizeof(buf), "%s %d", wifiMode() ? "WiFi" : "BLE", n);
+    snprintf(buf, sizeof(buf), "%s %d", mode154() ? "15.4" : wifiMode() ? "WiFi" : "BLE", n);
     lv_label_set_text(devHdrRight, buf);
     for (int i = 0; i < kDevRows; i++) {
         if (i >= n) { lv_obj_add_flag(devRow[i], LV_OBJ_FLAG_HIDDEN); continue; }
@@ -1574,13 +1903,15 @@ void refreshDevices() {
         if (label[0]) snprintf(buf, sizeof(buf), "%s%s", ap ? "* " : "", label);
         else snprintf(buf, sizeof(buf), "%s%02x:%02x:%02x", ap ? "* " : "", mac[3], mac[4], mac[5]);
         lv_label_set_text(devName[i], buf);
-        lv_obj_set_style_text_color(devName[i], (huntActive && macEq(mac, huntMac)) ? c565(CYAN_565) : c565(WHITE_565), 0);
+        const bool hunted = huntActive && (huntKind == 1 ? memcmp(mac, huntKey, 6) == 0 : macEq(mac, huntMac));
+        lv_obj_set_style_text_color(devName[i], hunted ? c565(CYAN_565) : c565(WHITE_565), 0);
         snprintf(buf, sizeof(buf), "%d", rssi);
         lv_label_set_text(devRssi[i], buf);
         lv_bar_set_value(devBar[i], rssiPct(rssi), LV_ANIM_OFF);
         lv_obj_set_style_bg_color(devBar[i], rssiColor(rssi), LV_PART_INDICATOR);
     }
-    if (wifiMode()) snprintf(buf, sizeof(buf), "* = AP (beacons)  seen < 20 s");
+    if (mode154()) snprintf(buf, sizeof(buf), "* = beacons (router)  seen < 20 s");
+    else if (wifiMode()) snprintf(buf, sizeof(buf), "* = AP (beacons)  seen < 20 s");
     else snprintf(buf, sizeof(buf), "BLE scan cycle %lu  seen < 20 s", static_cast<unsigned long>(bleScanCycles));
     lv_label_set_text(devFoot, buf);
 }
@@ -1591,20 +1922,20 @@ void refreshHunt() {
     const int rssi = huntRssi;
     const bool seen = last != 0;
     const uint32_t age = seen ? millis() - last : 0;
-    lv_label_set_text(huntHdrRight, wifiMode() ? (parkedIdx >= 0 ? "parked" : "hopping") : "BLE");
+    lv_label_set_text(huntHdrRight, hopMode() ? (parkedIdx >= 0 ? "parked" : "hopping") : "BLE");
     if (seen && age < 5000) snprintf(buf, sizeof(buf), "%d", rssi);
     else snprintf(buf, sizeof(buf), "--");
     lv_label_set_text(huntBig, buf);
     lv_bar_set_value(huntBar, (seen && age < 5000) ? rssiPct(rssi) : 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(huntBar, rssiColor(rssi), LV_PART_INDICATOR);
-    fmtMac(buf, sizeof(buf), huntMac);
+    huntIdText(buf, sizeof(buf));
     lv_label_set_text(huntMacLbl, buf);
     if (!huntLabel[0]) lookupHuntLabel();
     lv_label_set_text(huntNameLbl, huntLabel[0] ? huntLabel : "(no name seen)");
     if (seen) snprintf(buf, sizeof(buf), "seen %.1f s ago  hits %lu", age / 1000.0f, static_cast<unsigned long>(huntCount));
     else snprintf(buf, sizeof(buf), "not seen yet");
     lv_label_set_text(huntInfo1, buf);
-    if (wifiMode()) snprintf(buf, sizeof(buf), "listening ch %u%s", currentChannelNum, parkedIdx >= 0 ? " (parked)" : " (hopping)");
+    if (hopMode()) snprintf(buf, sizeof(buf), "listening ch %u%s", currentChannelNum, parkedIdx >= 0 ? " (parked)" : " (hopping)");
     else snprintf(buf, sizeof(buf), "BLE scan, %lu cycles", static_cast<unsigned long>(bleScanCycles));
     lv_label_set_text(huntInfo2, buf);
 }
@@ -1613,7 +1944,7 @@ void refreshSystem(float global) {
     char buf[64];
     char r1[16], r2[16];
     int n = 0;
-    if (wifiMode()) {
+    if (hopMode()) {
         int top[3];
         sortTop3(top);
         if (top[0] >= 0) {
@@ -1661,7 +1992,7 @@ void refreshSystem(float global) {
                                  static_cast<unsigned long>(capDropped));
     else snprintf(buf, sizeof(buf), "capture: off (host: cap 1)");
     lv_label_set_text(sysLines[n++], buf);
-    if (huntActive) { char m[18]; fmtMac(m, sizeof(m), huntMac); snprintf(buf, sizeof(buf), "hunt: %s", m); }
+    if (huntActive) { char m[26]; huntIdText(m, sizeof(m)); snprintf(buf, sizeof(buf), "hunt: %s", m); }
     else snprintf(buf, sizeof(buf), "hunt: off");
     lv_label_set_text(sysLines[n++], buf);
     snprintf(buf, sizeof(buf), "radio %s/%s/%s", errBand == ESP_OK ? "band ok" : "band ERR",
@@ -1669,8 +2000,8 @@ void refreshSystem(float global) {
     lv_label_set_text(sysLines[n++], buf);
     snprintf(buf, sizeof(buf), "heap %u kB free", static_cast<unsigned>(ESP.getFreeHeap() / 1024));
     lv_label_set_text(sysLines[n++], buf);
-    lv_label_set_text(sysLines[n++], "BOOT: tap=page  hold=band");
-    lv_label_set_text(sysLines[n++], "(5g > 2.4g > both > ble)");
+    lv_label_set_text(sysLines[n++], "BOOT: tap=page  hold=mode");
+    lv_label_set_text(sysLines[n++], "(5g > 2.4g > both > ble > 15.4)");
     for (; n < kSysLines; n++) lv_label_set_text(sysLines[n], "");
 }
 
@@ -1686,7 +2017,7 @@ void driveLed(float global) {
         else               setLedColor(LED_BLUE, 30);
         return;
     }
-    if (!wifiMode()) { setLedColor(LED_BLUE, 25); return; }
+    if (!hopMode()) { setLedColor(LED_BLUE, 25); return; }
     if (global > 75.0f)      setLedColor(LED_RED);
     else if (global > 50.0f) setLedColor(LED_ORANGE);
     else if (global > 25.0f) setLedColor(LED_YELLOW);
@@ -1694,10 +2025,10 @@ void driveLed(float global) {
 }
 
 void refreshUi() {
-    const float global = wifiMode() ? globalActivityMax() : 0.0f;
+    const float global = hopMode() ? globalActivityMax() : 0.0f;
     driveLed(global);
 
-    if (wifiMode()) {
+    if (hopMode()) {
         uint16_t liveUnique;
         portENTER_CRITICAL(&g_accumMux);
         liveUnique = g_accum.unique;
@@ -1801,7 +2132,7 @@ void Bandwatch_Loop(void) {
         lastDevMs = now;
         sendDevices();
     }
-    if (!wifiMode() && now - bleStatusMs >= 1000) {
+    if (bandMode == BAND_BLE && now - bleStatusMs >= 1000) {
         bleStatusMs = now;
         sendBleStatus();
     }

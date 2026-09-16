@@ -13,10 +13,11 @@ Serial protocol (one line each):
     {"t":"s", "n":12, "ch":[..]}  full snapshot after every sweep
     {"t":"w", "dev":[...]}        Wi-Fi transmitter table (every 2 s)
     {"t":"b", "dev":[...]}        BLE advertiser table (every 2 s, BLE mode)
+    {"t":"z", "dev":[...]}        802.15.4 (Zigbee / Thread) node table (every 2 s, 802.15.4 mode)
     {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
-Commands to the device: "band 5g|2.4g|both|ble", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0", "info".
+Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0", "info".
 
 Vendor names come from the IEEE OUI registry: the first run downloads oui.csv (~3 MB) into ~/.cache/bandwatch/
 in the background; until then (or offline) a small built-in table is used.
@@ -129,6 +130,10 @@ def find_port():
     return None
 
 
+PROTO_154 = {0: "802.15.4 (unknown upper layer)", 1: "Zigbee", 2: "Zigbee Green Power", 3: "Thread / 6LoWPAN",
+             4: "MAC-layer encrypted (Thread-style)"}
+
+
 def channel_freq_mhz(ch):
     if ch == 14:
         return 2484
@@ -216,28 +221,37 @@ def phy_string(phy, ch):
 
 
 class PcapWriter:
-    """pcap (LINKTYPE_IEEE802_11_RADIOTAP = 127) with TSFT, flags, channel and dBm signal per frame."""
+    """pcap writer. Wi-Fi: LINKTYPE_IEEE802_11_RADIOTAP (127) with TSFT, flags, channel and dBm signal per frame.
+    802.15.4: LINKTYPE_IEEE802_15_4_TAP (283) with FCS-type, RSS and channel TLVs (Wireshark decodes Zigbee/Thread)."""
 
     RT_PRESENT = (1 << 0) | (1 << 1) | (1 << 3) | (1 << 5)
     RT_LEN = 24
 
-    def __init__(self, path, fcs_present=True):
+    def __init__(self, path, fcs_present=True, link="wifi"):
         self.path = path
         self.fcs_present = fcs_present
+        self.link = link
         self.frames = 0
         self.bytes = 0
         self.f = open(path, "wb")
-        self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 127))
+        self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, 283 if link == "154" else 127))
         self.lock = threading.Lock()
 
     def write(self, ch, rssi, ts_us, orig_len, data):
-        flags = 0x10 if self.fcs_present else 0x00
-        band_flags = (0x0100 if ch > 14 else 0x0080) | 0x0040
-        rt = struct.pack("<BBHI", 0, 0, self.RT_LEN, self.RT_PRESENT)
-        rt += struct.pack("<Q", ts_us)
-        rt += struct.pack("<BB", flags, 0)
-        rt += struct.pack("<HH", channel_freq_mhz(ch), band_flags)
-        rt += struct.pack("<bB", max(-128, min(127, rssi)), 0)
+        if self.link == "154":
+            # TAP header: version, reserved, total length; TLVs padded to 4 bytes
+            rt = struct.pack("<BBH", 0, 0, 28)
+            rt += struct.pack("<HHB3x", 0, 1, 0)                                   # FCS type: none (radio strips it)
+            rt += struct.pack("<HHf", 1, 4, float(rssi))                            # RSS in dBm
+            rt += struct.pack("<HHHBx", 3, 3, ch, 0)                                # channel assignment (page 0)
+        else:
+            flags = 0x10 if self.fcs_present else 0x00
+            band_flags = (0x0100 if ch > 14 else 0x0080) | 0x0040
+            rt = struct.pack("<BBHI", 0, 0, self.RT_LEN, self.RT_PRESENT)
+            rt += struct.pack("<Q", ts_us)
+            rt += struct.pack("<BB", flags, 0)
+            rt += struct.pack("<HH", channel_freq_mhz(ch), band_flags)
+            rt += struct.pack("<bB", max(-128, min(127, rssi)), 0)
         now = time.time()
         sec, usec = int(now), int((now - int(now)) * 1_000_000)
         rec = struct.pack("<IIII", sec, usec, len(rt) + len(data), len(rt) + orig_len) + rt + data
@@ -270,6 +284,8 @@ class Bandwatch:
         }
         self.wifi_devs = {}
         self.ble_devs = {}
+        self.z_devs = {}
+        self.cap_band = None
         self.history = deque(maxlen=HISTORY_LEN)
         self._last_hist = 0
 
@@ -418,6 +434,8 @@ class Bandwatch:
             st["channels"] = {c: v for c, v in st["channels"].items() if c in chs}
         elif t == "w":
             self.merge_wifi(msg.get("dev", []))
+        elif t == "z":
+            self.merge_154(msg.get("dev", []))
         elif t == "b":
             self.merge_ble(msg.get("dev", []))
         elif t == "ble":
@@ -428,6 +446,8 @@ class Bandwatch:
             st["log"].append("ack " + json.dumps({k: v for k, v in msg.items() if k != "t"}))
             if "band" in msg:
                 st["band"] = msg["band"]
+                if self.pcap and self.cap_band != msg["band"]:
+                    self.stop_capture()   # link type differs per radio: a new capture starts a new file
             if "park" in msg:
                 st["park"] = msg["park"]
             if "cap" in msg:
@@ -495,6 +515,29 @@ class Bandwatch:
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.ble_devs, now)
 
+    def merge_154(self, rows):
+        now = time.time()
+        with self.dlock:
+            for r in rows:
+                try:
+                    key, rssi, mx, frames, age, ch, pan, short, proto, flags, lqi = r[:11]
+                except Exception:
+                    continue
+                d = self.z_devs.get(key)
+                if d is None:
+                    d = {"key": key, "first": now, "hist": deque(maxlen=DEV_HIST_LEN)}
+                    self.z_devs[key] = d
+                ext = bool(flags & 1)
+                d.update({"rssi": rssi, "max": mx, "frames": frames, "last": now - age / 1000.0, "ch": ch,
+                          "pan": None if pan == 0xFFFF else f"{pan:04x}", "short": None if short == 0xFFFF else f"{short:04x}",
+                          "ext": key if ext else "", "vendor": self.oui.lookup(key) if ext else "",
+                          "proto": PROTO_154.get(proto, "?"), "proto_id": proto,
+                          "beacons": bool(flags & 2), "permit_join": bool(flags & 4), "mac_secured": bool(flags & 8),
+                          "data": bool(flags & 16), "lqi": lqi})
+                if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
+                    d["hist"].append((round(now, 1), rssi))
+            self._expire(self.z_devs, now)
+
     @staticmethod
     def _expire(table, now):
         for mac in [m for m, d in table.items() if now - d["last"] > DEV_EXPIRE_S]:
@@ -520,8 +563,11 @@ class Bandwatch:
         if self.pcap:
             return self.state["capture"]
         os.makedirs(self.captures_dir, exist_ok=True)
-        path = os.path.join(self.captures_dir, time.strftime("bandwatch-%Y%m%d-%H%M%S.pcap"))
-        self.pcap = PcapWriter(path, fcs_present=self.fcs_present)
+        band = self.state["band"]
+        link = "154" if band == "154" else "wifi"
+        path = os.path.join(self.captures_dir, time.strftime("bandwatch-%s-%%Y%%m%%d-%%H%%M%%S.pcap" % ("802154" if link == "154" else "wifi")))
+        self.pcap = PcapWriter(path, fcs_present=self.fcs_present, link=link)
+        self.cap_band = band
         self.state["capture"] = {"file": path, "frames": 0, "bytes": 0, "started": time.time()}
         if snaplen:
             self.send(f"snap {int(snaplen)}")
@@ -543,7 +589,7 @@ class Bandwatch:
             return
         mac = mac.lower()
         if ch is None:
-            d = self.wifi_devs.get(mac)
+            d = self.wifi_devs.get(mac) or self.z_devs.get(mac)
             ch = d["ch"] if d else 0
         self.send(f"hunt {mac} {int(ch or 0)}")
 
@@ -554,15 +600,16 @@ class Bandwatch:
         with self.dlock:
             wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.wifi_devs.values()]
             ble = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.ble_devs.values()]
+            zig = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.z_devs.values()]
             src = None
             if st["hunt"]:
-                src = self.wifi_devs.get(st["hunt"]["mac"]) or self.ble_devs.get(st["hunt"]["mac"])
+                src = self.wifi_devs.get(st["hunt"]["mac"]) or self.ble_devs.get(st["hunt"]["mac"]) or self.z_devs.get(st["hunt"]["mac"])
         hunt = None
         if st["hunt"]:
             hu = st["hunt"]
             hunt = {"mac": hu["mac"], "rssi": hu["rssi"], "age_ms": hu["age_ms"], "count": hu["count"],
-                    "hist": list(hu["hist"]), "label": (src or {}).get("ssid") or (src or {}).get("name") or "",
-                    "vendor": (src or {}).get("vendor", ""), "kind": (src or {}).get("kind", "")}
+                    "hist": list(hu["hist"]), "label": (src or {}).get("ssid") or (src or {}).get("name") or (src or {}).get("proto") or "",
+                    "vendor": (src or {}).get("vendor", ""), "kind": (src or {}).get("kind", "") or ((src or {}).get("pan") and "PAN " + src["pan"]) or ""}
         return {
             "connected": st["connected"], "port": st["port"],
             "age": round(now - st["last_rx"], 1) if st["last_rx"] else None,
@@ -570,7 +617,7 @@ class Bandwatch:
             "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
             "channels": chans, "history": list(self.history), "capture": st["capture"],
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "ble_devs": ble, "hunt": hunt, "ble": st["ble"], "oui_source": self.oui.source,
+            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "ble": st["ble"], "oui_source": self.oui.source,
         }
 
 
@@ -617,7 +664,7 @@ def make_handler(bw, html_path):
                 self.end_headers()
                 return
             cmd = req.get("cmd")
-            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble"):
+            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154"):
                 bw.send(f"band {req['value']}")
             elif cmd == "park":
                 bw.send(f"park {int(req.get('value') or 0)}")

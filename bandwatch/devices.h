@@ -45,6 +45,40 @@ struct BleDev {
     uint8_t flags;       // bit0 connectable, bit1 legacy advertisement, bit2 scannable
 };
 
+// IEEE 802.15.4 (Zigbee / Thread) node, keyed by extended (64-bit) address when the frame carried one,
+// otherwise by PAN id + short address (key bytes 0..1 = 0xFF 0xFE marker, 2..3 pan, 4..5 short).
+constexpr int kDev154Slots = 48;
+struct Dev154 {
+    uint8_t key[8];
+    uint16_t shortAddr;  // 0xFFFF = unknown
+    uint16_t pan;        // 0xFFFF = unknown / broadcast
+    int8_t rssi;
+    int8_t maxRssi;
+    uint16_t frames;
+    uint32_t lastMs;     // 0 = empty slot
+    uint8_t ch;
+    uint8_t lqi;
+    uint8_t proto;       // 0 unknown, 1 Zigbee, 2 Zigbee Green Power, 3 Thread / 6LoWPAN, 4 MAC-secured (likely Thread)
+    uint8_t flags;       // bit0 extended address known, bit1 sends beacons (coordinator/router), bit2 permit-join, bit3 MAC security, bit4 data seen, bit5 ack seen
+};
+
+inline bool key8Eq(const uint8_t* a, const uint8_t* b) {
+    for (int i = 0; i < 8; i++) if (a[i] != b[i]) return false;
+    return true;
+}
+inline int dev154FindSlot(Dev154* tab, int slots, const uint8_t* key) {
+    const int start = (key[7] * 31 + key[6] * 17 + key[5] * 7 + key[4] * 3 + key[2]) % slots;
+    int oldest = -1;
+    uint32_t oldestMs = 0xFFFFFFFFu;
+    for (int p = 0; p < kDevProbe; p++) {
+        const int i = (start + p) % slots;
+        if (tab[i].lastMs == 0) return i;
+        if (key8Eq(tab[i].key, key)) return i;
+        if (tab[i].lastMs < oldestMs) { oldestMs = tab[i].lastMs; oldest = i; }
+    }
+    return oldest;
+}
+
 inline int macHashIdx(const uint8_t* mac, int slots) {
     return (mac[3] * 31 + mac[4] * 17 + mac[5] * 7 + mac[2]) % slots;
 }

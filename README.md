@@ -2,9 +2,12 @@
 
 A Wi‑Fi **activity** meter and device finder for the dual‑band ESP32‑C5. Port of
 [PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD)'s *Bandwatch* (2.4 GHz,
-ESP32‑C6) to the **Waveshare ESP32-C5-LCD-1.47**, extended with 5 GHz sweeping, a Bluetooth LE scan mode, Wi‑Fi
-and BLE device tables, a "hunt" mode for locating one device by signal strength, an LCD UI driven by the BOOT
+ESP32‑C6) to the **Waveshare ESP32-C5-LCD-1.47**, extended with 5 GHz sweeping, Bluetooth LE scanning, IEEE 802.15.4 (Zigbee / Thread) sniffing, device tables
+for all three radios, a "hunt" mode for locating one device by signal strength, an LCD UI driven by the BOOT
 button, and a host‑side web dashboard with pcap capture.
+
+Developer documentation (architecture, serial protocol, hardware references, board quirks): [`docs/DEVELOPER.md`](docs/DEVELOPER.md).
+A short orientation for AI assistants is in [`CLAUDE.md`](CLAUDE.md).
 
 Bandwatch listens to 802.11 traffic in promiscuous mode and reports a **busy score** (0–100) per channel as a proxy
 for channel load. It does **not** measure RF power, true airtime occupancy, or non‑Wi‑Fi interference, and it
@@ -13,19 +16,21 @@ never transmits.
 ## What it does
 
 - **Modes**: 5 GHz (36–64, 100–144, 149–165; 25 channels, ~5.5 s per sweep), 2.4 GHz (1–13), **both**
-  interleaved (38 channels, ~8.4 s), or **Bluetooth LE** (continuous scan; Wi‑Fi sniffing pauses). The C5 has one
-  radio, so these are time‑shared, never simultaneous.
+  interleaved (38 channels, ~8.4 s), **Bluetooth LE** (continuous scan), or **802.15.4** (Zigbee / Thread,
+  channels 11–26, ~3.5 s per sweep). The C5 has one radio, so these are time‑shared, never simultaneous.
 - **Devices**: every Wi‑Fi transmitter (RSSI, max, frames, channel) and, for access points, the beacon details:
   SSID, security (Open / WEP / WPA / WPA2‑PSK / WPA2‑Enterprise / WPA3‑SAE / WPA3‑Enterprise / OWE, PMF),
   PHY generation (b/g, n, ac, ax, be), channel width, BSS‑load utilisation and client count, country. Every BLE
   advertiser: address type, name, manufacturer (Bluetooth SIG company id), Apple continuity type (AirTag / Find My,
-  AirPods, Handoff, Nearby, AirPlay…), GAP appearance, service UUIDs, TX power, connectable flag.
+  AirPods, Handoff, Nearby, AirPlay…), GAP appearance, service UUIDs, TX power, connectable flag. Every 802.15.4
+  node: extended or PAN/short address, vendor (from the EUI‑64), protocol (Zigbee, Zigbee Green Power, Thread /
+  6LoWPAN, MAC‑secured), role (beaconing coordinator/router), **permit‑join** flag, LQI.
 - **Hunt**: pick one MAC (Wi‑Fi or BLE) and the LCD shows a big live RSSI with a bar, the LED colour tracks
   distance, the radio parks on the target's channel, and the dashboard plots the RSSI trend.
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
-- **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble; on the Hunt page a
-  long press stops the hunt):
+- **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble → 802.15.4; on the
+  Hunt page a long press stops the hunt):
   1. *Overview* (Wi‑Fi modes): max busy score + bar, sweep count, top‑3 channels with pkt/s, per‑channel spectrum
      strip (current channel in cyan), last‑dwell stats for the current channel, transmitter estimate.
   2. *Channels* (Wi‑Fi modes): every channel of the active band with score bar and value.
@@ -37,8 +42,9 @@ never transmits.
 - **USB serial protocol** (JSON lines) for the host tool: live stats, band/park/capture commands, and raw
   802.11 frames streamed as base64 so the Mac writes standard **pcap** files.
 - **Host dashboard** (`host/bandwatch_host.py`): Overview tab (bar chart per channel, trend, table), **Wi‑Fi devices**
-  and **Bluetooth LE** tabs (sortable, filterable, vendor names from the IEEE OUI registry, RSSI sparklines, a
-  *Hunt* button per row), a hunt panel with live RSSI trend, mode/park/capture controls.
+  **Bluetooth LE** and **Zigbee / Thread** tabs (sortable, filterable, vendor names from the IEEE OUI registry,
+  RSSI sparklines, a *Hunt* button per row), a hunt panel with live RSSI trend, mode/park/capture controls.
+  Tables freeze while the mouse is over them and there is a Pause button (space bar), so buttons stay put.
 
 ## Hardware
 
@@ -86,8 +92,10 @@ per channel. Throughput is bounded by USB CDC (~300 KB/s of frame data); the dev
 (`drop` in the dashboard). Frames are captured as received, i.e. encrypted payloads stay encrypted. If Wireshark
 reports bad FCS on every frame, run with `--no-fcs`.
 
-Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble`, `park <ch>|0`,
-`cap 0|1`, `snap <bytes>`, `hunt <mac> [ch]` / `hunt 0`, `info`.
+Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
+`cap 0|1`, `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `info`, `reboot`.
+802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need
+the network key, Wireshark knows the default Zigbee trust‑centre key).
 
 Vendor names: the host downloads the IEEE OUI registry (`oui.csv`, ~3 MB) once into `~/.cache/bandwatch/` and
 uses a small built‑in table until then (`--no-oui-download` to skip). Randomized MACs (most phones, BLE random
@@ -105,10 +113,10 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
 ## Limitations
 
-- One radio: 2.4 GHz and 5 GHz are swept alternately, never observed simultaneously, and Bluetooth LE mode
-  pauses Wi‑Fi sniffing. No Bluetooth Classic on the C5. The prebuilt BLE stack scans legacy advertisements only
-  (Bluetooth 5 extended / coded‑PHY advertising is compiled out of the Arduino core). 802.15.4 (Zigbee/Thread) is
-  supported by the chip but not used yet.
+- One radio: Wi‑Fi bands, Bluetooth LE and 802.15.4 are exclusive modes. No Bluetooth Classic on the C5. The
+  prebuilt BLE stack scans legacy advertisements only (Bluetooth 5 extended / coded‑PHY advertising is compiled
+  out of the Arduino core). 802.15.4 protocol detection is heuristic (network-layer header bytes); Zigbee/Thread
+  payloads are encrypted on the air and stay encrypted here.
 - RAM: 320 KB with no PSRAM. Only the visible LCD page exists as widgets; the capture ring is allocated per
   capture; BLE scan cycles are short and cut early when heap runs low (~28 KB).
 - The busy score is a traffic proxy, not calibrated airtime; thresholds were tuned on 2.4 GHz, so a busy
@@ -118,6 +126,8 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
 ## Versions
 
+- **1.2** — 802.15.4 (Zigbee / Thread) sniff mode with node table and pcap, Zigbee/Thread dashboard tab, pause /
+  hover‑freeze for device tables, `reboot` command, developer docs.
 - **1.1** — Bluetooth LE mode, Wi‑Fi/BLE device tables with beacon and advertisement details, hunt mode, Devices
   and Hunt LCD pages, dashboard tabs with vendor lookup.
 - **1.0** — 5 GHz / 2.4 GHz / both sweeping, three LCD pages on the BOOT button, serial protocol, host dashboard

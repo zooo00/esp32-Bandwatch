@@ -1,0 +1,66 @@
+# Bandwatch — notes for an AI assistant (or any new developer)
+
+Read `README.md` for what the product does and `docs/DEVELOPER.md` for how it is built. This file is the
+short orientation.
+
+## What this is
+Firmware for the **Waveshare ESP32-C5-LCD-1.47** board (ESP32-C5, 1.47" ST7789 LCD, WS2812 LED, BOOT button)
+plus a Python host tool. The device sniffs Wi-Fi (2.4 + 5 GHz), scans Bluetooth LE, or sniffs IEEE 802.15.4
+(Zigbee/Thread), shows results on the LCD, and streams JSON over USB serial to `host/bandwatch_host.py`, which
+serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
+
+## Layout
+- `bandwatch/` — Arduino sketch. `bandwatch.cpp` is almost everything (radio control, device tables, host
+  protocol, LVGL UI). `devices.h` = device table structs/hash. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h`
+  = display glue (from the upstream C6 project, pins changed).
+- `host/bandwatch_host.py` — serial reader, HTTP API, pcap writer, OUI/vendor lookup. `host/dashboard.html` —
+  the single-page UI (no build step, no dependencies).
+- `build.sh` (compile/flash via arduino-cli), `setup.sh` (install toolchain), `tools/ctags/` (Apple-Silicon
+  workaround), `docs/` (developer docs), `captures/` (pcaps, git-ignored).
+
+## Build / flash / run (all from repo root)
+```
+./setup.sh                      # once per machine
+./build.sh                      # compile
+./build.sh --upload             # flash (stop the host tool first: it holds the serial port)
+python3 host/bandwatch_host.py  # dashboard + pcap
+```
+Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (see below).
+
+## Hard-won rules for this board (do not relearn these)
+1. **DTR/RTS edges reset the chip.** The C5's USB-Serial-JTAG maps DTR/RTS to BOOT/EN. Opening the port with
+   pyserial `dtr=False, rts=False` reboots the board; `dtr=True, rts=True` (the macOS default on open) is safe.
+   `arduino-cli monitor ... -c dtr=on,rts=on`. Never "toggle to reset" from the host.
+2. **After flashing the chip may sit in ROM download mode** ("waiting for download", `boot:0x2e`) because a
+   USB-initiated reset does not re-sample the BOOT strap. `build.sh` detects this and issues
+   `esptool --before no-reset --after watchdog-reset run`; otherwise press RESET.
+3. **Do not run esptool against a running board just to reset it** — its connection attempts toggle DTR/RTS
+   repeatedly and reboot the board over and over.
+4. **RAM (320 KB, no PSRAM) is the constraint.** Static usage must stay well under ~80 KB. Only the visible LCD
+   page exists as LVGL widgets; the capture ring is malloc'ed per capture; LVGL uses `LV_STDLIB_CLIB`; the BLE
+   scan cache is cleared every 3 s and cut early below ~28 KB free. Out-of-memory shows up as
+   `abort() ... lock_init_generic` or a store fault in `lv_obj_class_create_obj`.
+5. **One radio.** Wi-Fi bands, BLE and 802.15.4 are exclusive modes; `setBandMode()` tears one down and starts
+   the next. Capture is switched off on every mode change (pcap link type differs).
+6. **Serial output never blocks** (`setTxTimeoutMs(0)`, 8 KB TX buffer) and every line first checks
+   `Serial.availableForWrite()` so lines are dropped whole, never truncated.
+7. **The prebuilt Arduino core cannot be reconfigured** (sdkconfig is fixed): BLE extended advertising is off,
+   802.15.4 is on, 5 GHz Wi-Fi is on. Changing that means switching to ESP-IDF.
+8. Apple Silicon without Rosetta: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags.
+   arduino-cli caches prototype generation — `rm -rf build` after touching the wrapper.
+
+## Where to change things
+- Channel lists / dwell / scoring: top of `bandwatch.cpp` (`kChannels`, `kChanBand`, `kDwellMs`, `computeBusyScore`).
+- Serial protocol: `sendHello/sendDwell/sendSweep/sendDevices/sendBleStatus`, `handleCommand`. Keep it in sync
+  with `host/bandwatch_host.py` (`handle_line`, `merge_*`) and `docs/DEVELOPER.md`.
+- LCD pages: `build*Page()` + `refresh*()`; add a page in the `Page` enum and `showPage()`.
+- Dashboard: `host/dashboard.html`, one `render*()` per section, polled from `/api/state` once a second.
+
+## Testing without the LCD
+Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
+lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `reboot`.
+Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode
+addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
+
+## Version history
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables.

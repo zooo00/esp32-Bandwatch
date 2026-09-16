@@ -133,7 +133,12 @@
         <label>&nbsp;</label>
         <button class="primary" id="capBtn">Start pcap capture</button>
       </div>
+      <div class="control" id="sdCtl">
+        <label>&nbsp;</label>
+        <button class="primary" id="sdBtn">Record to SD</button>
+      </div>
       <div class="control capinfo" id="capInfo"></div>
+      <div class="control capinfo" id="sdInfo"></div>
     </div>
   </section>
 
@@ -269,6 +274,7 @@
   $('#bandSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) post({ cmd: 'band', value: b.dataset.band }); });
   $('#park').addEventListener('change', (e) => post({ cmd: 'park', value: +e.target.value }));
   $('#capBtn').addEventListener('click', () => post({ cmd: 'capture', value: !(state && state.capture), snaplen: +$('#snap').value || 1600 }));
+  $('#sdBtn').addEventListener('click', () => post({ cmd: 'sdcap', value: !(state && state.sd && state.sd.cap) }));
   $('#huntStop').addEventListener('click', () => post({ cmd: 'hunt', mac: null }));
   $('#deauthStop').addEventListener('click', () => post({ cmd: 'deauth', mac: null }));
   $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (!b) return; tab = b.dataset.tab; document.querySelectorAll('#tabs button[data-tab]').forEach(x => x.classList.toggle('active', x === b)); ['overview', 'wifi', 'ble', 'zig'].forEach(t => $('#tab-' + t).hidden = t !== tab); if (state) render(state); });
@@ -307,6 +313,18 @@
     $('#capInfo').innerHTML = !wifi ? 'pcap capture is available in Wi‑Fi and 802.15.4 modes' : cap
       ? `<b>${fmt(cap.frames)}</b> frames · ${fmt(cap.bytes / 1024, 1)} KB · device drops ${fmt(s.drop)}<br><code>${esc(cap.file)}</code>`
       : `pcap files go to <code>${esc(s.captures_dir)}</code> (radiotap, open in Wireshark)`;
+
+    const sd = s.sd || {};
+    const rec = !!sd.cap;
+    $('#sdBtn').textContent = rec ? 'Stop SD recording' : 'Record to SD';
+    $('#sdBtn').classList.toggle('stop', rec);
+    $('#sdBtn').disabled = !wifi || !sd.mounted;
+    $('#sdInfo').innerHTML = !sd.mounted
+      ? 'microSD: <b>no card</b> — insert one to record pcap on the device'
+      : rec
+        ? `microSD: recording <b>${fmt(sd.frames)}</b> frames · ${fmt((sd.bytes || 0) / 1024, 1)} KB` +
+          `${sd.err ? ` · <b style="color:var(--critical)">${fmt(sd.err)} write errors</b>` : ''}<br><code>${esc(sd.file)}</code>`
+        : `microSD: ${fmt(sd.mb)} MB card ready${sd.clock === 0 ? ' · <b>clock not set</b> (files will be numbered)' : ''}`;
   }
 
   function renderHunt(s) {

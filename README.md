@@ -48,6 +48,9 @@ a deauth attack is running — it never transmits.
 - **RGB LED** mirrors the max busy score (green → yellow → orange → red).
 - **USB serial protocol** (JSON lines) for the host tool: live stats, band/park/capture commands, and raw
   802.11 frames streamed as base64 so the Mac writes standard **pcap** files.
+- **microSD pcap recording**: the device writes the pcap itself (`sdcap 1`), so a capture does not depend on
+  USB throughput. The two sinks are independent — record to card and watch live in Wireshark at the same
+  time. Files can be listed and pulled back over serial without ejecting the card.
 - **Host dashboard** (`host/bandwatch_host.py`): Overview tab (bar chart per channel, trend, table), **Wi‑Fi devices**
   **Bluetooth LE** and **Zigbee / Thread** tabs (sortable, filterable, vendor names from the IEEE OUI registry,
   RSSI sparklines, a *Hunt* button per row and a *Deauth* button per AP row), a hunt panel with live RSSI trend,
@@ -107,8 +110,20 @@ per channel. Throughput is bounded by USB CDC (~300 KB/s of frame data); the dev
 (`drop` in the dashboard). Frames are captured as received, i.e. encrypted payloads stay encrypted. If Wireshark
 reports bad FCS on every frame, run with `--no-fcs`.
 
+**microSD recording.** `sdcap 1` starts recording pcap directly to the card (`sdcap 0` stops); the *Record to
+SD* button on the dashboard does the same. The device writes the same radiotap / 802.15.4‑TAP format the host
+tool writes, so the files open in Wireshark unchanged. `sdinfo` reports card size and progress, `sdls` lists
+files and `sdread <path>` streams one back over serial so captures can be retrieved without ejecting the card.
+
+The device has no RTC: the host sends `time <epoch>` on connect, which is what dates the records and names the
+files (`/bandwatch-wifi-YYYYmmdd-HHMMSS.pcap`, **UTC** — the host names its own files in local time). Without
+a host the files fall back to a counter and uptime-based timestamps. FATFS costs ~30 KB of RAM, so the card is
+mounted only while it is in use and released again afterwards; while recording, the capture ring is sized down
+accordingly (fewer slots, so expect more `drop` on a very busy channel than with USB capture alone).
+
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
-`cap 0|1`, `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
+`cap 0|1`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`,
+`snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
 modes only — parks on the AP's channel and kicks its stations, auto‑stops after 5 min), `info`, `reboot`.
 Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
 `cap 1` afterwards.
@@ -128,7 +143,8 @@ per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
 `kChannels[]`, `kDwellMs` (220), `kStrongThresholdDbm` (−65), `kBusyEmaAlpha` (0.22), `kLongPressMs` (700),
 `kCapSlots` / `kCapMaxLen` (capture ring: 20 × 1600 B), `kCountryCode` ("EU", only affects the regulatory table),
-`kDeauthMaxMs` (5 min, the deauth dead‑man's switch).
+`kDeauthMaxMs` (5 min, the deauth dead‑man's switch), `kSdCsPin` (4), `kSdSpiHz` (20 MHz), `kSdBufSize` (4 KB,
+matches the FATFS sector size), `kSdFlushMs` (5 s), `kSdBudgetUs` (8 ms of SD writing per loop).
 
 ## Known issues
 

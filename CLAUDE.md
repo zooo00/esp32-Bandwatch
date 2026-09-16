@@ -58,7 +58,12 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    correct `0xC0 0x00` deauth. Never claim it works without an external witness (a second radio in monitor
    mode). Full log and next steps: `docs/DEVELOPER.md` §11. Note macOS redacts SSIDs in
    `system_profiler SPAirPortDataType`, so a Mac Wi-Fi scan cannot identify an injected network by name.
-11. Apple Silicon: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags. `build.sh`
+11. **The SD card shares the LCD's SPI bus** (CS GPIO4, 20 MHz vs the LCD's 40 MHz). Safe only because both
+   wrap transfers in beginTransaction/endTransaction and both run on the loop task — never touch the card
+   from a radio callback or another task. Mounting FATFS costs ~30 KB, so the card is mounted only while in
+   use (`sdProbeAtBoot` / `sdMount` / `sdUnmount`); leaving it mounted drops BLE to ~1 KB above its scan
+   floor. `docs/DEVELOPER.md` §12.
+12. Apple Silicon: Arduino's bundled ctags is x86_64; `tools/ctags/ctags` wraps universal-ctags. `build.sh`
    routes ctags through that wrapper **always**, so `brew install universal-ctags` is required on arm64 even
    when Rosetta is present (the wrapper exits if it cannot find it). arduino-cli caches prototype generation —
    `rm -rf build` after touching the wrapper.
@@ -73,6 +78,8 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 ## Testing without the LCD
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only), `reboot`.
+microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>` (no RTC —
+the host sends this on connect; it dates the pcap records and names the files, in UTC).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
 SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `softap <ch>|0`
 (**proof of concept**: open SoftAP on that channel, injects from `WIFI_IF_AP`; tears down sniffing while up,
@@ -81,4 +88,4 @@ Crash text is printed to USB before the reboot but the port re-enumerates, so ke
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12.

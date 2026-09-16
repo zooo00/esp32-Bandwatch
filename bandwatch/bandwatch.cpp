@@ -13,6 +13,9 @@
 #include <sdkconfig.h>
 #include <esp_system.h>
 #include <esp_ieee802154.h>
+#include <SPI.h>
+#include <FS.h>
+#include <SD.h>
 
 #if !CONFIG_SOC_WIFI_SUPPORT_5G
 #error "Bandwatch needs a 5 GHz capable target (ESP32-C5). Select 'ESP32C5 Dev Module'."
@@ -23,7 +26,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.2.5";
+constexpr const char* kVersion = "1.3";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -80,6 +83,15 @@ constexpr int kCapSlotsMax = 20;
 constexpr int kCapSlotsMin = 4;
 constexpr uint16_t kCapMaxLen = 1600;
 constexpr uint32_t kCapHeapReserve = 14000;   // keep this much heap free after allocating the ring
+
+// microSD pcap sink. The card is on the LCD's SPI bus (CS GPIO4); both are driven from the loop task and
+// every LCD op is wrapped in beginTransaction/endTransaction, so sharing is safe. FATFS here is built with
+// 4096-byte sectors, so buffer whole sectors before writing.
+constexpr int kSdCsPin = 4;
+constexpr uint32_t kSdSpiHz = 20000000;       // SD over SPI; the LCD runs the same bus at 40 MHz
+constexpr size_t kSdBufSize = 4096;           // == CONFIG_FATFS_SECTOR_4096
+constexpr uint32_t kSdFlushMs = 5000;         // fsync cadence: a power cut costs at most this much capture
+constexpr uint32_t kSdBudgetUs = 8000;        // max time per loop spent writing, so channel hopping keeps time
 
 // LCD pages
 enum Page : int { PAGE_OVERVIEW = 0, PAGE_CHANNELS, PAGE_DEVICES, PAGE_HUNT, PAGE_SYSTEM, PAGE_COUNT };
@@ -241,7 +253,20 @@ CapFrame* capRing = nullptr;
 int capSlots = 0;
 volatile uint8_t capHead = 0;     // next slot the producer writes
 volatile uint8_t capTail = 0;     // next slot the consumer reads
-volatile bool captureEnabled = false;
+volatile bool captureEnabled = false;   // USB sink
+volatile bool capActive = false;        // either sink wants frames: the RX paths gate on this
+bool sdMounted = false, sdCapEnabled = false;   // microSD sink (definitions further down)
+bool sdCardPresent = false;     // seen at boot; FATFS is only mounted while the card is actually in use
+uint32_t sdCardMb = 0;          // cached so hello can report it without mounting
+File sdFile;
+uint8_t* sdBuf = nullptr;
+size_t sdBufLen = 0;
+uint32_t sdFrames = 0, sdBytes = 0, sdDropped = 0, sdLastFlushMs = 0, sdErrors = 0;
+char sdPath[48] = "";
+// Wall clock: the host sends "time <epoch>"; without it timestamps fall back to uptime (1970-based).
+uint32_t epochBase = 0;         // epoch seconds at millis() == epochBaseMs
+uint32_t epochBaseMs = 0;
+bool epochValid = false;
 volatile uint16_t capSnapLen = kCapMaxLen;
 volatile uint32_t capDropped = 0;
 uint32_t capSent = 0;
@@ -565,7 +590,7 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
         trackWifiDevice(ipkt->hdr.addr2, pkt->rx_ctrl.rssi, pkt->payload[0], pkt->payload, sigLen);
     }
 
-    if (captureEnabled && capRing) {
+    if (capActive && capRing) {
         const uint8_t head = capHead;
         const uint8_t next = (head + 1) % capSlots;
         if (next == capTail) {
@@ -835,7 +860,7 @@ extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t* frame, esp_ieee80
             }
         }
 
-        if (captureEnabled && capRing) {
+        if (capActive && capRing) {
             const uint8_t head = capHead;
             const uint8_t next = (head + 1) % capSlots;
             if (next == capTail) {
@@ -997,8 +1022,41 @@ void stopDeauth();   // defined below with the hunt helpers; a mode change tears
 
 // Stop capturing and give the ring back to the heap. Safe from the loop task only: the radio callbacks
 // re-read capRing/captureEnabled on every frame and run to completion, so they never hold a stale pointer.
+void sdCloseCapture();   // defined with the SD sink below
+
+// Both sinks share one ring; allocate it on first use and keep it until every sink is done.
+bool ensureCapRing() {
+    if (capRing) return true;
+    capDropped = 0; capSent = 0; capHead = 0; capTail = 0;
+    const uint32_t freeHeap = ESP.getMaxAllocHeap();
+    int slots = (freeHeap > kCapHeapReserve) ? static_cast<int>((freeHeap - kCapHeapReserve) / sizeof(CapFrame)) : 0;
+    if (slots > kCapSlotsMax) slots = kCapSlotsMax;
+    if (slots >= kCapSlotsMin) {
+        capRing = static_cast<CapFrame*>(malloc(sizeof(CapFrame) * slots));
+        capSlots = capRing ? slots : 0;
+    }
+    if (!capRing) {
+        if (serialRoom(120))
+            Serial.printf("{\"t\":\"err\",\"msg\":\"capture buffer: not enough free heap (%u)\"}\n",
+                          static_cast<unsigned>(freeHeap));
+        return false;
+    }
+    if (serialRoom(100)) Serial.printf("{\"t\":\"log\",\"msg\":\"capture ring: %d slots\"}\n", capSlots);
+    return true;
+}
+
+void releaseCapture();
+
+// Recompute what the RX paths should do, and hand the ring back once no sink wants frames.
+void syncCapActive() {
+    capActive = captureEnabled || sdCapEnabled;
+    if (!capActive) releaseCapture();
+}
+
 void releaseCapture() {
     captureEnabled = false;
+    sdCloseCapture();
+    capActive = false;
     if (!capRing) return;
     CapFrame* r = capRing;
     capRing = nullptr;
@@ -1185,20 +1243,27 @@ void sendHello() {
     printHunt();
     Serial.print(",");
     printDeauth();
+    Serial.printf(",\"sd\":{\"mounted\":%d,\"mb\":%lu,\"cap\":%d,\"file\":\"%s\",\"frames\":%lu,\"bytes\":%lu,\"err\":%lu,\"clock\":%d}",
+                  sdCardPresent ? 1 : 0, static_cast<unsigned long>(sdCardMb),
+                  sdCapEnabled ? 1 : 0, sdCapEnabled ? sdPath : "",
+                  static_cast<unsigned long>(sdFrames), static_cast<unsigned long>(sdBytes),
+                  static_cast<unsigned long>(sdErrors), epochValid ? 1 : 0);
     Serial.print("}\n");
 }
 
 void sendDwell(int idx) {
-    if (!serialRoom(280)) return;
+    if (!serialRoom(340)) return;
     const ChannelState& ch = channels[idx];
     Serial.printf("{\"t\":\"d\",\"c\":%u,\"s\":%.1f,\"r\":%.1f,\"f\":%lu,\"b\":%lu,\"st\":%u,\"u\":%u,"
-                  "\"g\":%.1f,\"n\":%lu,\"park\":%d,\"cap\":%d,\"drop\":%lu,\"da\":%lu,\"df\":%lu,",
+                  "\"g\":%.1f,\"n\":%lu,\"park\":%d,\"cap\":%d,\"drop\":%lu,\"da\":%lu,\"df\":%lu,"
+                  "\"sdc\":%d,\"sdf\":%lu,\"sdb\":%lu,",
                   kChannels[idx], ch.busyEma, ch.busyCurrent,
                   static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
                   ch.metrics.strong, ch.metrics.unique, globalActivityMax(),
                   static_cast<unsigned long>(sweepCount), parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
                   captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped), static_cast<unsigned long>(deauthSent),
-                  static_cast<unsigned long>(deauthTxFail));
+                  static_cast<unsigned long>(deauthTxFail),
+                  sdCapEnabled ? 1 : 0, static_cast<unsigned long>(sdFrames), static_cast<unsigned long>(sdBytes));
     printHunt();
     Serial.print("}\n");
 }
@@ -1312,17 +1377,226 @@ void writeBase64(const uint8_t* d, size_t n) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// microSD pcap sink. Byte-compatible with host/bandwatch_host.py's PcapWriter: same global header,
+// same radiotap (Wi-Fi, link type 127) and 802.15.4-TAP (link type 283) per-frame headers, so a file
+// written here and one written by the host are interchangeable.
+// ---------------------------------------------------------------------------------------------
+inline void putLE16(uint8_t* p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+inline void putLE32(uint8_t* p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+
+uint16_t channelFreqMhz(uint8_t ch) {
+    if (ch == 14) return 2484;
+    if (ch <= 13) return static_cast<uint16_t>(2407 + 5 * ch);
+    return static_cast<uint16_t>(5000 + 5 * ch);
+}
+
+void nowEpoch(uint32_t& sec, uint32_t& usec) {
+    const uint32_t ms = millis();
+    const uint32_t d = ms - epochBaseMs;
+    sec = epochBase + d / 1000;
+    usec = (d % 1000) * 1000;
+}
+
+
+// Mounting FATFS costs ~30 KB of heap, and BLE mode cuts its scans short below ~28 KB free, so the card is
+// mounted only while it is being used and released again afterwards. sdCardPresent/sdCardMb remember what
+// the boot probe found so the dashboard can still show the card without paying for it.
+bool sdMount() {
+    if (sdMounted) return true;
+    sdMounted = SD.begin(kSdCsPin, SPI, kSdSpiHz);
+    if (sdMounted) { sdCardPresent = true; sdCardMb = static_cast<uint32_t>(SD.cardSize() / (1024 * 1024)); }
+    return sdMounted;
+}
+
+void sdUnmount() {
+    if (!sdMounted || sdCapEnabled) return;   // never pull the filesystem out from under an open capture
+    SD.end();
+    sdMounted = false;
+}
+
+void sdProbeAtBoot() {
+    if (sdMount()) sdUnmount();
+}
+
+bool sdWriteRaw(const uint8_t* d, size_t n) {
+    if (sdFile.write(d, n) != n) { sdErrors++; return false; }
+    sdBytes += n;
+    return true;
+}
+
+bool sdBufFlush() {
+    if (!sdBufLen) return true;
+    const bool ok = sdWriteRaw(sdBuf, sdBufLen);
+    sdBufLen = 0;
+    return ok;
+}
+
+bool sdBufPut(const uint8_t* d, size_t n) {
+    while (n) {
+        const size_t room = kSdBufSize - sdBufLen;
+        const size_t take = n < room ? n : room;
+        memcpy(sdBuf + sdBufLen, d, take);
+        sdBufLen += take; d += take; n -= take;
+        if (sdBufLen == kSdBufSize && !sdBufFlush()) return false;
+    }
+    return true;
+}
+
+void sdCloseCapture() {
+    if (!sdCapEnabled) return;
+    sdCapEnabled = false;
+    sdBufFlush();
+    if (sdFile) { sdFile.flush(); sdFile.close(); }
+    if (sdBuf) { free(sdBuf); sdBuf = nullptr; }
+    sdBufLen = 0;
+    if (serialRoom(160))
+        Serial.printf("{\"t\":\"log\",\"msg\":\"sd capture closed: %s (%lu frames, %lu bytes)\"}\n",
+                      sdPath, static_cast<unsigned long>(sdFrames), static_cast<unsigned long>(sdBytes));
+    sdUnmount();   // hand the ~30 KB back
+}
+
+bool sdOpenCapture() {
+    if (sdCapEnabled) return true;
+    if (!sdMount()) return false;
+    sdBuf = static_cast<uint8_t*>(malloc(kSdBufSize));
+    if (!sdBuf) return false;
+    sdBufLen = 0; sdFrames = 0; sdBytes = 0; sdDropped = 0; sdErrors = 0;
+    const bool is154 = mode154();
+    if (epochValid) {   // host gave us a clock: name the file after it, like the host tool does
+        uint32_t s, us; nowEpoch(s, us);
+        const time_t t = static_cast<time_t>(s);
+        struct tm tmv; gmtime_r(&t, &tmv);
+        snprintf(sdPath, sizeof(sdPath), "/bandwatch-%s-%04d%02d%02d-%02d%02d%02d.pcap",
+                 is154 ? "802154" : "wifi", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+    } else {            // no clock: fall back to a counter so files never collide
+        for (int i = 1; i < 10000; i++) {
+            snprintf(sdPath, sizeof(sdPath), "/bandwatch-%s-%04d.pcap", is154 ? "802154" : "wifi", i);
+            if (!SD.exists(sdPath)) break;
+        }
+    }
+    sdFile = SD.open(sdPath, FILE_WRITE);
+    if (!sdFile) { free(sdBuf); sdBuf = nullptr; return false; }
+    uint8_t gh[24];                                  // pcap global header, little endian
+    putLE32(gh + 0, 0xA1B2C3D4); putLE16(gh + 4, 2); putLE16(gh + 6, 4);
+    putLE32(gh + 8, 0); putLE32(gh + 12, 0); putLE32(gh + 16, 65535);
+    putLE32(gh + 20, is154 ? 283 : 127);             // 802.15.4-TAP / radiotap
+    if (!sdBufPut(gh, sizeof(gh))) { sdCloseCapture(); return false; }
+    sdCapEnabled = true;
+    sdLastFlushMs = millis();
+    return true;
+}
+
+// One captured frame -> record header + link-layer header + payload. Mirrors PcapWriter.write().
+bool sdWriteFrame(const CapFrame& f) {
+    uint8_t hdr[16 + 28];
+    uint32_t sec, usec; nowEpoch(sec, usec);
+    const bool is154 = mode154();
+    const uint16_t rtLen = is154 ? 28 : 24;
+    uint8_t* rt = hdr + 16;
+    if (is154) {
+        putLE16(rt + 0, 0); putLE16(rt + 2, 28);                       // version/pad, total length
+        putLE16(rt + 4, 0); putLE16(rt + 6, 1); rt[8] = 0; rt[9] = rt[10] = rt[11] = 0;   // FCS type: none
+        putLE16(rt + 12, 1); putLE16(rt + 14, 4);                      // RSS TLV, float dBm
+        float rssi = static_cast<float>(f.rssi); uint32_t fb; memcpy(&fb, &rssi, 4); putLE32(rt + 16, fb);
+        putLE16(rt + 20, 3); putLE16(rt + 22, 3);                      // channel assignment TLV
+        putLE16(rt + 24, f.channel); rt[26] = 0; rt[27] = 0;           // channel, page, pad
+    } else {
+        rt[0] = 0; rt[1] = 0; putLE16(rt + 2, 24);
+        putLE32(rt + 4, (1u << 0) | (1u << 1) | (1u << 3) | (1u << 5));   // TSFT | Flags | Channel | dBm
+        putLE32(rt + 8, f.ts_us); putLE32(rt + 12, 0);                 // TSFT is 64-bit
+        rt[16] = 0x10; rt[17] = 0;                                     // Flags: FCS present
+        putLE16(rt + 18, channelFreqMhz(f.channel));
+        putLE16(rt + 20, (f.channel > 14 ? 0x0100 : 0x0080) | 0x0040);
+        rt[22] = static_cast<uint8_t>(f.rssi); rt[23] = 0;             // dBm antenna signal
+    }
+    putLE32(hdr + 0, sec); putLE32(hdr + 4, usec);
+    putLE32(hdr + 8, rtLen + f.capLen); putLE32(hdr + 12, rtLen + f.len);
+    if (!sdBufPut(hdr, 16 + rtLen)) return false;
+    if (!sdBufPut(f.data, f.capLen)) return false;
+    sdFrames++;
+    return true;
+}
+
+// Pull a capture off the card without ejecting it: "S <n> <base64>" lines, bracketed by an ack.
+// Runs synchronously from the command handler, so the UI pauses for the duration of a big file.
+void sdReadFile(const char* path) {
+    if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdread: no card\"}\n"); return; }
+    File f = SD.open(path, FILE_READ);
+    if (!f) { Serial.printf("{\"t\":\"err\",\"msg\":\"sdread: cannot open %s\"}\n", path); return; }
+    const uint32_t total = f.size();
+    Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread\",\"file\":\"%s\",\"bytes\":%lu}\n", path,
+                  static_cast<unsigned long>(total));
+    uint8_t chunk[192];
+    uint32_t sent = 0;
+    while (sent < total) {
+        const int n = f.read(chunk, sizeof(chunk));
+        if (n <= 0) break;
+        while (!serialRoom(n * 4 / 3 + 24)) delay(2);   // never truncate a line
+        Serial.printf("S %d ", n);
+        writeBase64(chunk, n);
+        Serial.write('\n');
+        sent += n;
+        delay(0);
+    }
+    f.close();
+    Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread_done\",\"sent\":%lu}\n", static_cast<unsigned long>(sent));
+    sdUnmount();
+}
+
+void sdListFiles() {
+    if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: no card\"}\n"); return; }
+    File root = SD.open("/");
+    if (!root) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); return; }
+    Serial.print("{\"t\":\"sdls\",\"files\":[");
+    bool first = true;
+    for (File e = root.openNextFile(); e; e = root.openNextFile()) {
+        if (!e.isDirectory() && serialRoom(120)) {
+            Serial.printf("%s[\"%s\",%lu]", first ? "" : ",", e.name(), static_cast<unsigned long>(e.size()));
+            first = false;
+        }
+        e.close();
+    }
+    root.close();
+    Serial.print("]}\n");
+    sdUnmount();
+}
+
+void sdServiceFlush() {
+    if (!sdCapEnabled) return;
+    const uint32_t now = millis();
+    if (now - sdLastFlushMs < kSdFlushMs) return;
+    sdLastFlushMs = now;
+    sdBufFlush();
+    sdFile.flush();     // push FAT metadata so the file stays valid if power is lost
+}
+
+// Single consumer, two independent sinks (USB stream and SD card); a frame is handed to whichever are
+// enabled and the tail only advances once. When SD is recording, a full USB TX buffer must not stall the
+// ring - the USB copy is skipped (and counted) instead, so the card keeps getting every frame.
 void drainCapture() {
     int budget = 8;
+    const uint32_t started = micros();
     while (capRing && capTail != capHead && budget-- > 0) {
         const CapFrame& f = capRing[capTail];
-        if (!serialRoom((f.capLen * 4) / 3 + 40)) return;
-        Serial.printf("P %u %d %lu %u ", f.channel, f.rssi, static_cast<unsigned long>(f.ts_us), f.len);
-        writeBase64(f.data, f.capLen);
-        Serial.write('\n');
+        const bool usbWant = captureEnabled;
+        const bool usbRoom = serialRoom((f.capLen * 4) / 3 + 40);
+        if (usbWant && !usbRoom && !sdCapEnabled) return;   // USB-only: stall rather than lose the frame
+        if (usbWant && usbRoom) {
+            Serial.printf("P %u %d %lu %u ", f.channel, f.rssi, static_cast<unsigned long>(f.ts_us), f.len);
+            writeBase64(f.data, f.capLen);
+            Serial.write('\n');
+            capSent += 1;
+        } else if (usbWant) {
+            capDropped = capDropped + 1;                    // SD is recording: never block the card on USB
+        }
+        if (sdCapEnabled && !sdWriteFrame(f)) { sdDropped++; sdCloseCapture(); }
         capTail = (capTail + 1) % capSlots;
-        capSent += 1;
+        // SD writes can stall for tens of ms on card GC; hopIfNeeded() shares this task, so cap the time.
+        if (sdCapEnabled && (micros() - started) > kSdBudgetUs) break;
     }
+    sdServiceFlush();
 }
 
 void setPark(int idx) {
@@ -1449,26 +1723,48 @@ void handleCommand(char* line) {
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
     if (!strcmp(line, "cap")) {
-        const bool on = atoi(arg) != 0 && hopMode();
-        if (on && !captureEnabled) {
-            capDropped = 0; capSent = 0; capHead = 0; capTail = 0;
-            if (!capRing) {
-                const uint32_t freeHeap = ESP.getMaxAllocHeap();
-                int slots = (freeHeap > kCapHeapReserve) ? static_cast<int>((freeHeap - kCapHeapReserve) / sizeof(CapFrame)) : 0;
-                if (slots > kCapSlotsMax) slots = kCapSlotsMax;
-                if (slots >= kCapSlotsMin) {
-                    capRing = static_cast<CapFrame*>(malloc(sizeof(CapFrame) * slots));
-                    capSlots = capRing ? slots : 0;
-                }
-                if (!capRing && serialRoom(120))
-                    Serial.printf("{\"t\":\"err\",\"msg\":\"capture buffer: not enough free heap (%u)\"}\n", static_cast<unsigned>(freeHeap));
-                else if (serialRoom(100))
-                    Serial.printf("{\"t\":\"log\",\"msg\":\"capture ring: %d slots\"}\n", capSlots);
-            }
-        }
-        captureEnabled = on && capRing;
-        if (!captureEnabled) releaseCapture();
+        const bool on = atoi(arg) != 0 && hopMode() && ensureCapRing();
+        captureEnabled = on;
+        syncCapActive();
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"cap\",\"cap\":%d}\n", captureEnabled ? 1 : 0);
+    } else if (!strcmp(line, "sdcap")) {
+        const bool want = atoi(arg) != 0 && hopMode();
+        if (want && !sdCapEnabled) {
+            // Open the file first: mounting FATFS costs ~30 KB, and the ring must be sized against what is
+            // left afterwards or kCapHeapReserve is not actually reserved.
+            if (!sdOpenCapture()) {
+                Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: %s\"}\n",
+                              sdMounted ? "could not open file on card" : "no SD card (check it is inserted)");
+            } else if (!ensureCapRing()) {
+                Serial.print("{\"t\":\"err\",\"msg\":\"sdcap: no capture ring\"}\n");
+                sdCloseCapture();
+            } else if (serialRoom(140)) {
+                Serial.printf("{\"t\":\"log\",\"msg\":\"sd capture -> %s\"}\n", sdPath);
+            }
+        } else if (!want) {
+            sdCloseCapture();
+        }
+        syncCapActive();
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdcap\",\"sdcap\":%d,\"file\":\"%s\"}\n",
+                      sdCapEnabled ? 1 : 0, sdCapEnabled ? sdPath : "");
+    } else if (!strcmp(line, "sdinfo")) {
+        const bool m = sdMount();
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdinfo\",\"sd\":%d,\"mb\":%lu,\"used_mb\":%lu,\"cap\":%d,\"file\":\"%s\","
+                      "\"frames\":%lu,\"bytes\":%lu,\"err\":%lu}\n",
+                      m ? 1 : 0, m ? static_cast<unsigned long>(SD.cardSize() / (1024 * 1024)) : 0UL,
+                      m ? static_cast<unsigned long>(SD.usedBytes() / (1024 * 1024)) : 0UL,
+                      sdCapEnabled ? 1 : 0, sdCapEnabled ? sdPath : "",
+                      static_cast<unsigned long>(sdFrames), static_cast<unsigned long>(sdBytes),
+                      static_cast<unsigned long>(sdErrors));
+    } else if (!strcmp(line, "sdls")) {
+        sdListFiles();
+    } else if (!strcmp(line, "sdread")) {
+        sdReadFile(arg);
+    } else if (!strcmp(line, "time")) {
+        const uint32_t e = strtoul(arg, nullptr, 10);
+        if (e > 1600000000UL) { epochBase = e; epochBaseMs = millis(); epochValid = true; }
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"time\",\"epoch\":%lu,\"ok\":%d}\n",
+                      static_cast<unsigned long>(e), epochValid ? 1 : 0);
     } else if (!strcmp(line, "snap")) {
         int n = atoi(arg);
         if (n < 32) n = 32;
@@ -2342,6 +2638,11 @@ void refreshSystem(float global) {
                                  static_cast<unsigned long>(capDropped));
     else snprintf(buf, sizeof(buf), "capture: off (host: cap 1)");
     lv_label_set_text(sysLines[n++], buf);
+    if (sdCapEnabled) snprintf(buf, sizeof(buf), "sd: rec %lu fr  %lu kB", static_cast<unsigned long>(sdFrames),
+                               static_cast<unsigned long>(sdBytes / 1024));
+    else if (sdMounted) snprintf(buf, sizeof(buf), "sd: card ready (host: sdcap 1)");
+    else snprintf(buf, sizeof(buf), "sd: no card");
+    lv_label_set_text(sysLines[n++], buf);
     if (huntActive) { char m[26]; huntIdText(m, sizeof(m)); snprintf(buf, sizeof(buf), "hunt %s", m); }
     else snprintf(buf, sizeof(buf), "hunt off");
     if (deauthActive) {
@@ -2460,6 +2761,9 @@ void Bandwatch_Init(void) {
     memset(wifiDevs, 0, sizeof(wifiDevs));
     memset(bleDevs, 0, sizeof(bleDevs));
     memset(devs154, 0, sizeof(devs154));
+    // Probe the card at boot so "hello" can tell the dashboard whether SD recording is available.
+    // SPI is already up: LCD_Init() runs before this, and both share the bus from the loop task.
+    sdProbeAtBoot();
 
     setLedColor({255, 0, 0}, 100);
     delay(120);

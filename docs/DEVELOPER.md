@@ -119,20 +119,22 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null) |
-| `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `h` |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}`) |
+| `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc]`; flags bit0 AP, bit1 IEs parsed; `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
 | `{"t":"b","dev":[...]}` | every 2 s in BLE mode | rows `[mac, rssi, max, adverts, age_ms, addrType, company, name, appearance, txPower(127=none), svcUuid16, svcDataUuid16, appleType, flags]`; flags bit0 connectable, bit1 legacy adv, bit2 scannable |
 | `{"t":"z","dev":[...]}` | every 2 s in 802.15.4 mode | rows `[id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]`; `id` = extended address `aa:bb:cc:dd:ee:ff:00:11` or `pan/short` hex; `proto` 0 unknown, 1 Zigbee, 2 Zigbee GP, 3 Thread/6LoWPAN, 4 MAC‑secured; flags bit0 ext addr, bit1 beacons, bit2 permit join, bit3 MAC security, bit4 data seen |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `h` |
 | `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | |
+| `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
+| `{"t":"sdls","files":[[name, bytes], ...]}` | after `sdls` | files in the card root |
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
 
 Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
 `hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, `deauth <bssid>` (Wi‑Fi modes only —
 parks on the AP's channel and spams spoofed deauth frames at its stations; stops itself after `kDeauthMaxMs`,
-5 min) / `deauth 0`, `info`, `reboot`.
+5 min) / `deauth 0`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
 
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
@@ -319,3 +321,56 @@ handling is incomplete, so its result is inconclusive rather than negative. Do n
    (`esp_wifi_config_80211_tx()` is pinned to HT20 MCS0) and at whether the sequence number and duration
    survive the driver's TX path.
 4. Only then revisit the reverse-engineered offsets in §9.
+
+
+## 12. microSD pcap recording (1.3)
+
+The device writes pcap files itself, so a capture is not limited by USB CDC throughput and can outlive the
+host connection. `sdcap 1` starts, `sdcap 0` stops.
+
+**Wiring and bus sharing.** The card is on the *same* SPI bus as the LCD (SCLK 7, MOSI 6, MISO 5), with its
+own CS on **GPIO4**. This is safe because `Display_ST7789.cpp` wraps every LCD transfer in
+`SPI.beginTransaction()/endTransaction()` with its own `SPISettings`, the SD library does the same at
+`kSdSpiHz` (20 MHz vs the LCD's 40 MHz), and both are driven from the loop task — there is no second task
+competing for the bus. Do not move SD access into a radio callback or a separate task without adding real
+bus arbitration.
+
+**File format.** `sdWriteFrame()` is a direct port of `PcapWriter` in `host/bandwatch_host.py`: identical
+global header, identical 24-byte radiotap (TSFT | Flags | Channel | dBm, link type 127) and 28-byte
+802.15.4-TAP (FCS-type / RSS / channel TLVs, link type 283). Files from the device and from the host are
+interchangeable — verified by pulling a capture back with `sdread` and opening it with Wireshark's
+`capinfos` (2051/2051 packets, no malformed records).
+
+**Clock.** There is no RTC. The host sends `time <epoch>` on connect; that drives both the pcap record
+timestamps and the filename. Device-written names are **UTC** (`/bandwatch-wifi-YYYYmmdd-HHMMSS.pcap`) while
+the host names its own files in local time — do not "fix" one to match the other without deciding which is
+authoritative. With no clock ever set, files fall back to `/bandwatch-wifi-NNNN.pcap` and timestamps start
+at the epoch.
+
+**Memory — the part that constrains the design.** Mounting FATFS costs about 30 KB of heap, and BLE mode
+cuts its scan cycles short below `kBleHeapFloor` (28 KB). So the card is mounted **only while in use**:
+probed once at boot (`sdProbeAtBoot()` records `sdCardPresent`/`sdCardMb`, then unmounts), mounted again by
+`sdcap`/`sdinfo`/`sdls`/`sdread`, and released by `sdUnmount()` when done. Measured on hardware:
+
+| state | free heap |
+| --- | --- |
+| idle, card present but unmounted | 83.4 kB |
+| recording to SD | 31.9 kB |
+| after stopping | 83.4 kB |
+| BLE mode (floor is 28 kB) | 57.8 kB |
+
+`sdcap` opens the file **before** sizing the capture ring, so `kCapHeapReserve` is reserved against
+post-mount heap. The ring therefore gets fewer slots while recording to SD (8 rather than 20) — expect a
+higher `drop` count on a busy channel than with USB capture alone. An earlier ordering left only 12.5 kB
+free, which is inside the range where LVGL page rebuilds fail (`CLAUDE.md` rule 4); keep the current order.
+
+**Sinks.** USB streaming and SD recording are independent consumers driven from one ring and one tail in
+`drainCapture()`. If USB is enabled but its TX buffer is full *and* SD is recording, the USB copy is skipped
+and counted in `drop` rather than stalling the ring — the card must not lose frames because nobody is
+reading the serial port. With USB alone the old stall-and-retry behaviour is kept.
+
+**Latency.** SD writes are buffered to `kSdBufSize` (4096 B, matching `CONFIG_FATFS_SECTOR_4096`) and fsynced
+every `kSdFlushMs` (5 s), so a power cut costs at most a few seconds. Because card GC can stall a write for
+tens of milliseconds and `hopIfNeeded()` shares this task, `drainCapture()` gives SD at most `kSdBudgetUs`
+(8 ms) per loop iteration. Park on one channel for long captures; while hopping, heavy SD load will skew
+dwell timing and therefore the busy score.

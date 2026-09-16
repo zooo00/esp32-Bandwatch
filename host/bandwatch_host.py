@@ -17,8 +17,14 @@ Serial protocol (one line each):
     {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
+    S <n> <base64>                               chunk of a file being read back (after "sdread")
 Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
-"deauth <bssid>" / "deauth 0" (Wi-Fi modes: spoof the BSSID and kick its stations), "info".
+"deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), "sdcap 0|1" (record pcap on the
+device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info".
+
+The device has no RTC, so this tool sends "time <epoch>" on connect; without it the device names SD captures
+with a counter and timestamps them from uptime. Device-written filenames use UTC; files written here use
+local time.
 
 Vendor names come from the IEEE OUI registry: the first run downloads oui.csv (~3 MB) into ~/.cache/bandwatch/
 in the background; until then (or offline) a small built-in table is used.
@@ -283,6 +289,7 @@ class Bandwatch:
             "hunt": None,            # {"mac", "rssi", "age_ms", "count", "hist": deque}
             "deauth": None,          # {"mac", "ch", "sent"} while a deauth attack runs
             "ble": {"devs": 0, "cycles": 0},
+            "sd": None,              # {"mounted","mb","cap","file","frames","bytes","err","clock"}
         }
         self.wifi_devs = {}
         self.ble_devs = {}
@@ -337,6 +344,7 @@ class Bandwatch:
             self.state["connected"] = True
             self.state["port"] = port
             self.state["log"].append(f"connected to {port}")
+            self.send(f"time {int(time.time())}")   # device has no RTC: pcap timestamps come from this
             self.send("info")
             buf = b""
             try:
@@ -430,6 +438,8 @@ class Bandwatch:
             self._set_hunt(msg.get("hunt"))
             self._hunt_update(msg.get("h"))
             self._set_deauth(msg.get("deauth"))
+            if msg.get("sd") is not None:
+                st["sd"] = msg["sd"]
         elif t == "d":
             c = msg["c"]
             st["channels"][c] = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
@@ -447,6 +457,11 @@ class Bandwatch:
             if msg.get("da") is not None and st["deauth"]:
                 st["deauth"]["sent"] = msg["da"]
                 st["deauth"]["fail"] = msg.get("df", st["deauth"].get("fail", 0))
+            if msg.get("sdc") is not None:
+                sd = st.get("sd") or {}
+                sd.update({"cap": msg["sdc"], "frames": msg.get("sdf", sd.get("frames", 0)),
+                           "bytes": msg.get("sdb", sd.get("bytes", 0))})
+                st["sd"] = sd
             self._hunt_update(msg.get("h"))
         elif t == "s":
             st["sweep"] = msg["n"]
@@ -488,6 +503,12 @@ class Bandwatch:
                 self._set_hunt(msg.get("hunt"))
             if msg.get("cmd") == "deauth":
                 self._set_deauth(msg.get("deauth"))
+            if msg.get("cmd") in ("sdcap", "sdinfo"):
+                sd = st.get("sd") or {}
+                for k in ("sd", "mb", "cap", "file", "frames", "bytes", "err"):
+                    if k in msg:
+                        sd["mounted" if k == "sd" else k] = msg[k]
+                st["sd"] = sd
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
 
@@ -652,7 +673,7 @@ class Bandwatch:
             "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
             "channels": chans, "history": list(self.history), "capture": st["capture"],
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"],
+            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
             "oui_source": self.oui.source,
         }
 
@@ -714,6 +735,10 @@ def make_handler(bw, html_path):
                     bw.hunt(req.get("mac"), req.get("ch"))
                 elif cmd == "deauth":
                     bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
+                elif cmd == "sdcap":
+                    bw.send(f"sdcap {1 if req.get('value') else 0}")
+                elif cmd == "sdinfo":
+                    bw.send("sdinfo")
                 elif cmd == "info":
                     bw.send("info")
                 else:

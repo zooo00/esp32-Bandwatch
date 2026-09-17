@@ -38,7 +38,7 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    repeatedly and reboot the board over and over.
 4. **RAM (320 KB, no PSRAM) is the constraint.** Static usage must stay well under ~80 KB. Only the visible LCD
    page exists as LVGL widgets; the capture ring is malloc'ed per capture; LVGL uses `LV_STDLIB_CLIB`; the BLE
-   scan cache is cleared every 3 s and cut early below ~28 KB free. Out-of-memory shows up as
+   BLE keeps no result cache (we drive NimBLE directly), so BLE idles ~95 kB free. Out-of-memory shows up as
    `abort() ... lock_init_generic` or a store fault in `lv_obj_class_create_obj`.
 5. **One radio.** Wi-Fi bands, BLE and 802.15.4 are exclusive modes; `setBandMode()` tears one down and starts
    the next. Every mode change calls `releaseCapture()`: capture off *and* the ~32 KB ring returned to the heap

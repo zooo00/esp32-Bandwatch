@@ -41,10 +41,8 @@ constexpr uint32_t kApUpdateMs = 3000;      // AP count refresh cadence
 constexpr uint32_t kDevListMs = 2000;       // Device table -> host cadence
 constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not reported
 constexpr uint32_t kDevLcdFreshMs = 20000;  // ... nor shown on the LCD
-constexpr uint32_t kBleScanSec = 3;         // Restart the BLE scan (and clear its result cache) this often
 constexpr uint32_t kBleActiveWindowMs = 4000;   // how long to scan actively after a new scannable device
 constexpr uint32_t kBleSwitchMinMs = 2000;      // never flip the scan mode more often than this
-constexpr uint32_t kBleHeapFloor = 28000;   // ...or sooner, when the cache has eaten the heap down to this
 constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table; we never transmit.
 constexpr uint32_t kDeauthMaxMs = 5UL * 60UL * 1000UL;  // Dead-man's switch: auto-stop a deauth attack after this long
                                                          // even if the host/serial link drops mid-attack.
@@ -309,7 +307,6 @@ bool wifiRunning = false;
 esp_err_t errCountry = ESP_FAIL, errBand = ESP_FAIL, errProto = ESP_FAIL, errPromisc = ESP_FAIL;
 
 // BLE
-BLEScan* bleScan = nullptr;
 bool bleInited = false;
 volatile bool bleScanDone = false;
 uint32_t bleScanCycles = 0;
@@ -854,7 +851,6 @@ void stopBle() {
     ble_gap_disc_cancel();
     BLEDevice::deinit(false);   // keep controller memory so BLE can be re-initialised later
     bleInited = false;
-    bleScan = nullptr;
 }
 
 // Discovery runs continuously (BLE_HS_FOREVER) and keeps no result cache, so there is nothing to recycle.

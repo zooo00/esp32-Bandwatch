@@ -2,3 +2,6 @@ build/
 captures/
 __pycache__/
 .DS_Store
+
+# Claude Code session state
+.claude/

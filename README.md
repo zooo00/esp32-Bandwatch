@@ -192,7 +192,7 @@ raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mo
   out of the Arduino core). 802.15.4 protocol detection is heuristic (network-layer header bytes); Zigbee/Thread
   payloads are encrypted on the air and stay encrypted here.
 - RAM: 320 KB with no PSRAM. Only the visible LCD page exists as widgets; the capture ring is allocated per
-  capture; BLE scan cycles are short and cut early when heap runs low (~28 KB).
+  capture; BLE keeps no result cache of its own, so BLE mode idles at ~95 kB free.
 - The busy score is a traffic proxy, not calibrated airtime; thresholds were tuned on 2.4 GHz, so a busy
   802.11ac/ax channel may read a little high.
 - DFS channels are received passively; any channel the driver refuses is skipped and marked `x`.
@@ -200,6 +200,31 @@ raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mo
 
 ## Versions
 
+- **1.4.2** — SD recording worked but *looked* broken from the dashboard: BLE mode emits no dwell lines, so the
+  capture counters never reached the host, and the `sdcap` ack used a key the host was not reading. Both fixed.
+  Adds a record light on the LCD: the page header turns **red** and shows `USB` / `SD` / `REC` while recording.
+- **1.4.1** — fixes a BLE address regression from 1.4: `ble_addr_t.val` is little-endian, and feeding it
+  straight to the device table byte-reversed every BLE MAC, which also broke OUI lookup and the
+  random-address bit. Display paths now get MSB-first order while the pcap keeps the on-air bytes. Adds the
+  **auto** scan policy (passive, with a short active burst when a new scannable device appears, rate-limited
+  and frozen during recording), a Passive/Auto/Active switch on the dashboard, and an LCD scan-mode indicator.
+- **1.4** — **BLE advertising capture.** Records BLE to pcap as `LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR` (256),
+  verified in Wireshark (2276/2276 packets, zero malformed). Required replacing the Arduino `BLEScan` wrapper
+  with direct NimBLE `ble_gap_disc()`, since the wrapper merges advertisement payloads and cannot give
+  per-packet data. Side benefit: no result cache, so BLE mode idles at ~95 kB free instead of ~58 kB. Adds
+  `blescan passive|active`. Approach studied from
+  [ouispy-blesniff](https://github.com/shermanatoor/ouispy-blesniff).
+- **1.3** — **microSD pcap recording.** The device writes pcap itself (`sdcap`), byte-compatible with the host
+  writer and verified with Wireshark's `capinfos`. Independent USB and SD sinks share one capture ring, so both
+  can run at once. `sdls` / `sdread` retrieve files over serial; `time <epoch>` (sent by the host on connect)
+  gives real timestamps and filenames. The card is mounted only while in use, because FATFS costs ~30 kB and
+  BLE mode needs that headroom. Dashboard gains a *Record to SD* button and card status; the LCD System page
+  shows recording progress.
+- **1.2.5** — the deauth frame was not a deauthentication frame at all: the code overwrote the driver's frame
+  control with `0xC8 0x02`, a QoS-Null **data** frame that every station ignores, and the raw fallback used
+  Beacon and Action subtypes. Now a correct `0xC0 0x00`, confirmed by dumping the bytes handed to the MAC —
+  but the attack still does not work, and PMF, DFS and promiscuous mode are all ruled out. See
+  [Known issues](#known-issues) and [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11.
 - **1.2.4** — full-codebase review pass. Firmware: a mode change now frees the capture ring instead of only
   switching capture off (it used to hold ~32 KB through BLE mode, where RAM is tightest); SSIDs, BLE names and
   country codes are stripped of control characters at ingest, and the country code is JSON-escaped like every

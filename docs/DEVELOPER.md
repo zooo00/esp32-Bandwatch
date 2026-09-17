@@ -83,7 +83,8 @@ Single-file design on purpose (one core, tight RAM, easy to read top to bottom).
    bits, HT/VHT operation → width, BSS load, country). Optionally copies the frame into the capture ring.
 4. **BLE** — `AdvCallbacks::onResult()` (NimBLE host task) fills `bleDevs` (address, RSSI, name, company id,
    Apple continuity type byte, appearance, TX power, 16-bit service UUIDs, flags). `startBle()/stopBle()`,
-   `serviceBle()` restarts the scan every 3 s (or when heap < 28 KB) because `BLEScan` caches every device seen.
+   Discovery runs continuously via `ble_gap_disc()` with no result cache; `serviceBle()` only restarts it if
+   the host ends discovery, and applies the passive/active/auto policy (§13).
 5. **802.15.4** — `esp_ieee802154_receive_done()` (ISR): parses the MAC header (frame type, addressing modes,
    PAN id, short/extended source), aux security header, beacon superframe/GTS/pending fields, classifies the
    upper layer (`classify154`: Zigbee NWK version 2, Green Power version 3, 6LoWPAN dispatch bytes, MAC-level
@@ -348,7 +349,7 @@ authoritative. With no clock ever set, files fall back to `/bandwatch-wifi-NNNN.
 at the epoch.
 
 **Memory — the part that constrains the design.** Mounting FATFS costs about 30 KB of heap, and BLE mode
-cuts its scan cycles short below `kBleHeapFloor` (28 KB). So the card is mounted **only while in use**:
+needs headroom. So the card is mounted **only while in use**:
 probed once at boot (`sdProbeAtBoot()` records `sdCardPresent`/`sdCardMb`, then unmounts), mounted again by
 `sdcap`/`sdinfo`/`sdls`/`sdread`, and released by `sdUnmount()` when done. Measured on hardware:
 

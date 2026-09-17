@@ -8,7 +8,8 @@ an AP's clients off their network, an LCD UI driven by the BOOT button, and a ho
 pcap capture.
 
 Developer documentation (architecture, serial protocol, hardware references, board quirks): [`docs/DEVELOPER.md`](docs/DEVELOPER.md).
-A short orientation for AI assistants is in [`CLAUDE.md`](CLAUDE.md).
+A short orientation for AI assistants is in [`CLAUDE.md`](CLAUDE.md). Planned work, open questions and known
+gaps are tracked in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 Bandwatch listens to 802.11 traffic in promiscuous mode and reports a **busy score** (0–100) per channel as a proxy
 for channel load. It does **not** measure RF power, true airtime occupancy, or non‑Wi‑Fi interference, and — unless

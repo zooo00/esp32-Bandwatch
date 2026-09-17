@@ -519,3 +519,63 @@ hopping for the duration and skewed every dwell in that window. It is now increm
 the file and `serviceSdRead()` emits what fits in the TX buffer each loop, bounded by `kSdBudgetUs`.
 Measured pulling a 2.2 MB capture while hopping: 368 kB/s, 25 dwells delivered during the transfer, median
 dwell interval 233 ms against a 220 ms nominal.
+
+
+## 16. Memory: where the ~80 kB rule comes from, and what actually binds
+
+`CLAUDE.md` rule 4 tells you to keep static RAM "well under ~80 KB". It is worth knowing that this is an
+**empirical heuristic, not a derived limit** — and what the real constraint underneath it is.
+
+### Origin
+
+The rule entered the repo in commit `265d955` (1.2), after real out-of-memory crashes with two signatures:
+
+- `abort() was called … lock_init_generic` — newlib could not allocate a mutex;
+- a store fault inside `lv_obj_class_create_obj` — LVGL's `lv_malloc` returned NULL.
+
+Static RAM was cut, the crashes stopped, and "stay under ~80 kB" became the rule. Nobody has re-derived the
+number since. Treat it as a budget line someone drew after being burned, not as a hardware boundary.
+
+### The mechanism is real even though the number is arbitrary
+
+The C5 has no PSRAM. Static allocations (`.data` + `.bss`) and the runtime heap come out of the **same**
+~320 kB DRAM pool, so every static byte costs a heap byte one-for-one. Adding a global is not free just
+because the build still links.
+
+### The build output is misleading — do not trust it
+
+arduino-cli reports something like:
+
+```
+Global variables use 79576 bytes (24%) of dynamic memory, leaving 248104 bytes for local variables.
+```
+
+That "leaving 248104 bytes" is the linker's arithmetic, not reality. Measured free heap at runtime is
+**~83 kB**, because the Wi-Fi/BLE driver stacks and the FreeRTOS task stacks claim the rest once the radio
+comes up. Reading the linker figure literally suggests roughly 3× more room than exists, which is a good way
+to talk yourself into a change that then crashes in the field.
+
+### What actually binds: free heap at peak concurrent load
+
+Measured on hardware (read `heap` from `hello`, or the dashboard):
+
+| state | free heap |
+| --- | --- |
+| idle, Wi-Fi | ~83 kB |
+| idle, BLE | ~95 kB |
+| SD capture — the tightest normal state | **31.9 kB** |
+| BLE + SD capture | 32.3 kB |
+| SD capture with the pre-1.3 ring ordering | 12.5 kB — where LVGL page rebuilds start failing |
+
+The worst case is the capture ring (up to 32 kB), FATFS (~30 kB) and an LVGL page rebuild all landing
+together. That last row is not hypothetical: 1.3 shipped briefly with the ring sized *before* the FATFS
+mount, which left 12.5 kB free and put the device back in exactly the regime the original crashes came from.
+`sdcap` now opens the file before sizing the ring so `kCapHeapReserve` is reserved against post-mount heap.
+
+### Proposed replacement (see [ROADMAP.md](ROADMAP.md))
+
+Swap the static-RAM proxy for a **minimum-free-heap floor** — roughly 25 kB in the worst concurrent case.
+It is checkable at runtime, tied directly to the observed failure mode rather than a stand-in for it, and it
+lets the firmware *refuse* an allocation whose projected heap falls below the floor instead of crashing.
+Until that exists, keep honouring rule 4: current static usage is 79,576 B, about 424 B under the line, and
+that headroom is the edge of an unverified budget rather than a wall.

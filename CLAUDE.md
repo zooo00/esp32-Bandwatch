@@ -1,7 +1,7 @@
 # Bandwatch — notes for an AI assistant (or any new developer)
 
-Read `README.md` for what the product does and `docs/DEVELOPER.md` for how it is built. This file is the
-short orientation.
+Read `README.md` for what the product does and `docs/DEVELOPER.md` for how it is built. Planned work and
+open questions live in `docs/ROADMAP.md`. This file is the short orientation.
 
 ## What this is
 Firmware for the **Waveshare ESP32-C5-LCD-1.47** board (ESP32-C5, 1.47" ST7789 LCD, WS2812 LED, BOOT button)
@@ -36,7 +36,9 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    `esptool --before no-reset --after watchdog-reset run`; otherwise press RESET.
 3. **Do not run esptool against a running board just to reset it** — its connection attempts toggle DTR/RTS
    repeatedly and reboot the board over and over.
-4. **RAM (320 KB, no PSRAM) is the constraint.** Static usage must stay well under ~80 KB. Only the visible LCD
+4. **RAM (320 KB, no PSRAM) is the constraint.** Static usage must stay well under ~80 KB — an empirical
+   line from 1.2, not a hardware limit; what actually binds is free heap at peak load (`DEVELOPER.md` §16).
+   The build's "leaving 248104 bytes" is the linker's arithmetic, not reality: measured free heap is ~83 kB. Only the visible LCD
    page exists as LVGL widgets; the capture ring is malloc'ed per capture; LVGL uses `LV_STDLIB_CLIB`; the BLE
    BLE keeps no result cache (we drive NimBLE directly), so BLE idles ~95 kB free. Out-of-memory shows up as
    `abort() ... lock_init_generic` or a store fault in `lv_obj_class_create_obj`.

@@ -140,6 +140,14 @@ def find_port():
     return None
 
 
+# Surveillance-hardware categories, mirrored from the firmware's kSurvOuis table. The device does the
+# OUI match (so the LCD can flag too) and reports the category id; this just names it. An OUI match is
+# evidence, not proof - prefixes get reassigned, and two Flock prefixes were withdrawn upstream as
+# Ubiquiti false positives.
+SURV_CAT = {1: "Flock Safety", 2: "Ring", 3: "Axon", 4: "DJI", 5: "Parrot", 6: "Skydio", 7: "Meta/Ray-Ban"}
+SURV_KIND = {1: "ALPR camera", 2: "doorbell/camera", 3: "body camera", 4: "drone", 5: "drone",
+             6: "drone", 7: "smart glasses"}
+
 PROTO_154 = {0: "802.15.4 (unknown upper layer)", 1: "Zigbee", 2: "Zigbee Green Power", 3: "Thread / 6LoWPAN",
              4: "MAC-layer encrypted (Thread-style)"}
 
@@ -572,6 +580,7 @@ class Bandwatch:
                 try:
                     mac, rssi, mx, frames, age, ch, flags, ssid = r[:8]
                     extra = r[8:15] if len(r) >= 15 else [0, 0, 0, 0, 0, 0, ""]
+                    surv = r[15] if len(r) >= 16 else 0
                 except Exception:
                     continue
                 d = self.wifi_devs.get(mac)
@@ -580,8 +589,13 @@ class Bandwatch:
                          "bw": None, "util": None, "stations": None, "cc": ""}
                     self.wifi_devs[mac] = d
                 d["vendor"] = self.oui.lookup(mac)
+                # tier 2 = we heard it transmit; tier 1 = only ever seen as a frame destination (addr1)
+                dest_only = bool(flags & 4)
                 d.update({"rssi": rssi, "max": mx, "frames": frames, "last": now - age / 1000.0, "ch": ch,
-                          "ap": bool(flags & 1), "ssid": ssid or d["ssid"]})
+                          "ap": bool(flags & 1), "ssid": ssid or d["ssid"],
+                          "dest_only": dest_only,
+                          "surv": SURV_CAT.get(surv, ""), "surv_kind": SURV_KIND.get(surv, ""),
+                          "tier": (0 if not surv else 1 if dest_only else 2)})
                 sec, pmf, phy, bw, util, stations, cc = extra
                 if flags & 2:
                     d.update({"sec": sec_string(sec, pmf), "phy": phy_string(phy, ch), "bw": bw * 10 if bw else None,
@@ -597,6 +611,7 @@ class Bandwatch:
                 try:
                     mac, rssi, mx, adv, age, atype, company, name = r[:8]
                     extra = r[8:14] if len(r) >= 14 else [0, 127, 0, 0, 0, 0]
+                    bsurv = r[14] if len(r) >= 15 else 0
                 except Exception:
                     continue
                 appearance, tx, svc, svcdata, apple, flags = extra
@@ -618,7 +633,9 @@ class Bandwatch:
                           "company": company, "company_name": BLE_COMPANY.get(company, f"0x{company:04x}" if company else ""),
                           "vendor": vendor, "name": name or d["name"], "appearance": appearance,
                           "tx": None if tx == 127 else tx, "svc": svc, "svcdata": svcdata, "apple": apple,
-                          "connectable": bool(flags & 1), "legacy": bool(flags & 2), "kind": ", ".join(dict.fromkeys(kinds))})
+                          "connectable": bool(flags & 1), "legacy": bool(flags & 2), "kind": ", ".join(dict.fromkeys(kinds)),
+                          "surv": SURV_CAT.get(bsurv, ""), "surv_kind": SURV_KIND.get(bsurv, ""),
+                          "tier": 2 if bsurv else 0})
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.ble_devs, now)
@@ -797,6 +814,8 @@ def make_handler(bw, html_path):
                     bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
+                elif cmd == "addr1":
+                    bw.send(f"addr1 {1 if req.get('value') else 0}")
                 elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):
                     bw.send(f"blescan {req['value']}")
                 elif cmd == "sdinfo":

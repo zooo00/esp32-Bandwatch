@@ -46,6 +46,10 @@
   button.ghost { font: inherit; padding: 3px 10px; font-size: 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--ink-2); cursor: pointer; }
   /* .capinfo shares the .control class, which is display:grid - that puts the recording dot and the
      bold counter on separate rows. Force normal inline flow. */
+  .surv { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
+          background: var(--critical); color: #fff; margin-right: 6px; }
+  .surv.t1 { background: transparent; color: var(--warning); border: 1px solid var(--warning); font-weight: 500; }
+  tr.surv-row td.l:first-child { color: var(--critical); font-weight: 600; }
   .capinfo { display: block; font-size: 12px; color: var(--ink-2); min-width: 300px; max-width: 430px; line-height: 1.5; align-self: end; }
   .capinfo code { word-break: break-all; }
   .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
@@ -233,6 +237,7 @@
   <div id="tab-wifi" hidden>
     <section class="card">
       <div class="toolbar">
+        <label class="note"><input type="checkbox" id="survOnly"> surveillance only</label>
         <input type="search" id="wifiFilter" placeholder="filter SSID / MAC / vendor / security">
         <label class="note"><input type="checkbox" id="wifiApOnly"> access points only</label>
         <label class="note"><input type="checkbox" id="wifiActive" checked> seen in last 60 s</label>
@@ -580,11 +585,14 @@
 
   function renderWifi(s) {
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
-    let rows = s.wifi_devs.filter(d => (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy].join(' ').toLowerCase().includes(f)));
+    const survOnly = $('#survOnly') && $('#survOnly').checked;
+    let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'wifi');
     $('#nWifi').textContent = s.wifi_devs.filter(d => d.age < 60).length;
     $('#wifiNote').textContent = `${rows.length} shown · ${s.wifi_devs.length} known · vendors: ${s.oui_source}`;
-    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">client / station</span>`}</td>
+    const survBadge = (d) => d.surv
+      ? `<span class="surv${d.tier === 1 ? ' t1' : ''}" title="${esc(d.surv_kind)} — OUI match${d.tier === 1 ? ', seen only as a frame destination (weaker evidence)' : ''}">${esc(d.surv)}${d.tier === 1 ? ' ?' : ''}</span>` : '';
+    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}</span>`}</td>
       <td class="l mono">${d.mac}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? d.bw + ' MHz' : ''}</td><td>${d.ch}</td>
       <td>${d.util != null ? d.util + ' %' : ''}</td><td>${d.stations != null && d.ap ? d.stations : ''}</td>
@@ -598,7 +606,8 @@
     rows = sortRows(rows, 'ble');
     $('#nBle').textContent = s.ble_devs.filter(d => d.age < 60).length;
     $('#bleNote').textContent = s.band === 'ble' ? `${rows.length} shown · ${s.ble_devs.length} known · scan cycle ${s.ble.cycles}` : `${s.ble_devs.length} known · switch Mode to Bluetooth LE to scan`;
-    renderRows($('#bleTbl tbody'), rows, d => d.mac, d => `<td class="l"><b>${esc(d.name)}</b>${d.connectable ? '' : '<br><span class="sub">non-connectable</span>'}</td>
+    const bSurv = (d) => d.surv ? `<span class="surv" title="${esc(d.surv_kind)} — OUI match">${esc(d.surv)}</span>` : '';
+    renderRows($('#bleTbl tbody'), rows, d => d.mac, d => `<td class="l">${bSurv(d)}<b>${esc(d.name)}</b>${d.connectable ? '' : '<br><span class="sub">non-connectable</span>'}</td>
       <td class="l mono">${d.mac}${d.random ? '<br><span class="sub">random address</span>' : '<br><span class="sub">public address</span>'}</td>
       <td class="l">${esc(d.vendor)}${d.company && d.company_name !== d.vendor ? `<br><span class="sub">${esc(d.company_name)}</span>` : ''}</td>
       <td class="l">${esc(d.kind)}</td><td>${d.tx != null ? d.tx + ' dBm' : ''}</td>

@@ -28,7 +28,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.4.2";
+constexpr const char* kVersion = "1.5";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -258,9 +258,11 @@ CapFrame* capRing = nullptr;
 int capSlots = 0;
 volatile uint8_t capHead = 0;     // next slot the producer writes
 volatile uint8_t capTail = 0;     // next slot the consumer reads
+bool trackAddr1 = true;                 // tier-1 receiver-side sightings (see trackWifiDevice)
 volatile bool captureEnabled = false;   // USB sink
 volatile bool capActive = false;        // either sink wants frames: the RX paths gate on this
 bool sdMounted = false, sdCapEnabled = false;   // microSD sink (definitions further down)
+bool sdReadActive = false;      // an sdread is streaming a file out (definitions further down)
 bool sdCardPresent = false;     // seen at boot; FATFS is only mounted while the card is actually in use
 uint32_t sdCardMb = 0;          // cached so hello can report it without mounting
 File sdFile;
@@ -440,6 +442,89 @@ void IRAM_ATTR sanitizeText(char* s, size_t n) {
 inline void putLE16(uint8_t* p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
 inline void putLE32(uint8_t* p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
 
+// Known surveillance hardware, matched on the first three MAC bytes. Sources: colonelpanichacks/
+// ouispy-detector (ouis.md) and the Flock Safety prefixes researched by OrdoOuroboros / @NitekryDPaul
+// via flock-you. An OUI match is evidence, not proof: prefixes get reassigned, and two entries in the
+// Flock set were withdrawn upstream as Ubiquiti false positives. Treat a hit as "worth a look".
+enum SurvCat : uint8_t { SURV_NONE = 0, SURV_FLOCK = 1, SURV_RING = 2, SURV_AXON = 3,
+                         SURV_DJI = 4, SURV_PARROT = 5, SURV_SKYDIO = 6, SURV_META = 7 };
+constexpr const char* kSurvName[] = {"", "Flock Safety", "Ring", "Axon", "DJI", "Parrot", "Skydio", "Meta/Ray-Ban"};
+struct SurvOui { uint8_t o[3]; uint8_t cat; };
+constexpr SurvOui kSurvOuis[] = {
+    {{0x00, 0xF4, 0x8D}, 1},   // FLOCK
+    {{0x08, 0x3A, 0x88}, 1},   // FLOCK
+    {{0x14, 0x5A, 0xFC}, 1},   // FLOCK
+    {{0x14, 0xB5, 0xCD}, 1},   // FLOCK
+    {{0x24, 0xB2, 0xB9}, 1},   // FLOCK
+    {{0x3C, 0x71, 0xBF}, 1},   // FLOCK
+    {{0x3C, 0x91, 0x80}, 1},   // FLOCK
+    {{0x48, 0x27, 0xEA}, 1},   // FLOCK
+    {{0x58, 0x00, 0xE3}, 1},   // FLOCK
+    {{0x58, 0x8E, 0x81}, 1},   // FLOCK
+    {{0x5C, 0x93, 0xA2}, 1},   // FLOCK
+    {{0x64, 0x6E, 0x69}, 1},   // FLOCK
+    {{0x70, 0x08, 0x94}, 1},   // FLOCK
+    {{0x70, 0xC9, 0x4E}, 1},   // FLOCK
+    {{0x74, 0x4C, 0xA1}, 1},   // FLOCK
+    {{0x80, 0x30, 0x49}, 1},   // FLOCK
+    {{0x82, 0x6B, 0xF2}, 1},   // FLOCK
+    {{0x90, 0x35, 0xEA}, 1},   // FLOCK
+    {{0x94, 0x08, 0x53}, 1},   // FLOCK
+    {{0x9C, 0x2F, 0x9D}, 1},   // FLOCK
+    {{0xA4, 0xCF, 0x12}, 1},   // FLOCK
+    {{0xB4, 0x1E, 0x52}, 1},   // FLOCK
+    {{0xB8, 0x1E, 0xA4}, 1},   // FLOCK
+    {{0xB8, 0x35, 0x32}, 1},   // FLOCK
+    {{0xC0, 0x35, 0x32}, 1},   // FLOCK
+    {{0xD0, 0x39, 0x57}, 1},   // FLOCK
+    {{0xD8, 0xF3, 0xBC}, 1},   // FLOCK
+    {{0xE0, 0x0A, 0xF6}, 1},   // FLOCK
+    {{0xE0, 0x4F, 0x43}, 1},   // FLOCK
+    {{0xE4, 0xAA, 0xEA}, 1},   // FLOCK
+    {{0xE8, 0xD0, 0xFC}, 1},   // FLOCK
+    {{0xEC, 0x1B, 0xBD}, 1},   // FLOCK
+    {{0xF4, 0x6A, 0xDD}, 1},   // FLOCK
+    {{0x18, 0x7F, 0x88}, 2},   // RING
+    {{0x24, 0x2B, 0xD6}, 2},   // RING
+    {{0x34, 0x3E, 0xA4}, 2},   // RING
+    {{0x54, 0xE0, 0x19}, 2},   // RING
+    {{0x5C, 0x47, 0x5E}, 2},   // RING
+    {{0x64, 0x9A, 0x63}, 2},   // RING
+    {{0x90, 0x48, 0x6C}, 2},   // RING
+    {{0x9C, 0x76, 0x13}, 2},   // RING
+    {{0xAC, 0x9F, 0xC3}, 2},   // RING
+    {{0xC4, 0xDB, 0xAD}, 2},   // RING
+    {{0xCC, 0x3B, 0xFB}, 2},   // RING
+    {{0x00, 0x25, 0xDF}, 3},   // AXON
+    {{0x04, 0xA8, 0x5A}, 4},   // DJI
+    {{0x0C, 0x9A, 0xE6}, 4},   // DJI
+    {{0x34, 0xD2, 0x62}, 4},   // DJI
+    {{0x48, 0x1C, 0xB9}, 4},   // DJI
+    {{0x58, 0xB8, 0x58}, 4},   // DJI
+    {{0x60, 0x60, 0x1F}, 4},   // DJI
+    {{0x8C, 0x58, 0x23}, 4},   // DJI
+    {{0xE4, 0x7A, 0x2C}, 4},   // DJI
+    {{0x00, 0x12, 0x1C}, 5},   // PARROT
+    {{0x00, 0x26, 0x7E}, 5},   // PARROT
+    {{0x90, 0x03, 0xB7}, 5},   // PARROT
+    {{0x90, 0x3A, 0xE6}, 5},   // PARROT
+    {{0xA0, 0x14, 0x3D}, 5},   // PARROT
+    {{0x38, 0x1D, 0x14}, 6},   // SKYDIO
+    {{0x5C, 0xE9, 0x1E}, 7},   // META
+    {{0x7C, 0x2A, 0x9E}, 7},   // META
+    {{0x98, 0x59, 0x49}, 7},   // META
+    {{0xCC, 0x66, 0x0A}, 7},   // META
+    {{0xF4, 0x03, 0x43}, 7},   // META
+};
+constexpr int kSurvOuiCount = sizeof(kSurvOuis) / sizeof(kSurvOuis[0]);
+
+uint8_t survLookup(const uint8_t* mac) {
+    for (int i = 0; i < kSurvOuiCount; i++)
+        if (kSurvOuis[i].o[0] == mac[0] && kSurvOuis[i].o[1] == mac[1] && kSurvOuis[i].o[2] == mac[2])
+            return kSurvOuis[i].cat;
+    return SURV_NONE;
+}
+
 // Write a JSON string literal (quoted, escaped) to Serial.
 void printJsonStr(const char* s) {
     Serial.write('"');
@@ -545,16 +630,36 @@ void IRAM_ATTR parseBeaconIes(WifiDev& d, const uint8_t* payload, uint16_t sigLe
     d.flags |= 2;
 }
 
-void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, const uint8_t* payload, uint16_t sigLen) {
+// destOnly: this MAC was the *destination* (addr1) of someone else's frame, so we have never heard it
+// transmit. Tier 1 evidence - @NitekryDPaul's technique for devices like Flock cameras that sleep through
+// most dwell windows and only ever appear as a recipient. It is deliberately weaker than a transmitter
+// sighting: it must never evict a device we have actually heard, and it never overwrites signal data,
+// because the RSSI belongs to whoever sent the frame, not to this device.
+void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, const uint8_t* payload,
+                               uint16_t sigLen, bool destOnly = false) {
     const uint32_t now = millis();
     const bool isBeacon = (fc0 == 0x80) || (fc0 == 0x50);   // beacon / probe response
     portENTER_CRITICAL_ISR(&g_devMux);
     const int i = devFindSlot(wifiDevs, kWifiDevSlots, mac);
     WifiDev& d = wifiDevs[i];
-    if (d.lastMs == 0 || !macEq(d.mac, mac)) {
+    const bool fresh = (d.lastMs == 0 || !macEq(d.mac, mac));
+    if (destOnly && fresh && d.lastMs != 0 && !(d.flags & 4)) {
+        portEXIT_CRITICAL_ISR(&g_devMux);   // slot holds a real transmitter: a tier-1 hit does not evict it
+        return;
+    }
+    if (fresh) {
         memset(&d, 0, sizeof(d));
         memcpy(d.mac, mac, 6);
         d.maxRssi = rssi;
+        d.surv = survLookup(mac);
+        if (destOnly) d.flags |= 4;
+    }
+    if (!destOnly) d.flags &= ~4;   // heard it transmit: upgrade to tier 2
+    if (destOnly) {
+        if (d.frames < 65535) d.frames++;
+        d.lastMs = now;
+        portEXIT_CRITICAL_ISR(&g_devMux);
+        return;                      // no rssi/ch/IE updates: none of that is this device's
     }
     d.rssi = rssi;
     if (rssi > d.maxRssi) d.maxRssi = rssi;
@@ -609,6 +714,10 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
 
     if (hasAddr2 && type != WIFI_PKT_CTRL) {
         trackWifiDevice(ipkt->hdr.addr2, pkt->rx_ctrl.rssi, pkt->payload[0], pkt->payload, sigLen);
+        // Receiver-side sighting: a device that never transmits during our dwell is still named as addr1
+        // by whoever talks to it. Unicast only - broadcast/multicast destinations are not devices.
+        if (trackAddr1 && !(ipkt->hdr.addr1[0] & 0x01) && !macEq(ipkt->hdr.addr1, ipkt->hdr.addr2))
+            trackWifiDevice(ipkt->hdr.addr1, pkt->rx_ctrl.rssi, 0, pkt->payload, sigLen, true);
     }
 
     if (capActive && capRing) {
@@ -757,6 +866,7 @@ void trackBleDevice(const uint8_t* mac, int8_t rssi, uint8_t addrType, const AdI
         memcpy(d.mac, mac, 6);
         d.maxRssi = rssi;
         d.txPower = 127;
+        d.surv = survLookup(mac);
         isNew = true;
     }
     d.rssi = rssi;
@@ -1476,7 +1586,7 @@ void sendDevices() {
     if (wifiMode()) {
         WifiDev* snap = devSnap.w;
         const int n = snapshotWifi(snap, kWifiDevSlots, kDevFreshMs);
-        if (!serialRoom(40 + n * 110)) return;
+        if (!serialRoom(40 + n * 118)) return;
         Serial.print("{\"t\":\"w\",\"dev\":[");
         for (int i = 0; i < n; i++) {
             fmtMac(mac, sizeof(mac), snap[i].mac);
@@ -1486,13 +1596,13 @@ void sendDevices() {
             printJsonStr(d.ssid);
             Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
             printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
-            Serial.print("]");
+            Serial.printf(",%u]", d.surv);
         }
         Serial.print("]}\n");
     } else {
         BleDev* snap = devSnap.b;
         const int n = snapshotBle(snap, kBleDevSlots, kDevFreshMs);
-        if (!serialRoom(40 + n * 95)) return;
+        if (!serialRoom(40 + n * 102)) return;
         Serial.print("{\"t\":\"b\",\"dev\":[");
         for (int i = 0; i < n; i++) {
             fmtMac(mac, sizeof(mac), snap[i].mac);
@@ -1500,7 +1610,8 @@ void sendDevices() {
             Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", i ? "," : "", mac, d.rssi, d.maxRssi, d.adv,
                           static_cast<unsigned long>(now - d.lastMs), d.addrType, d.company);
             printJsonStr(d.name);
-            Serial.printf(",%u,%d,%u,%u,%u,%u]", d.appearance, d.txPower, d.svc, d.svcData, d.appleType, d.flags);
+            Serial.printf(",%u,%d,%u,%u,%u,%u,%u]", d.appearance, d.txPower, d.svc, d.svcData, d.appleType,
+                          d.flags, d.surv);
         }
         Serial.print("]}\n");
     }
@@ -1562,8 +1673,11 @@ bool sdMount() {
     return sdMounted;
 }
 
+void sdReadAbort();   // defined with the file reader below
+
 void sdUnmount() {
-    if (!sdMounted || sdCapEnabled) return;   // never pull the filesystem out from under an open capture
+    if (!sdMounted || sdCapEnabled || sdReadActive) return;   // never pull the filesystem out from under
+                                                              // an open capture or an in-flight sdread
     SD.end();
     sdMounted = false;
 }
@@ -1686,28 +1800,50 @@ bool sdWriteFrame(const CapFrame& f) {
 }
 
 // Pull a capture off the card without ejecting it: "S <n> <base64>" lines, bracketed by an ack.
-// Runs synchronously from the command handler, so the UI pauses for the duration of a big file.
+// Driven incrementally from Bandwatch_Loop with a time budget, NOT in one blocking loop inside the
+// command handler: that shares the loop task with lv_timer_handler -> hopIfNeeded(), so a blocking read
+// of a 1.6 MB capture stalled channel hopping for seconds and skewed every dwell in that window.
+File sdReadFh;
+uint32_t sdReadSent = 0, sdReadTotal = 0;
+
+void sdReadAbort() {
+    if (!sdReadActive) return;
+    sdReadActive = false;
+    if (sdReadFh) sdReadFh.close();
+    sdUnmount();
+}
+
 void sdReadFile(const char* path) {
+    sdReadAbort();
     if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdread: no card\"}\n"); return; }
-    File f = SD.open(path, FILE_READ);
-    if (!f) { Serial.printf("{\"t\":\"err\",\"msg\":\"sdread: cannot open %s\"}\n", path); return; }
-    const uint32_t total = f.size();
+    sdReadFh = SD.open(path, FILE_READ);
+    if (!sdReadFh) { Serial.printf("{\"t\":\"err\",\"msg\":\"sdread: cannot open %s\"}\n", path); sdUnmount(); return; }
+    sdReadTotal = sdReadFh.size();
+    sdReadSent = 0;
+    sdReadActive = true;
     Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread\",\"file\":\"%s\",\"bytes\":%lu}\n", path,
-                  static_cast<unsigned long>(total));
+                  static_cast<unsigned long>(sdReadTotal));
+}
+
+// Called every loop: emit what fits in the TX buffer, then yield so hopping and the UI keep running.
+void serviceSdRead() {
+    if (!sdReadActive) return;
+    const uint32_t started = micros();
     uint8_t chunk[192];
-    uint32_t sent = 0;
-    while (sent < total) {
-        const int n = f.read(chunk, sizeof(chunk));
+    while (sdReadSent < sdReadTotal) {
+        if (!serialRoom(sizeof(chunk) * 4 / 3 + 24)) return;      // no room: try again next loop
+        if ((micros() - started) > kSdBudgetUs) return;           // same budget the capture drain uses
+        const int n = sdReadFh.read(chunk, sizeof(chunk));
         if (n <= 0) break;
-        while (!serialRoom(n * 4 / 3 + 24)) delay(2);   // never truncate a line
         Serial.printf("S %d ", n);
         writeBase64(chunk, n);
         Serial.write('\n');
-        sent += n;
-        delay(0);
+        sdReadSent += n;
     }
-    f.close();
-    Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread_done\",\"sent\":%lu}\n", static_cast<unsigned long>(sent));
+    Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread_done\",\"sent\":%lu}\n",
+                  static_cast<unsigned long>(sdReadSent));
+    sdReadActive = false;
+    sdReadFh.close();
     sdUnmount();
 }
 
@@ -1926,6 +2062,9 @@ void handleCommand(char* line) {
         sdListFiles();
     } else if (!strcmp(line, "sdread")) {
         sdReadFile(arg);
+    } else if (!strcmp(line, "addr1")) {
+        trackAddr1 = atoi(arg) != 0;
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"addr1\",\"addr1\":%d}\n", trackAddr1 ? 1 : 0);
     } else if (!strcmp(line, "blescan")) {
         if (!strcmp(arg, "active"))       bleScanMode = BLE_SCAN_ACTIVE;
         else if (!strcmp(arg, "passive")) bleScanMode = BLE_SCAN_PASSIVE;
@@ -2681,7 +2820,7 @@ inline int rssiPct(int rssi) {   // -100 dBm -> 0, -30 dBm -> 100
     return p < 0 ? 0 : p > 100 ? 100 : p;
 }
 
-struct DevRowInfo { uint8_t mac[6]; int8_t rssi; bool ap; char label[33]; };
+struct DevRowInfo { uint8_t mac[6]; int8_t rssi; bool ap; uint8_t surv; bool destOnly; char label[33]; };
 DevRowInfo devRows[kDevRows];
 int devRowCount = 0;
 
@@ -2700,6 +2839,8 @@ void refreshDevices() {
                 memcpy(devRows[i].mac, d.key, 6);
                 devRows[i].rssi = d.rssi;
                 devRows[i].ap = d.flags & 2;
+                devRows[i].surv = 0;
+                devRows[i].destOnly = false;
                 if (d.flags & 1) snprintf(devRows[i].label, 33, "%s %02x%02x%02x", kProto[d.proto < 5 ? d.proto : 0], d.key[5], d.key[6], d.key[7]);
                 else snprintf(devRows[i].label, 33, "%s %04x", kProto[d.proto < 5 ? d.proto : 0], d.shortAddr);
                 if (d.flags & 4) strncat(devRows[i].label, " join", 32 - strlen(devRows[i].label));
@@ -2712,6 +2853,8 @@ void refreshDevices() {
                 memcpy(devRows[i].mac, devSnap.w[i].mac, 6);
                 devRows[i].rssi = devSnap.w[i].rssi;
                 devRows[i].ap = devSnap.w[i].flags & 1;
+                devRows[i].surv = devSnap.w[i].surv;
+                devRows[i].destOnly = devSnap.w[i].flags & 4;
                 strncpy(devRows[i].label, devSnap.w[i].ssid, 32); devRows[i].label[32] = 0;
             }
         } else {
@@ -2722,6 +2865,8 @@ void refreshDevices() {
                 memcpy(devRows[i].mac, devSnap.b[i].mac, 6);
                 devRows[i].rssi = devSnap.b[i].rssi;
                 devRows[i].ap = false;
+                devRows[i].surv = devSnap.b[i].surv;
+                devRows[i].destOnly = false;
                 strncpy(devRows[i].label, devSnap.b[i].name, 32); devRows[i].label[32] = 0;
             }
         }
@@ -2741,11 +2886,16 @@ void refreshDevices() {
         const int rssi = devRows[i].rssi;
         const char* label = devRows[i].label;
         const bool ap = devRows[i].ap;
-        if (label[0]) snprintf(buf, sizeof(buf), "%s%s", ap ? "* " : "", label);
-        else snprintf(buf, sizeof(buf), "%s%02x:%02x:%02x", ap ? "* " : "", mac[3], mac[4], mac[5]);
+        // "!" marks known surveillance hardware, "~" a device only ever seen as a destination (tier 1).
+        const char* pfx = devRows[i].surv ? "! " : devRows[i].destOnly ? "~ " : ap ? "* " : "";
+        if (devRows[i].surv)      snprintf(buf, sizeof(buf), "%s%s", pfx, kSurvName[devRows[i].surv]);
+        else if (label[0])        snprintf(buf, sizeof(buf), "%s%s", pfx, label);
+        else                      snprintf(buf, sizeof(buf), "%s%02x:%02x:%02x", pfx, mac[3], mac[4], mac[5]);
         lv_label_set_text(devName[i], buf);
         const bool hunted = huntActive && (huntKind == 1 ? memcmp(mac, huntKey, 6) == 0 : macEq(mac, huntMac));
-        lv_obj_set_style_text_color(devName[i], hunted ? c565(CYAN_565) : c565(WHITE_565), 0);
+        lv_obj_set_style_text_color(devName[i], devRows[i].surv ? c565(ORANGE_565)
+                                               : hunted ? c565(CYAN_565)
+                                               : devRows[i].destOnly ? c565(GREY_565) : c565(WHITE_565), 0);
         snprintf(buf, sizeof(buf), "%d", rssi);
         lv_label_set_text(devRssi[i], buf);
         lv_bar_set_value(devBar[i], rssiPct(rssi), LV_ANIM_OFF);
@@ -2993,6 +3143,7 @@ void Bandwatch_Loop(void) {
     static uint32_t lastDevMs = 0;
     pollSerial();
     pollButton();
+    serviceSdRead();
     drainCapture();
     serviceBle();
     const uint32_t now = millis();

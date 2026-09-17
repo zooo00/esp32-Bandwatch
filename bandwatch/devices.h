@@ -15,7 +15,10 @@ struct WifiDev {
     uint16_t frames;
     uint32_t lastMs;     // 0 = empty slot
     uint8_t ch;
-    uint8_t flags;       // bit0: sent beacon/probe response (AP), bit1: IEs parsed
+    uint8_t flags;       // bit0: AP (beacon/probe resp), bit1: IEs parsed, bit2: seen ONLY as a frame
+                         //   destination (addr1) - we have never heard it transmit, so rssi/ch belong to
+                         //   whoever addressed it. Tier 1 evidence; cleared as soon as it transmits.
+    uint8_t surv;        // SurvCat: known surveillance hardware by OUI, 0 = none
     char ssid[33];
     // From beacon / probe-response information elements (APs only)
     uint8_t sec;         // bit0 WEP, bit1 WPA1, bit2 WPA2-PSK, bit3 WPA2-ENT, bit4 WPA3-SAE, bit5 WPA3-ENT, bit6 OWE, bit7 open
@@ -43,6 +46,7 @@ struct BleDev {
     uint16_t svcData;    // first 16-bit service-data UUID, 0 if none
     uint8_t appleType;   // Apple manufacturer-data type byte (0x12 FindMy, 0x07 AirPods, 0x0c handoff, ...), 0 if n/a
     uint8_t flags;       // bit0 connectable, bit1 legacy advertisement, bit2 scannable
+    uint8_t surv;        // SurvCat: known surveillance hardware by OUI, 0 = none
 };
 
 // IEEE 802.15.4 (Zigbee / Thread) node, keyed by extended (64-bit) address when the frame carried one,

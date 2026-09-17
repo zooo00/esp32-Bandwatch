@@ -200,6 +200,14 @@ raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mo
 
 ## Versions
 
+- **1.5** — **Surveillance-hardware flagging and receiver-side sightings.** 64 OUI prefixes across 7
+  categories (Flock Safety, Ring, Axon, DJI, Parrot, Skydio, Meta/Ray-Ban) are matched in firmware, so hits
+  show on the LCD (`!`, orange) as well as the dashboard (red badge, plus a *surveillance only* filter).
+  Wi-Fi tracking now also records devices seen only as a frame **destination** (`addr1`) — the technique that
+  surfaces cameras which sleep through a dwell window — tiered as weaker evidence so they never evict or
+  overwrite a device we actually heard (`addr1 0|1`). `sdread` is incremental now, so pulling a capture no
+  longer stalls channel hopping. An OUI match is evidence, not proof; see
+  [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §15.
 - **1.4.2** — SD recording worked but *looked* broken from the dashboard: BLE mode emits no dwell lines, so the
   capture counters never reached the host, and the `sdcap` ack used a key the host was not reading. Both fixed.
   Adds a record light on the LCD: the page header turns **red** and shows `USB` / `SD` / `REC` while recording.

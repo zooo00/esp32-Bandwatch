@@ -123,8 +123,8 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}`) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
-| `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc]`; flags bit0 AP, bit1 IEs parsed; `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
-| `{"t":"b","dev":[...]}` | every 2 s in BLE mode | rows `[mac, rssi, max, adverts, age_ms, addrType, company, name, appearance, txPower(127=none), svcUuid16, svcDataUuid16, appleType, flags]`; flags bit0 connectable, bit1 legacy adv, bit2 scannable |
+| `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv]`; flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
+| `{"t":"b","dev":[...]}` | every 2 s in BLE mode | rows `[mac, rssi, max, adverts, age_ms, addrType, company, name, appearance, txPower(127=none), svcUuid16, svcDataUuid16, appleType, flags, surv]`; flags bit0 connectable, bit1 legacy adv, bit2 scannable |
 | `{"t":"z","dev":[...]}` | every 2 s in 802.15.4 mode | rows `[id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]`; `id` = extended address `aa:bb:cc:dd:ee:ff:00:11` or `pan/short` hex; `proto` 0 unknown, 1 Zigbee, 2 Zigbee GP, 3 Thread/6LoWPAN, 4 MAC‑secured; flags bit0 ext addr, bit1 beacons, bit2 permit join, bit3 MAC security, bit4 data seen |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
 | `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | |
@@ -465,3 +465,57 @@ suspect the telemetry path, not the writer. `sdinfo` over serial reports the dev
 header red and `recTag()` appends ` USB` / ` SD` / ` REC`, on the Overview, Channels, Devices and Hunt
 headers. The RGB LED pulses in parallel (`driveLed`), cyan for the host sink, magenta for the card, white
 for both - placed after the hunt branch so hunting keeps the LED, but before the busy-score colours.
+
+
+## 15. Receiver-side sightings and surveillance flagging (1.5)
+
+### addr1 (tier 1) tracking
+
+`promiscuousCb()` used to look only at `addr2`, the transmitter. Devices that sleep through most of a dwell
+window - Flock Safety cameras being the documented case - are then invisible, because they rarely transmit
+while we are listening on their channel. They do, however, appear as `addr1`, the **destination** of frames
+sent by nearby APs. Tracking addr1 surfaces them. The technique is OrdoOuroboros / @NitekryDPaul's, via
+[flock-you](https://github.com/colonelpanichacks/flock-you).
+
+It is deliberately weaker evidence, and the upstream project is explicit that addr1/addr3 matching
+**does misfire** - an AP answering a wildcard probe can name an unrelated address. So it is tiered:
+
+| tier | meaning | in the protocol |
+| --- | --- | --- |
+| 2 | we heard the device transmit (`addr2`) | `flags` bit2 clear |
+| 1 | only ever seen as a destination (`addr1`) | `flags` bit2 set, `dest_only` in the host |
+
+Rules that keep tier 1 from polluting the table, all in `trackWifiDevice(..., destOnly)`:
+
+- a tier-1 sighting **never evicts** a slot holding a device we have actually heard;
+- it never writes `rssi`, `maxRssi`, `ch` or beacon IEs — that signal belongs to whoever *sent* the frame,
+  not to the device being addressed. Only `frames` and `lastMs` advance;
+- the first `addr2` sighting clears bit2 and promotes the entry to tier 2, permanently;
+- broadcast/multicast destinations and frames where `addr1 == addr2` are skipped.
+
+Toggle with `addr1 0|1` (default on). Measured in a normal flat: 38 devices, 35 tier 2, 3 tier 1 — three
+devices that a transmitter-only sniff would not have listed at all.
+
+### Surveillance OUI flagging
+
+`kSurvOuis` in the firmware holds **64 prefixes across 7 categories** (Flock Safety, Ring, Axon, DJI,
+Parrot, Skydio, Meta/Ray-Ban), from colonelpanichacks/ouispy-detector plus @NitekryDPaul's Flock research.
+The firmware does the match so the **LCD** can flag too, and reports a category id; the host names it
+(`SURV_CAT` / `SURV_KIND`) and derives a tier. Wi-Fi and BLE tables both carry it.
+
+- LCD Devices page: `!` and orange for a surveillance hit, `~` and grey for a tier-1 destination-only entry.
+- Dashboard: a red badge in the device tables, outlined and suffixed `?` at tier 1, plus a
+  **surveillance only** filter on the Wi-Fi tab.
+
+**An OUI match is evidence, not proof.** Prefixes get reassigned and vendors buy blocks from each other;
+upstream had to withdraw two Flock prefixes as Ubiquiti false positives. Treat a hit as "worth a look",
+never as identification, and do not let the UI imply otherwise.
+
+### sdread no longer blocks the loop
+
+`sdReadFile()` used to stream the whole file inside the command handler. That handler runs on the loop task,
+which also drives `lv_timer_handler()` -> `hopIfNeeded()`, so pulling a large capture stalled channel
+hopping for the duration and skewed every dwell in that window. It is now incremental: `sdReadFile()` opens
+the file and `serviceSdRead()` emits what fits in the TX buffer each loop, bounded by `kSdBudgetUs`.
+Measured pulling a 2.2 MB capture while hopping: 368 kB/s, 25 dwells delivered during the transfer, median
+dwell interval 233 ms against a 220 ms nominal.

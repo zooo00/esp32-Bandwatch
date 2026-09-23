@@ -409,8 +409,8 @@
     }
     $('#sdBtn').classList.toggle('stop', rec);
     // Keep the SD file list around: hello replaces st["sd"] without it, so re-ask whenever it is gone. A few
-    // seconds of cooldown keeps an empty card from being listed on every tick.
-    if (sd.mounted && !rec && (!sd.files || !sd.files.length) && Date.now() - sdlsAt > 5000) {
+    // seconds of cooldown keeps an empty card from being listed on every tick; if total=0 we stop asking.
+    if (sd.mounted && !rec && sd.file_total === undefined && Date.now() - sdlsAt > 5000) {
       sdlsAt = Date.now(); post({cmd: 'sdls'});
     }
     let sdFiles = '';

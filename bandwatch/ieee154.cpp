@@ -7,8 +7,7 @@
 bool r154Running = false;   // instance lives with its module; core reads it via bandwatch_core.h
 
 namespace {   // locals; closed before the driver callback because it needs C linkage
-
-volatile uint32_t rx154Count = 0;
+// No globals needed here — all counting goes through g_accum in capture.cpp
 
 // Classify the MAC payload: Zigbee NWK header, Zigbee Green Power, or 6LoWPAN (Thread).
 inline uint8_t IRAM_ATTR classify154(const uint8_t* pl, uint16_t n, bool macSecured) {
@@ -143,7 +142,6 @@ extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t* frame, esp_ieee80
             memcpy(slot->data, p, c);
             capCommit(nh);
         }
-        rx154Count = rx154Count + 1;
     }
     esp_ieee802154_receive_handle_done(frame);
 }

@@ -227,17 +227,22 @@ void sdListFiles() {
     if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: no card\"}\n"); return; }
     File root = SD.open("/");
     if (!root) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); return; }
+    // "sent" < "total": the serial buffer filled up mid-list (host slow or absent), so entries were dropped.
+    // The host shows what arrived and knows there is more on the card.
+    int total = 0, sent = 0;
     Serial.print("{\"t\":\"sdls\",\"files\":[");
-    bool first = true;
     for (File e = root.openNextFile(); e; e = root.openNextFile()) {
-        if (!e.isDirectory() && serialRoom(120)) {
-            Serial.printf("%s[\"%s\",%lu]", first ? "" : ",", e.name(), static_cast<unsigned long>(e.size()));
-            first = false;
+        if (!e.isDirectory()) {
+            total++;
+            if (serialRoom(120)) {
+                Serial.printf("%s[\"%s\",%lu]", sent ? "," : "", e.name(), static_cast<unsigned long>(e.size()));
+                sent++;
+            }
         }
         e.close();
     }
     root.close();
-    Serial.print("]}\n");
+    Serial.printf("],\"total\":%d,\"sent\":%d}\n", total, sent);
     sdUnmount();
 }
 

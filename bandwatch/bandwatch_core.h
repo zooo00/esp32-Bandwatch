@@ -249,6 +249,7 @@ extern int parkedIdx;                 // >= 0: stay on this channel instead of h
 extern uint32_t sweepCount;
 extern bool monitorReady;             // the radio is sitting on a usable channel
 extern bool wifiRunning;              // Wi-Fi driver up (also true in 15.4 mode? no — one radio, see setBandMode)
+extern bool r154Running;              // 802.15.4 driver up (instance in ieee154.cpp)
 
 // esp_wifi_* setup results, reported by hello / the system page (set while starting Wi-Fi).
 extern esp_err_t errCountry, errBand, errProto, errPromisc;
@@ -295,6 +296,7 @@ extern bool epochValid;
 void startWifi(); void stopWifi();
 wifi_band_mode_t toDriverBand(BandMode m);   // Wi-Fi driver's band enum (setBandMode + startWifi)
 void applyProtocols();                       // esp_wifi_set_protocols, result in errProto
+void resetChannelStats();                    // clear per-channel history + sweep counter (bandwatch.cpp)
 void startBle();  void stopBle();  void serviceBle();
 void start154();  void stop154();
 bool advanceChannel();

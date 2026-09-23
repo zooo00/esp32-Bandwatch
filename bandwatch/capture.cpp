@@ -4,7 +4,11 @@
 // docs/DEVELOPER.md §16 for the RAM budget.
 #include "bandwatch_core.h"
 
-constexpr uint32_t kCapHeapReserve = 14000;   // keep this much heap free after allocating the ring
+constexpr uint32_t kCapHeapReserve = 14000;   // keep this much heap free when sizing the ring
+// Floor for TOTAL free heap once the ring is allocated: below it, LVGL page rebuilds and SD writes start
+// failing mid-capture instead of the capture being refused up front. Sized against the tightest normal state
+// (SD recording on top of a full 20-slot ring; docs/DEVELOPER.md §16).
+constexpr uint32_t kMinFreeHeapB = 24 * 1024;
 
 // Single-producer (Wi-Fi task, NimBLE host task, 802.15.4 ISR) / single-consumer (loop) ring buffer for
 // captured frames. Allocated from the heap only while a capture runs (~32 KB), so it costs nothing otherwise.
@@ -38,6 +42,16 @@ bool ensureCapRing() {
         if (serialRoom(120))
             Serial.printf("{\"t\":\"err\",\"msg\":\"capture buffer: not enough free heap (%u)\"}\n",
                           static_cast<unsigned>(freeHeap));
+        return false;
+    }
+    // Heap floor: the ring is sized against the largest block, but total free heap decides whether a page
+    // rebuild or SD write can still succeed while it lives. Refuse and hand it back rather than OOM later.
+    if (ESP.getFreeHeap() < kMinFreeHeapB) {
+        const uint32_t after = ESP.getFreeHeap();
+        releaseCapture();
+        if (serialRoom(160))
+            Serial.printf("{\"t\":\"err\",\"msg\":\"capture refused: %u B free after ring, want >= %u\"}\n",
+                          static_cast<unsigned>(after), static_cast<unsigned>(kMinFreeHeapB));
         return false;
     }
     if (serialRoom(100)) Serial.printf("{\"t\":\"log\",\"msg\":\"capture ring: %d slots\"}\n", capSlots);

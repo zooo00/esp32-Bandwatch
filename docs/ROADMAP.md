@@ -1,6 +1,6 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.5.1**.
+Planned work, open questions and known gaps. Current release: **v1.5.2**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.

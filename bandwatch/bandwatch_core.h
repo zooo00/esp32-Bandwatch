@@ -1,0 +1,356 @@
+#pragma once
+// Bandwatch shared core: tunables, the mode/channel model, and state that more than one module touches.
+// The radios (wifi_sniff / ble_scan / ieee154), capture sinks (capture / sd_sink), deauth diagnostics
+// (deauth_diag), host protocol (host_proto) and LCD UI (lcd_ui) are separate files; this is what they share.
+// Everything here that lands in DRAM is small on purpose — see docs/DEVELOPER.md §16 for the RAM budget.
+#include <stdint.h>
+#include <Arduino.h>
+#include <esp_err.h>
+#include <esp_wifi_types.h>
+#include <FS.h>
+#include "devices.h"
+
+// LVGL timer type, for the uiTimerCb signature (full definition comes in with lvgl where it is used).
+struct _lv_timer_t;
+typedef struct _lv_timer_t lv_timer_t;
+
+// ---------------------------------------------------------------------------------------------
+// Tunables
+// ---------------------------------------------------------------------------------------------
+constexpr const char* kVersion = "1.5";
+constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
+constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
+constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
+constexpr float kBusyEmaAlpha = 0.22f;      // Smoothing within required 0.15–0.30
+constexpr int kUniqueSlots = 24;            // Best-effort unique transmitter slots
+constexpr int kRgbPin = 8;                  // Onboard WS2812B data pin (Waveshare ESP32-C5-LCD-1.47)
+constexpr int kBootButtonPin = 28;          // BOOT key = GPIO28 strap; free to use as an input after boot
+constexpr uint32_t kLongPressMs = 700;      // Hold BOOT this long to cycle band mode (or stop a hunt)
+constexpr uint32_t kApUpdateMs = 3000;      // AP count refresh cadence
+constexpr uint32_t kDevListMs = 2000;       // Device table -> host cadence
+constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not reported
+constexpr uint32_t kDevLcdFreshMs = 20000;  // ... nor shown on the LCD
+constexpr uint32_t kBleActiveWindowMs = 4000;   // how long to scan actively after a new scannable device
+constexpr uint32_t kBleSwitchMinMs = 2000;      // never flip the scan mode more often than this
+constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table; we never transmit.
+constexpr uint32_t kDeauthMaxMs = 5UL * 60UL * 1000UL;  // Dead-man's switch: auto-stop a deauth attack after this long
+                                                          // even if the host/serial link drops mid-attack.
+constexpr uint32_t kSdBudgetUs = 8000;       // max time per loop spent writing SD, so channel hopping keeps time
+
+// Channels to sweep. The C5 has ONE radio, so bands are time-shared: a "both" sweep simply
+// interleaves 2.4 GHz channels 1-13 with the 5 GHz list below (38 dwells, ~8.4 s per sweep).
+// 5 GHz: UNII-1 (36–48), UNII-2A (52–64, DFS), UNII-2C (100–144, DFS), UNII-3 (149–165).
+// Receiving on DFS channels is passive; the radio never transmits in promiscuous mode.
+// Channels the driver refuses (ESP_ERR_INVALID_ARG) are skipped automatically.
+// Modes: three Wi-Fi sweeps, Bluetooth LE scanning, and IEEE 802.15.4 (Zigbee / Thread) sniffing on
+// channels 11-26. All share the single 2.4/5 GHz radio, so only one runs at once.
+enum BandMode : uint8_t { BAND_5G = 0, BAND_24G = 1, BAND_BOTH = 2, BAND_BLE = 3, BAND_154 = 4 };
+constexpr int kBandModes = 5;
+constexpr const char* kBandName[] = {"5g", "2.4g", "both", "ble", "154"};
+enum ChanBand : uint8_t { CB_24G = 0, CB_5G = 1, CB_154 = 2 };
+constexpr uint8_t kChannels[] = {
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
+    36, 40, 44, 48,
+    52, 56, 60, 64,
+    100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144,
+    149, 153, 157, 161, 165,
+    11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,   // 802.15.4
+};
+constexpr uint8_t kChanBand[] = {
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+};
+constexpr int kChannelCount = sizeof(kChannels) / sizeof(kChannels[0]);
+static_assert(sizeof(kChanBand) == kChannelCount, "channel tables out of sync");
+inline bool is5g(int idx) { return kChanBand[idx] == CB_5G; }
+inline bool is154(int idx) { return kChanBand[idx] == CB_154; }
+constexpr int kGroupStart[] = {0, 13, 21, 33, 38};
+
+// Advertising-channel access address (BT Core Spec Vol 6 Part B): shared by the BLE pcap frame builder
+// and the SD writer's pseudo-header.
+constexpr uint32_t kAdvAccessAddr = 0x8E89BED6;
+
+inline void putLE16(uint8_t* p, uint16_t v) { p[0] = v; p[1] = v >> 8; }
+inline void putLE32(uint8_t* p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24; }
+
+// Non-blocking serial policy: the USB CDC TX buffer is large (see setup in bandwatch.ino) and writes never
+// block. To avoid half-written lines when the host is slow or absent, every line checks for room first and
+// is dropped whole.
+inline bool serialRoom(size_t n) { return static_cast<size_t>(Serial.availableForWrite()) >= n; }
+
+// Replace control characters in a string captured off the air (SSID, BLE name, country code) with '.'.
+// Bytes >= 0x80 are left alone so UTF-8 names survive. Without this a hostile or corrupt beacon can put
+// control bytes in the table, where printJsonStr expands each to a 6-byte \u escape and blows past the
+// serialRoom() budget that keeps JSON lines from being truncated mid-write. (Wi-Fi + BLE RX paths.)
+inline void IRAM_ATTR sanitizeText(char* s, size_t n) {
+    for (size_t i = 0; i < n && s[i]; i++) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        if (c < 0x20 || c == 0x7F) s[i] = '.';
+    }
+}
+
+// LCD pages (only the visible one exists as LVGL objects — see showPage()).
+enum Page : int { PAGE_OVERVIEW = 0, PAGE_CHANNELS, PAGE_DEVICES, PAGE_HUNT, PAGE_SYSTEM, PAGE_COUNT };
+
+struct RgbColor { uint8_t r; uint8_t g; uint8_t b; };
+inline void setLedColor(const RgbColor& c, uint8_t brightness = 60) {
+    const uint16_t scale = static_cast<uint16_t>(brightness) * 255 / 100;
+    const uint8_t r = static_cast<uint8_t>((static_cast<uint16_t>(c.r) * scale) / 255);
+    const uint8_t g = static_cast<uint8_t>((static_cast<uint16_t>(c.g) * scale) / 255);
+    const uint8_t b = static_cast<uint8_t>((static_cast<uint16_t>(c.b) * scale) / 255);
+    rgbLedWrite(kRgbPin, r, g, b);  // Arduino-ESP32 built-in WS2812 driver (RMT), GRB order
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shared state types and instances (instances live with their owning module, externed here)
+// ---------------------------------------------------------------------------------------------
+// Frame capture: streamed to the host over USB serial as base64 lines; the SD sink mirrors the same frames.
+constexpr int kCapSlotsMax = 20;
+constexpr int kCapSlotsMin = 4;
+constexpr uint16_t kCapMaxLen = 1600;
+
+// Per-dwell metrics: accumulated by the RX paths under g_accumMux, consumed at dwell end.
+struct Accum {
+    uint32_t frames = 0;
+    uint32_t bytes = 0;
+    uint16_t strong = 0;
+    uint16_t unique = 0;
+    uint16_t macHashes[kUniqueSlots] = {0};
+    uint8_t macFill = 0;
+};
+
+struct ChannelMetrics {
+    uint32_t frames = 0;
+    uint32_t bytes = 0;
+    uint16_t strong = 0;
+    uint16_t unique = 0;
+};
+
+struct ChannelState {
+    ChannelMetrics metrics;
+    float busyCurrent = 0.0f;  // Last dwell busy score (0–100)
+    float busyEma = 0.0f;      // Smoothed busy score (0–100)
+    bool hasData = false;
+    bool unavailable = false;  // Driver rejected esp_wifi_set_channel for this channel
+};
+
+// One captured frame, as it lands in the ring before either sink streams it out.
+struct CapFrame {
+    uint32_t ts_us;
+    uint16_t len;      // original MPDU length (sig_len)
+    uint16_t capLen;   // bytes stored
+    int8_t rssi;
+    uint8_t channel;
+    uint8_t data[kCapMaxLen];
+};
+
+// Hunt target, tracked from all three radios. mac = 6-byte MAC (Wi-Fi/BLE); key = 802.15.4 key
+// (extended address or 0xFF 0xFE pan-short marker form). kind: 0 = MAC, 1 = 802.15.4 key.
+struct Hunt {
+    uint8_t mac[6] = {};
+    uint8_t key[8] = {};
+    uint8_t kind = 0;
+    volatile bool active = false;
+    volatile int8_t rssi = -127;
+    volatile uint32_t lastMs = 0;
+    volatile uint32_t count = 0;
+    char label[33] = "";
+    bool parked = false;
+};
+
+// Deauth attack: spoof a BSSID and broadcast deauth/disassoc frames until stopped, so every station on that
+// network drops (they usually reconnect — with capture running you can grab the EAPOL handshakes).
+struct Deauth {
+    uint8_t bssid[6] = {};
+    volatile bool active = false;
+    bool parked = false;          // like hunt.parked: we hold the park on the target's channel
+    volatile uint32_t sent = 0, txFail = 0;
+    uint32_t startMs = 0;         // millis() when the current attack started; serviceDeauth enforces kDeauthMaxMs
+    bool dumped = false;          // DIAGNOSTIC: dump the built frame once per attack
+    // Driver-internal path (deauth_diag): word passed as arg0, holding the STA hmac pointer (g_ic+16). Padded so
+    // the driver's seq counter — which send_setup increments at &flag+210 — lands in our own memory instead
+    // of a random neighbor.
+    uint8_t slotPad[256];
+    uint8_t hstate = 0xFF;        // *hmac+312: picks the DA/SA/BSSID mapping inside send_setup (0 / 1 / 3)
+};
+
+// BLE. Scan policy: passive only listens; active sends SCAN_REQ and so collects the scan responses that carry
+// most device names, at the cost of putting us on the air. "auto" stays passive and opens a short active
+// window when a new *scannable* address shows up with no name yet - enough to learn the name, then quiet
+// again. The mode is frozen while a capture runs so one pcap is not half passive and half active.
+enum BleScanMode : uint8_t { BLE_SCAN_PASSIVE = 0, BLE_SCAN_ACTIVE = 1, BLE_SCAN_AUTO = 2 };
+struct BleState {
+    bool inited = false;
+    volatile bool scanDone = false;
+    uint32_t cycles = 0;
+    volatile uint32_t advSeen = 0;   // advertising reports received (one per on-air packet)
+    BleScanMode mode = BLE_SCAN_AUTO;
+    bool active = false;             // what discovery is actually running right now
+    volatile uint32_t activeUntilMs = 0;  // auto mode: stay active until this millis()
+    uint32_t lastSwitchMs = 0;
+    uint32_t switches = 0;
+};
+
+// microSD sink (sd_sink). FATFS is mounted only while the card is actually in use: mounting costs ~30 KB
+// and BLE mode cuts its scans short below ~28 KB free.
+struct SdSink {
+    bool mounted = false, capEnabled = false;
+    bool readActive = false;      // an sdread is streaming a file out
+    bool cardPresent = false;     // seen at boot
+    uint32_t cardMb = 0;          // cached so hello can report it without mounting
+    File file;
+    uint8_t* buf = nullptr;
+    size_t bufLen = 0;
+    uint32_t frames = 0, bytes = 0, dropped = 0, lastFlushMs = 0, errors = 0;
+    char path[48] = "";
+};
+
+// Mode helpers (used by every module).
+extern BandMode bandMode;
+inline bool wifiMode() { return bandMode <= BAND_BOTH; }
+inline bool mode154() { return bandMode == BAND_154; }
+inline bool hopMode() { return wifiMode() || mode154(); }   // modes that sweep channels
+inline bool chanEnabled(int idx) {
+    switch (bandMode) {
+        case BAND_5G:   return is5g(idx);
+        case BAND_24G:  return kChanBand[idx] == CB_24G;
+        case BAND_BOTH: return !is154(idx);
+        case BAND_154:  return is154(idx);
+        default:        return false;
+    }
+}
+int enabledCount();
+
+// Device table snapshots (bandwatch.cpp): copy under g_devMux into devSnap, sort and read outside. One shared
+// scratch buffer — loop task only (UI timer and host output both run there).
+union DevSnap { WifiDev w[kWifiDevSlots]; BleDev b[kBleDevSlots]; Dev154 z[kDev154Slots]; };
+extern DevSnap devSnap;
+int snapshotWifi(WifiDev* out, int maxN, uint32_t freshMs);
+int snapshotBle(BleDev* out, int maxN, uint32_t freshMs);
+int snapshot154(Dev154* out, int maxN, uint32_t freshMs);
+template <typename T>
+inline void sortByRssi(T* a, int n) {   // insertion sort, n <= 96
+    for (int i = 1; i < n; i++) {
+        T v = a[i];
+        int j = i - 1;
+        while (j >= 0 && a[j].rssi < v.rssi) { a[j + 1] = a[j]; j--; }
+        a[j + 1] = v;
+    }
+}
+
+// State shared across modules (instances live with their owning module).
+extern volatile Accum g_accum;
+extern portMUX_TYPE g_accumMux, g_devMux;
+extern ChannelState channels[kChannelCount];
+extern volatile uint8_t currentChannelNum;
+extern int currentIdx;                // index into kChannels (-1 = not placed yet)
+extern int parkedIdx;                 // >= 0: stay on this channel instead of hopping
+extern uint32_t sweepCount;
+extern bool monitorReady;             // the radio is sitting on a usable channel
+extern bool wifiRunning;              // Wi-Fi driver up (also true in 15.4 mode? no — one radio, see setBandMode)
+
+// esp_wifi_* setup results, reported by hello / the system page (set while starting Wi-Fi).
+extern esp_err_t errCountry, errBand, errProto, errPromisc;
+
+// Capture ring (capture.cpp).
+extern CapFrame* capRing;
+extern volatile bool captureEnabled;   // USB sink
+extern volatile bool capActive;        // either sink wants frames: the RX paths gate on this
+extern bool trackAddr1;              // tier-1 receiver-side sightings (set by the "addr1" command)
+extern volatile uint16_t capSnapLen;
+extern volatile uint32_t capDropped;
+extern uint32_t capSent;             // frames streamed to the USB sink since the ring was allocated
+
+// Scoring / dwell (bandwatch.cpp).
+float globalActivityMax();
+void sortTop3(int outIdx[3]);
+void hopIfNeeded();                  // called from uiTimerCb: finish a dwell and advance when due
+
+// Device tables (bandwatch.cpp): fixed-size open-addressing hashes, updated under g_devMux.
+extern WifiDev wifiDevs[kWifiDevSlots];
+extern BleDev bleDevs[kBleDevSlots];
+extern Dev154 devs154[kDev154Slots];
+
+// Hunt / deauth / BLE scan / SD sink state.
+extern Hunt hunt;
+extern Deauth deauth;
+extern BleState bleScan;
+extern SdSink sd;
+
+// Beacon-injection self-test + SoftAP PoC (deauth_diag.cpp), toggled from the host ("txtest" / "softap").
+extern volatile bool txTestActive;
+extern uint32_t txTestSent, txTestFail;
+extern wifi_interface_t txIface;
+extern bool softApPoc;
+
+void fmtMac(char* out, size_t n, const uint8_t* m);
+
+// Wall clock: the host sends "time <epoch>"; without it timestamps fall back to uptime (1970-based).
+extern uint32_t epochBase;            // epoch seconds at millis() == epochBaseMs
+extern uint32_t epochBaseMs;
+extern bool epochValid;
+
+// Cross-module functions.
+void startWifi(); void stopWifi();
+wifi_band_mode_t toDriverBand(BandMode m);   // Wi-Fi driver's band enum (setBandMode + startWifi)
+void applyProtocols();                       // esp_wifi_set_protocols, result in errProto
+void startBle();  void stopBle();  void serviceBle();
+void start154();  void stop154();
+bool advanceChannel();
+int indexOfChannel(int ch);           // in the current mode's channel set
+int indexOfChannel154(int ch);
+void setBandMode(BandMode m);
+void resetAccum();
+void setPark(int idx);                // >= 0: hold this channel instead of hopping; -1: resume
+
+// Capture ring (capture.cpp): reserve a slot, fill it, commit. nullptr when full: drop already counted.
+CapFrame* IRAM_ATTR capReserve(uint8_t& nextHead);
+void IRAM_ATTR capCommit(uint8_t nextHead);
+bool ensureCapRing();
+void releaseCapture();
+void syncCapActive();
+void drainCapture();
+void writeBase64(const uint8_t* d, size_t n);
+
+// SD sink (sd_sink.cpp).
+bool sdMount();                     // also queried by the "sdinfo" command
+void sdProbeAtBoot();
+void sdCloseCapture();
+bool sdOpenCapture();
+bool sdWriteFrame(const CapFrame& f);   // one frame -> record + link-layer header + payload; false on error
+void serviceSdRead();
+void sdListFiles();
+void sdReadFile(const char* path);
+void sdServiceFlush();                  // fsync cadence, called from drainCapture()
+
+// Deauth + diagnostics (deauth_diag.cpp).
+void startDeauth(const uint8_t* mac);
+void stopDeauth();
+void serviceDeauth();
+
+// Hunt (bandwatch.cpp). Callers hold g_devMux and have already evaluated the match for their radio kind.
+void IRAM_ATTR noteHuntHit(bool isTarget, int8_t rssi, uint32_t now);
+void huntIdText(char* out, size_t n);   // "aa:bb:.." (MAC) or extended 15.4 key / pan-short form
+void lookupHuntLabel();                 // best-effort name/pan for the LCD + serial; empty if nothing seen yet
+void startHunt(const uint8_t* mac, int ch);
+void startHunt154(const uint8_t* key);
+void stopHunt();
+
+// Host protocol (host_proto.cpp).
+void sendHello();
+void sendSweep();
+void sendDwell(int idx);
+void sendBleStatus();
+void sendDevices();
+void pollSerial();
+const char* bleScanModeName();
+
+// LCD UI (lcd_ui.cpp); currentPage + lastApSeen are read by host_proto.cpp as well.
+extern int currentPage;
+extern uint16_t lastApSeen;
+void buildUi();
+void refreshUi();
+void showPage(int n);
+void pollButton();
+void uiTimerCb(lv_timer_t* t);   // declared here so the core file can create the lv timer

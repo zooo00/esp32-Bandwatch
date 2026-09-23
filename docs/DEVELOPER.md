@@ -68,44 +68,58 @@ Reference docs for the APIs used:
 - LVGL 9 docs: <https://docs.lvgl.io/9.3/>.
 - pcap link types: radiotap (127) <https://www.radiotap.org/>, IEEE 802.15.4 TAP (283) <https://github.com/jkcko/ieee802.15.4-tap>.
 
-## 3. Firmware architecture (`bandwatch/bandwatch.cpp`)
+## 3. Firmware architecture (`bandwatch/`)
 
-Single-file design on purpose (one core, tight RAM, easy to read top to bottom). Sections, in file order:
+Modules behind one shared header: `bandwatch_core.h` holds the tunables, mode/channel model and every state
+type (plus extern) that more than one file touches — everything here that lands in DRAM is small on purpose
+(§16). Scope rule per file: symbols declared in core.h are defined at **global** scope in exactly one file;
+file-local helpers live in an anonymous namespace.
 
-1. **Tunables & tables** — dwell (220 ms), thresholds, `kChannels[]` / `kChanBand[]` (13 × 2.4 GHz, 25 × 5 GHz,
-   16 × 802.15.4), `BandMode` enum (`5g`, `2.4g`, `both`, `ble`, `154`), capture ring limits, LCD page enum.
-2. **State** — per-channel `ChannelState` (last dwell metrics, raw score, EMA score), the shared `Accum` written by
-   the RX paths under `g_accumMux`, the device tables (`wifiDevs`, `bleDevs`, `devs154`) under `g_devMux`, hunt
-   target, capture ring pointers, mode flags.
-3. **Wi‑Fi RX path** — `promiscuousCb()` (runs in the Wi‑Fi task): counts frames/bytes/strong, hashes the
-   transmitter for the "unique talkers" estimate, calls `trackWifiDevice()` which updates the device table and,
-   for beacons/probe responses, runs `parseBeaconIes()` (SSID, RSN/WPA → security bits, HT/VHT/HE/EHT → PHY
-   bits, HT/VHT operation → width, BSS load, country). Optionally copies the frame into the capture ring.
-4. **BLE** — `AdvCallbacks::onResult()` (NimBLE host task) fills `bleDevs` (address, RSSI, name, company id,
-   Apple continuity type byte, appearance, TX power, 16-bit service UUIDs, flags). `startBle()/stopBle()`,
-   Discovery runs continuously via `ble_gap_disc()` with no result cache; `serviceBle()` only restarts it if
-   the host ends discovery, and applies the passive/active/auto policy (§13).
-5. **802.15.4** — `esp_ieee802154_receive_done()` (ISR): parses the MAC header (frame type, addressing modes,
-   PAN id, short/extended source), aux security header, beacon superframe/GTS/pending fields, classifies the
-   upper layer (`classify154`: Zigbee NWK version 2, Green Power version 3, 6LoWPAN dispatch bytes, MAC-level
-   security ⇒ Thread-style), then `track154()`. `start154()/stop154()`.
-6. **Channel control / lifecycle** — `applyChannelIdx()` (Wi‑Fi `esp_wifi_set_channel`, or
-   `esp_ieee802154_set_channel` + `receive`), `advanceChannel()` (skips disabled/rejected channels, honours
-   `parkedIdx`), `startWifi()/stopWifi()` (country with manual policy + full 5 GHz mask, band mode, protocols
-   incl. 11ax, promiscuous filter/callback), `setBandMode()` (the only place radios are swapped).
-7. **Scoring** — `computeBusyScore()` (log-scaled pkt/s, B/s, strong ratio, unique talkers; smaller references
-   in 802.15.4 mode), EMA α = 0.22, `globalActivityMax()`, `sortTop3()`.
-8. **Host protocol** — `sendHello/sendDwell/sendSweep/sendBleStatus/sendDevices`, base64 frame streaming
-   (`drainCapture`, bounded per loop iteration), `handleCommand()` / `pollSerial()`. All output goes through
-   `serialRoom()` so a line is either written whole or skipped.
-9. **Dwell/hop** — `hopIfNeeded()` called from the LVGL timer every 120 ms: finishes the dwell (snapshot the
-   accumulator, score, EMA, emit `d` line), hops, emits `s` after a wrap-around.
-10. **UI** — LVGL 9, 172×320 portrait. `showPage()` deletes the current page's widgets and builds the new one
-    (`buildOverviewPage`, `buildChannelsPage`, `buildDevicesPage`, `buildHuntPage`, `buildSystemPage`);
-    `refreshUi()` updates only the visible page and drives the LED. `pollButton()` = tap → next page, hold 0.7 s →
-    next mode (or stop hunt on the Hunt page).
-11. **Entry points** — `Bandwatch_Init()` (called from `Lvgl_Init` in `LVGL_Driver.cpp`) and `Bandwatch_Loop()`
-    (called from `loop()`): serial commands, button, capture drain, BLE cycle, periodic device/status lines.
+- `bandwatch_core.h` — dwell (220 ms) and other tunables, `kChannels[]` / `kChanBand[]` (13 × 2.4 GHz,
+  25 × 5 GHz, 16 × 802.15.4), `BandMode` enum (`5g`, `2.4g`, `both`, `ble`, `154`), capture ring limits, LCD
+  page enum; shared structs (`Accum`, `ChannelState`, `CapFrame`, `Hunt`, `Deauth`, `BleState`, `SdSink`,
+  `DevSnap`) and state externs; `serialRoom()` / `sanitizeText()` / `putLE16/32`; cross-module decls.
+- `bandwatch.cpp` — the core: channel control (`applyChannelIdx()`, `advanceChannel()` skipping
+  disabled/rejected channels, honouring `parkedIdx`; `setBandMode()` is the only place radios are swapped),
+  dwell scoring (`computeBusyScore()` log-scaled pkt/s, B/s, strong ratio, unique talkers; smaller references in
+  802.15.4 mode; EMA α = 0.22, `globalActivityMax()`, `sortTop3()`), device-table snapshots (copy under lock,
+  sort outside), hunt orchestration (`startHunt/stopHunt/lookupHuntLabel`), and the entry points —
+  `Bandwatch_Init()` (called from `Lvgl_Init` in `LVGL_Driver.cpp`) and `Bandwatch_Loop()` (from `loop()`):
+  serial commands, button, capture drain, BLE cycle, periodic device/status lines. The per-channel `ChannelState`,
+  the shared `Accum` written by the RX paths under `g_accumMux`, and the mode flags live here too.
+- `wifi_sniff.cpp` — Wi‑Fi driver lifecycle: `startWifi()` (country with manual policy + full 5 GHz mask, band
+  mode, protocols incl. 11ax, explicit raw-TX rate/power, promiscuous filter/callback), `stopWifi()`. Plus the
+  RX path in the Wi‑Fi task: `promiscuousCb()` counts frames/bytes/strong, hashes the transmitter for the
+  "unique talkers" estimate, calls `trackWifiDevice()` which updates the device table and, for beacons/probe
+  responses, runs `parseBeaconIes()` (SSID, RSN/WPA → security bits, HT/VHT/HE/EHT → PHY bits, HT/VHT operation
+  → width, BSS load, country). Optionally copies each frame into the capture ring.
+- `ble_scan.cpp` — drives NimBLE's `ble_gap_disc()` directly instead of the Arduino `BLEScan` wrapper: one
+  callback per on-air advertising report (`bleGapEvent()`) with its own data/address/RSSI/PDU type, a minimal
+  AD parser and the pcap LL-frame builder (§13). Discovery runs continuously with no result cache;
+  `serviceBle()` only restarts it if the host ends discovery, and applies the passive/active/auto policy.
+  Owns the `bleScan` (`BleState`) instance. Runs in the NimBLE host task.
+- `ieee154.cpp` — `esp_ieee802154_receive_done()` (ISR): parses the MAC header (frame type, addressing modes,
+  PAN id, short/extended source), aux security header, beacon superframe/GTS/pending fields, classifies the
+  upper layer (`classify154`: Zigbee NWK version 2, Green Power version 3, 6LoWPAN dispatch bytes, MAC-level
+  security ⇒ Thread-style), then `track154()`. The callback needs C linkage, which is why the file-local
+  namespace closes before it. `start154()/stop154()` + the `r154Running` instance.
+- `deauth_diag.cpp` — the deauth attack and its diagnostics: the `Deauth` instance plus txtest/softap state,
+  the driver-internal `libnet80211.a` declarations (§9), `startDeauth()/stopDeauth()/serviceDeauth()` and the
+  two TX paths (`sendInternalKick()` via the driver's own frame builder; raw-TX `sendKickFrame()` fallback).
+- `capture.cpp` — the capture ring: `ensureCapRing()` (sized against free heap, with a post-allocation floor —
+  §16), `releaseCapture()`, single-producer reserve/commit (`capReserve/capCommit`), base64 streaming and the
+  per-loop bounded drain.
+- `sd_sink.cpp` — microSD pcap sink: on-demand FATFS mount (§12), byte-compatible writer, `sdls` / `sdread`.
+- `host_proto.cpp` — the serial JSON protocol: `sendHello/sendDwell/sendSweep/sendBleStatus/sendDevices`,
+  `handleCommand()` / `pollSerial()`. All output goes through `serialRoom()` so a line is either written whole
+  or skipped.
+- `lcd_ui.cpp` — LVGL 9, 172×320 portrait: `showPage()` deletes the current page's widgets and builds the new
+  one (`buildOverviewPage`, `buildChannelsPage`, `buildDevicesPage`, `buildHuntPage`, `buildSystemPage`);
+  `refreshUi()` updates only the visible page and drives the LED. `pollButton()` = tap → next page, hold 0.7 s →
+  next mode (or stop hunt on the Hunt page).
+- `devices.h` — device-table structs + open-addressing hash; `surv_ouis.h` — the surveillance-OUI table
+  (matched in firmware so the LCD can flag without a host); `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h`
+  — display glue.
 
 Tasks and contexts: Arduino `loop` task (LVGL + everything in `Bandwatch_Loop`), Wi‑Fi task (promiscuous
 callback), NimBLE host task (advert callback), 802.15.4 ISR. Shared data is protected with the two spinlocks;
@@ -129,7 +143,7 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
 | `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
-| `{"t":"sdls","files":[[name, bytes], ...]}` | after `sdls` | files in the card root |
+| `{"t":"sdls","files":[[name, bytes], ...],"total":N,"sent":M}` | after `sdls` | files in the card root; `sent < total` = the serial buffer filled mid-list (host slow or absent) and whole entries were dropped |
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
 
 Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
@@ -238,7 +252,7 @@ real deauth frame-control bytes. That means **hard-coded byte offsets into drive
 | `desc+20`, `desc+40`, `desc+52`, `desc+56` | length, address-shift flag, queue link, state block |
 
 These were derived against **core 3.3.11 / ESP-IDF 5.5.5** and nothing checks them at runtime, so a core
-whose structs moved will silently corrupt memory instead of failing. A `#warning` in `bandwatch.cpp` fires if
+whose structs moved will silently corrupt memory instead of failing. A `#warning` in `deauth_diag.cpp` fires if
 the core is not 3.3.x — treat it as "re-verify every offset in the table above", not as noise. `setup.sh`
 installs the newest `esp32:esp32`, so pin the version there if you need a reproducible build.
 
@@ -572,10 +586,10 @@ together. That last row is not hypothetical: 1.3 shipped briefly with the ring s
 mount, which left 12.5 kB free and put the device back in exactly the regime the original crashes came from.
 `sdcap` now opens the file before sizing the ring so `kCapHeapReserve` is reserved against post-mount heap.
 
-### Proposed replacement (see [ROADMAP.md](ROADMAP.md))
+### The floor, as built (see [ROADMAP.md](ROADMAP.md))
 
-Swap the static-RAM proxy for a **minimum-free-heap floor** — roughly 25 kB in the worst concurrent case.
-It is checkable at runtime, tied directly to the observed failure mode rather than a stand-in for it, and it
-lets the firmware *refuse* an allocation whose projected heap falls below the floor instead of crashing.
-Until that exists, keep honouring rule 4: current static usage is 79,576 B, about 424 B under the line, and
-that headroom is the edge of an unverified budget rather than a wall.
+The proposal landed in `ensureCapRing()` (`capture.cpp`): right after allocating the ring it checks total free
+heap against `kMinFreeHeapB` (24 kB); below that the ring goes back to the heap and capture is refused with a
+JSON error — better than OOMing an LVGL page rebuild later. It guards only the one biggest allocation, so rule 4
+still keeps the rest honest: current static usage is 79,560 B, about 440 B under the line, and that headroom is
+the edge of an unverified budget rather than a wall.

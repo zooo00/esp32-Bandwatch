@@ -1,6 +1,6 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.5**.
+Planned work, open questions and known gaps. Current release: **v1.5.1**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
@@ -75,12 +75,13 @@ What actually binds is **free heap at peak concurrent load**. Measured on hardwa
 | BLE + SD capture | 32.3 kB |
 | SD capture with the pre-1.3 ring ordering | 12.5 kB — where LVGL page rebuilds start failing |
 
-Proposal: replace the static-RAM proxy with a **minimum-free-heap floor** (~25 kB in the worst concurrent
-case: capture ring + FATFS + an LVGL page rebuild landing together). It is checkable at runtime, tied to the
-actual failure mode, and would let the firmware *refuse* to start a capture whose projected heap falls below
-the floor rather than crashing. Under such a rule the 512-byte hit log stops being a rule violation.
+Done in this review pass: `ensureCapRing()` (`capture.cpp`) checks total free heap against `kMinFreeHeapB`
+(24 kB) right after allocating the ring and *refuses* capture with a JSON error when it falls below — checkable
+at runtime, tied to the actual failure mode (worst concurrent case: capture ring + FATFS + an LVGL page rebuild
+landing together). The static-RAM rule stays as the backstop for everything else; under such a rule the 512-byte
+hit log stops being a rule violation.
 
-Current static usage is 79,576 B — about 424 B under the existing line. That headroom is the edge of an
+Current static usage is 79,560 B — about 440 B under the existing line. That headroom is the edge of an
 unverified budget, not a wall.
 
 ---

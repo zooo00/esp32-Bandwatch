@@ -10,9 +10,13 @@ plus a Python host tool. The device sniffs Wi-Fi (2.4 + 5 GHz), scans Bluetooth 
 serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
 
 ## Layout
-- `bandwatch/` — Arduino sketch. `bandwatch.cpp` is almost everything (radio control, device tables, host
-  protocol, LVGL UI). `devices.h` = device table structs/hash. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h`
-  = display glue (from the upstream C6 project, pins changed).
+- `bandwatch/` — Arduino sketch split into modules behind one shared header (`bandwatch_core.h`: tunables,
+  channel model, and the state types + externs more than one file touches): `bandwatch.cpp` = core (channel
+  hopping, dwell scoring, snapshots, hunt), `wifi_sniff.cpp` / `ble_scan.cpp` / `ieee154.cpp` = radio lifecycle
+  + RX paths, `deauth_diag.cpp` = attack + diagnostics, `capture.cpp` = capture ring, `sd_sink.cpp` = microSD
+  pcap, `host_proto.cpp` = serial JSON, `lcd_ui.cpp` = LVGL pages. `devices.h` = device table structs/hash,
+  `surv_ouis.h` = surveillance-OUI table. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h` = display glue (from
+  the upstream C6 project, pins changed).
 - `host/bandwatch_host.py` — serial reader, HTTP API, pcap writer, OUI/vendor lookup. `host/dashboard.html` —
   the single-page UI (no build step, no dependencies).
 - `build.sh` (compile/flash via arduino-cli), `setup.sh` (install toolchain), `tools/ctags/` (Apple-Silicon
@@ -71,13 +75,15 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    `rm -rf build` after touching the wrapper.
 
 ## Where to change things
-- Surveillance OUIs: `kSurvOuis` in `bandwatch.cpp` (firmware matches so the LCD can flag), names in
+- Surveillance OUIs: `kSurvOuis` in `surv_ouis.h` (firmware matches so the LCD can flag), names in
   `SURV_CAT`/`SURV_KIND` in the host. A match is evidence, not proof - keep the UI wording honest.
 - Tier-1 (`addr1`) sightings must never evict or overwrite a device we heard transmit: see
-  `trackWifiDevice(..., destOnly)` and `docs/DEVELOPER.md` §15.
-- Channel lists / dwell / scoring: top of `bandwatch.cpp` (`kChannels`, `kChanBand`, `kDwellMs`, `computeBusyScore`).
-- Serial protocol: `sendHello/sendDwell/sendSweep/sendDevices/sendBleStatus`, `handleCommand`. Keep it in sync
-  with `host/bandwatch_host.py` (`handle_line`, `merge_*`) and `docs/DEVELOPER.md`.
+  `trackWifiDevice(..., destOnly)` in `wifi_sniff.cpp` and `docs/DEVELOPER.md` §15.
+- Channel lists / dwell / scoring: `bandwatch_core.h` (`kChannels`, `kChanBand`, `kDwellMs`) +
+  `computeBusyScore()` in `bandwatch.cpp`.
+- Serial protocol (in `host_proto.cpp`): `sendHello/sendDwell/sendSweep/sendDevices/sendBleStatus`,
+  `handleCommand`. Keep it in sync with `host/bandwatch_host.py` (`_dispatch`, `merge_*`) and
+  `docs/DEVELOPER.md`.
 - LCD pages: `build*Page()` + `refresh*()`; add a page in the `Page` enum and `showPage()`.
 - BLE: Bandwatch drives NimBLE `ble_gap_disc()` directly, **not** the Arduino `BLEScan` wrapper, because the
   wrapper merges advertisement payloads and cannot give per-packet data (`docs/DEVELOPER.md` §13). AD parsing
@@ -103,4 +109,4 @@ Crash text is printed to USB before the reboot but the port re-enumerates, so ke
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy · v1.4.2 capture telemetry in BLE mode, sdcap ack key, LCD record light · v1.5 surveillance OUI flagging, addr1 tier-1 sightings, non-blocking sdread - section 15.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy · v1.4.2 capture telemetry in BLE mode, sdcap ack key, LCD record light · v1.5 surveillance OUI flagging, addr1 tier-1 sightings, non-blocking sdread - section 15 · v1.5.1 review pass: firmware split into modules behind `bandwatch_core.h`, capture refused below a 24 kB free-heap floor, `sdls` reports total/sent (host shows the card's file list) - sections 3 and 16.

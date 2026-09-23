@@ -289,7 +289,7 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  let state = null, dwellS = 0.22, lastGood = 0, tab = 'overview', paused = false;
+  let state = null, dwellS = 0.22, lastGood = 0, tab = 'overview', paused = false, sdlsAt = 0;
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };
   const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
@@ -408,12 +408,27 @@
       $('#sdBtn').disabled = !sd.mounted;
     }
     $('#sdBtn').classList.toggle('stop', rec);
+    // Keep the SD file list around: hello replaces st["sd"] without it, so re-ask whenever it is gone. A few
+    // seconds of cooldown keeps an empty card from being listed on every tick.
+    if (sd.mounted && !rec && (!sd.files || !sd.files.length) && Date.now() - sdlsAt > 5000) {
+      sdlsAt = Date.now(); post({cmd: 'sdls'});
+    }
+    let sdFiles = '';
+    const flist = (sd.mounted && !rec && sd.files) ? sd.files : [];
+    if (flist.length) {   // directory order ≈ oldest first; show the newest few
+      const cutShort = Math.max(0, (sd.file_total || 0) - flist.length);          // device dropped entries mid-list
+      const shown = flist.slice(-5);
+      const hidden = flist.length - shown.length + cutShort;
+      sdFiles = `<br><span class="dim">${flist.length}${cutShort ? ` of ${sd.file_total}` : ''} files on card${hidden ? ` (+${hidden} not shown)` : ''}</span>` +
+        shown.map(([n, sz]) => `<br>${esc(n.split('/').pop())} · ${kb(sz)}`).join('');
+    }
     $('#sdInfo').innerHTML = !sd.mounted
       ? 'microSD: <b>no card</b> — insert one to record pcap on the device'
       : rec
         ? `<span class="recdot"></span>microSD: <b>${fmt(sd.frames)}</b> frames · ${kb(sd.bytes)}` +
           `${sd.err ? ` · <b style="color:var(--critical)">${fmt(sd.err)} write errors</b>` : ''}<br><code>${esc(sd.file)}</code>`
         : `microSD: ${fmt(sd.mb)} MB card ready${sd.clock === 0 ? ' · <b>clock not set</b> (files will be numbered)' : ''}` +
+          sdFiles +
           (savedNote(saved.sd) ? `<br>${savedNote(saved.sd)}` : '');
 
     // --- confirmation toasts on the real transitions ---

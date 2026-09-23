@@ -18,6 +18,7 @@ Serial protocol (one line each):
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
     S <n> <base64>                               chunk of a file being read back (after "sdread")
+    {"t":"sdls","files":[[name,bytes],...],"total":N,"sent":M}   microSD listing ("sdls"); sent<total = truncated mid-list
 Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
 "deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), "sdcap 0|1" (record pcap on the
 device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info".
@@ -570,6 +571,13 @@ class Bandwatch:
                         sd[dest] = msg[k]
                 st["sd"] = sd
                 self._sd_track(sd)
+        elif t == "sdls":
+            # One-shot listing. hello replaces st["sd"] wholesale (no files field), so the dashboard re-asks
+            # whenever the card is present and the list is missing; sent<total means it was truncated.
+            sd = st.get("sd") or {}
+            sd["files"] = [[n, sz] for n, sz in msg.get("files", [])]
+            sd["file_total"] = msg.get("total", len(sd["files"]))
+            st["sd"] = sd
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
 
@@ -820,6 +828,8 @@ def make_handler(bw, html_path):
                     bw.send(f"blescan {req['value']}")
                 elif cmd == "sdinfo":
                     bw.send("sdinfo")
+                elif cmd == "sdls":
+                    bw.send("sdls")
                 elif cmd == "info":
                     bw.send("info")
                 else:

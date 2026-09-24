@@ -104,7 +104,7 @@ file-local helpers live in an anonymous namespace.
   upper layer (`classify154`: Zigbee NWK version 2, Green Power version 3, 6LoWPAN dispatch bytes, MAC-level
   security ⇒ Thread-style), then `track154()`. The callback needs C linkage, which is why the file-local
   namespace closes before it. `start154()/stop154()` + the `r154Running` instance.
-- `deauth_diag.cpp` — the deauth attack and its diagnostics: the `Deauth` instance plus txtest/softap state,
+- `deauth_diag.cpp` — the deauth attack and its diagnostics: the `Deauth` instance plus txtest state,
   the driver-internal `libnet80211.a` declarations (§9), `startDeauth()/stopDeauth()/serviceDeauth()` and the
   two TX paths (`sendInternalKick()` via the driver's own frame builder; raw-TX `sendKickFrame()` fallback).
 - `capture.cpp` — the capture ring: `ensureCapRing()` (sized against free heap, with a post-allocation floor —

@@ -141,7 +141,7 @@ conclusions reversed.
   air at -38 dBm. Full log in [`DEVELOPER.md`](DEVELOPER.md) §11.
 - ~~**SoftAP injection PoC is inconclusive**, not negative.~~ Its premise was disproven in 1.6: raw TX does
   radiate from an unassociated STA — `txtest` injects from `WIFI_IF_STA` with no SoftAP up and was witnessed
-  at -45 dBm. The PoC is not a route to anything and its state handling is still incomplete.
+  at -45 dBm. The PoC was not a route to anything, and the `softap` command was removed in the 1.6 review pass.
 
 ---
 

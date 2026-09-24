@@ -4,7 +4,7 @@
 // first so a slow or absent host drops whole lines, never half of one.
 #include "bandwatch_core.h"
 #include <WiFi.h>
-#include <esp_wifi.h>   // C API for the txtest / softap branches (promiscuous on/off, channel)
+#include <esp_wifi.h>   // C API for the txtest branch (promiscuous on/off, channel)
 #include <SD.h>     // the sdinfo branch reports card size while mounted
 #include <string.h>
 
@@ -405,34 +405,6 @@ void handleCommand(char* line) {
         else if (mode <= 0) pr = esp_wifi_set_promiscuous(true);
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"txtest\",\"txtest\":%d,\"mode\":%d,\"promisc_call\":\"%s\",\"ch\":%u}\n",
                       txTestActive ? 1 : 0, mode, esp_err_to_name(pr), currentChannelNum);
-    } else if (!strcmp(line, "softap")) {
-        // PROOF OF CONCEPT: does the PHY transmit once the MAC has a real BSS context?
-        // "softap <ch>" brings up an OPEN AP on that channel; "softap 0" tears it down. Open + a quiet
-        // channel gives a signature (Channel + "Security: None") that a scanner reports even when it
-        // redacts SSIDs, which is the only witness available here.
-        const int wantCh = atoi(arg);
-        const bool on = wantCh != 0;
-        esp_err_t e1 = ESP_OK, e2 = ESP_OK;
-        if (on && !softApPoc) {
-            const uint8_t ch = static_cast<uint8_t>(wantCh);
-            esp_wifi_set_promiscuous(false);           // sniffing is off for the duration of the PoC
-            WiFi.mode(WIFI_AP_STA);
-            e1 = WiFi.softAP("BW-POC-AP", nullptr, ch) ? ESP_OK : ESP_FAIL;   // open: shows as Security None
-            txIface = WIFI_IF_AP;
-            softApPoc = true;
-            e2 = esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"softap\",\"softap\":1,\"ch\":%u,\"ap\":\"%s\",\"setch\":\"%s\"}\n",
-                          ch, e1 == ESP_OK ? "up" : "FAILED", esp_err_to_name(e2));
-        } else if (!on && softApPoc) {
-            WiFi.softAPdisconnect(true);
-            WiFi.mode(WIFI_STA);
-            txIface = WIFI_IF_STA;
-            softApPoc = false;
-            esp_wifi_set_promiscuous(true);
-            Serial.print("{\"t\":\"ack\",\"cmd\":\"softap\",\"softap\":0}\n");
-        } else {
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"softap\",\"softap\":%d}\n", softApPoc ? 1 : 0);
-        }
     } else if (!strcmp(line, "txstat")) {
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"txstat\",\"sent\":%lu,\"fail\":%lu,\"ch\":%u}\n",
                       static_cast<unsigned long>(txTestSent), static_cast<unsigned long>(txTestFail), currentChannelNum);

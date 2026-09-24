@@ -124,9 +124,8 @@ the host sends this on connect; it dates the pcap records and names the files, i
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
 SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `kickfc <hex>` (FC byte0 the internal kick path writes — `kickfc 80` sends a
 beacon down the deauth descriptor path), `kickpath 0|1` (0 = raw `esp_wifi_80211_tx`, the
-default and the only path that reaches the air; 1 = the dead internal slot, for §9 offset work), `softap <ch>|0`
-(**proof of concept**: open SoftAP on that channel, injects from `WIFI_IF_AP`; tears down sniffing while up,
-and its state handling is incomplete — do not build on it as-is).
+default and the only path that reaches the air; 1 = the dead internal slot, for §9 offset work), (`softap` was removed in the 1.6 review pass: its premise — that raw TX
+radiates nothing from an unassociated STA — was disproven by the witness).
 Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 

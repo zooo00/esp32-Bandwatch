@@ -26,8 +26,64 @@ try:
 except ImportError:
     sys.exit("pyserial required:  pip3 install pyserial")
 
-C5_PORT = "/dev/cu.usbmodem1101"
-W_PORT  = "/dev/cu.usbmodem21101"
+# Ports are discovered by asking each board what it is, not hardcoded. USB-Serial-JTAG device names are
+# assigned by the host and change whenever a board re-enumerates - this rig's S3 has appeared as
+# usbmodem21101 and usbmodem21401 on the same day - and a hardcoded name fails as a confusing timeout
+# rather than as "board not found". --c5 / --witness still override.
+PORT_GLOBS = ("/dev/cu.usbmodem*", "/dev/cu.usbserial*", "/dev/cu.wchusbserial*")
+
+
+def identify(port):
+    """Open a port and ask what is on the other end. Returns 'c5', 'witness' or None.
+
+    Opening asserts DTR/RTS without toggling them, which is the safe pattern (CLAUDE.md rule 1).
+    The witness announces itself periodically anyway, so a passive read usually settles it; `info`
+    is sent as well because the C5 only speaks when spoken to if it happens to be between dwells.
+    """
+    try:
+        s = serial.Serial(port, 115200, timeout=0.3)
+    except Exception:
+        return None
+    try:
+        time.sleep(1.2)
+        s.reset_input_buffer()
+        s.write(b"info\n")
+        end, buf = time.time() + 2.5, b""
+        while time.time() < end:
+            chunk = s.read(4096)
+            if chunk:
+                buf += chunk
+        t = buf.decode("utf-8", "replace")
+        if '"fw":"bandwatch"' in t:
+            return "c5"
+        if '"fw":"witness"' in t or '"txskip"' in t or '"t":"stat"' in t:
+            return "witness"
+        return None
+    finally:
+        s.close()
+
+
+def discover(want_c5, want_witness):
+    """Fill in whichever ports were not given explicitly. Exits with a useful message if one is missing."""
+    import glob
+    if want_c5 and want_witness:
+        return want_c5, want_witness
+    found = {}
+    for pat in PORT_GLOBS:
+        for port in sorted(glob.glob(pat)):
+            if port in (want_c5, want_witness):
+                continue
+            role = identify(port)
+            if role and role not in found:
+                found[role] = port
+    c5 = want_c5 or found.get("c5")
+    wit = want_witness or found.get("witness")
+    if not c5 or not wit:
+        seen = ", ".join(f"{v}={k}" for k, v in found.items()) or "nothing identifiable"
+        sys.exit(f"could not find both boards (saw: {seen}).\n"
+                 f"  The C5 must be running bandwatch firmware and the S3 tools/witness/witness.ino.\n"
+                 f"  Override with --c5 /dev/cu.xxx --witness /dev/cu.yyy")
+    return c5, wit
 
 
 class Link:
@@ -135,12 +191,14 @@ def main():
     ap.add_argument("--secs", type=int, default=8, help="observation window per experiment")
     ap.add_argument("--fc", help="one-shot: internal-path FC byte0 in hex (e.g. 80, c0)")
     ap.add_argument("--bssid", default="aa:bb:cc:dd:ee:ff", help="BSSID the C5 spoofs")
-    ap.add_argument("--c5", default=C5_PORT)
-    ap.add_argument("--witness", default=W_PORT)
+    ap.add_argument("--c5", help="serial port of the C5 (default: auto-detect)")
+    ap.add_argument("--witness", help="serial port of the S3 witness (default: auto-detect)")
     a = ap.parse_args()
 
-    c5 = Link(a.c5, "c5")
-    w  = Link(a.witness, "witness")
+    c5_port, w_port = discover(a.c5, a.witness)
+    print(f"C5 on {c5_port}, witness on {w_port}")
+    c5 = Link(c5_port, "c5")
+    w  = Link(w_port, "witness")
     try:
         print(f"setting up: C5 -> 2.4 GHz ch{a.ch}, witness -> ch{a.ch}")
         c5.send("band 2.4g", 2.5)

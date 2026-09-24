@@ -285,13 +285,11 @@ extern Deauth deauth;
 extern BleState bleScan;
 extern SdSink sd;
 
-// Beacon-injection self-test + SoftAP PoC (deauth_diag.cpp), toggled from the host ("txtest" / "softap").
+// Beacon-injection self-test (deauth_diag.cpp), toggled from the host with "txtest".
 extern volatile bool txTestActive;
 extern uint32_t txTestSent, txTestFail;
-extern wifi_interface_t txIface;
 extern volatile uint8_t kickFc;      // DIAGNOSTIC: FC byte0 on the internal kick path ("kickfc <hex>")
 extern volatile bool useInternalKick;   // "kickpath 1" = driver-internal slot (dead); default 0 = raw TX
-extern bool softApPoc;
 
 void fmtMac(char* out, size_t n, const uint8_t* m);
 

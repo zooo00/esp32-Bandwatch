@@ -12,12 +12,6 @@ Deauth deauth;   // type in bandwatch_core.h
 // DIAGNOSTIC: beacon-injection self-test (see sendTestBeacon below), toggled with "txtest 1".
 volatile bool txTestActive = false;
 uint32_t txTestSent = 0, txTestFail = 0;
-// PROOF OF CONCEPT ONLY (not a feature): from when raw TX was believed to radiate nothing from an
-// unassociated STA, this brings up a SoftAP to give the MAC a real BSS context and injects from
-// WIFI_IF_AP instead. The premise turned out to be wrong — the patched raw path transmits from a plain
-// unassociated STA — so this is now only a second data point. Toggled with "softap 1". Tears down
-// promiscuous sniffing while active — see docs/DEVELOPER.md section 11.
-wifi_interface_t txIface = WIFI_IF_STA;
 // DIAGNOSTIC (§11): FC byte0 written on the internal kick path. 0xC0 = deauth (the real attack). Set to
 // 0x80 with "kickfc 80" to send a beacon down the SAME descriptor path: the witness then tells us whether
 // that path radiates at all, separating "internal path is dead" from "deauth subtype is dropped".
@@ -31,7 +25,6 @@ volatile uint8_t kickFc = 0xC0;
 // fails loudly with ESP_ERR_INVALID_ARG and the `df` counter climbs, which beats the internal path's
 // silent fake success. "kickpath 1" selects the internal slot again, for work on those offsets.
 volatile bool useInternalKick = false;
-bool softApPoc = false;
 
 // The driver-internal deauth path. These symbols live in libnet80211.a with no public header. The idea
 // was that send_deauth_no_bss builds a deauth frame with the driver's own encoding (FC low byte 0xC0,
@@ -224,7 +217,7 @@ void sendTestBeacon() {
     f[n++] = 1; f[n++] = 4;                             // supported rates
     f[n++] = 0x82; f[n++] = 0x84; f[n++] = 0x8B; f[n++] = 0x96;
     f[n++] = 3; f[n++] = 1; f[n++] = currentChannelNum; // DS parameter set
-    const esp_err_t e = esp_wifi_80211_tx(txIface, f, n, false);
+    const esp_err_t e = esp_wifi_80211_tx(WIFI_IF_STA, f, n, false);
     if (e == ESP_OK) txTestSent++;
     else {
         txTestFail++;

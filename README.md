@@ -207,6 +207,28 @@ raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mo
 
 ## Versions
 
+- **1.5.4** — **The targeted deauth from 1.5.3 could not actually be reached.** Four separate breaks between
+  the dashboard and the device, any one of them fatal: the client picker filtered on a `parent` field nothing
+  ever produced, so it was always empty; its buttons were emitted with `display:none` and had no styling or
+  handler to reveal them; the client MAC was sent with its colons stripped, which the device's parser rejects,
+  so a targeted kick *stopped* the running attack instead of starting one; and the host never dispatched the
+  `dca` acknowledgement, so a targeted attack left no trace in the UI at all. All four fixed, and the missing
+  piece underneath them built: the firmware now tracks **which BSS each station is on**, read from the DS bits
+  of data frames, so the Wi‑Fi table shows *on &lt;network&gt;* per station and the picker has real clients in
+  it. That association cost **zero** static RAM — `WifiDev` was repacked from 64 bytes-with-padding to 64
+  bytes-exactly ([`docs/DEVELOPER.md`](docs/DEVELOPER.md) §17).
+  Also: a targeted deauth whose client MAC began `00:00` was silently demoted to a broadcast kick (the
+  "is this targeted?" test read two bytes of a MAC); starting a deauth before the Wi‑Fi driver had an
+  `ieee80211com` dereferenced a null pointer and panicked; the deauth channel lookup walked the device table
+  without its lock; the System page named the AP instead of the station being kicked; `sdls` now reports how
+  many entries it had to omit instead of silently shortening the listing; `hello` reserved ~10 bytes less
+  serial room than its longest possible line; and the HTTP API now rejects malformed MACs rather than
+  forwarding them.
+- **1.5.3** — **Targeted deauth (`dca <client_mac> <ap_bssid>`).** `deauth <bssid>` kicks every station on a
+  network; `dca` sends the deauthentication to one station only, with the AP's BSSID as SA/BSSID and the
+  client as DA. Reachable from the dashboard only as of 1.5.4 — see above. As with every deauth path here,
+  **the attack still does not work** and the counters do not tell you otherwise
+  ([`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11).
 - **1.5** — **Surveillance-hardware flagging and receiver-side sightings.** 64 OUI prefixes across 7
   categories (Flock Safety, Ring, Axon, DJI, Parrot, Skydio, Meta/Ray-Ban) are matched in firmware, so hits
   show on the LCD (`!`, orange) as well as the dashboard (red badge, plus a *surveillance only* filter).

@@ -11,7 +11,7 @@ Serial protocol (one line each):
     {"t":"hello", ...}            device info, channel list, band mode              (boot / "info")
     {"t":"d", "c":36, "s":..}     one completed dwell on channel c                  (every ~220 ms)
     {"t":"s", "n":12, "ch":[..]}  full snapshot after every sweep
-    {"t":"w", "dev":[...]}        Wi-Fi transmitter table (every 2 s)
+    {"t":"w", "dev":[...]}        Wi-Fi transmitter table (every 2 s; last field = association suffix)
     {"t":"b", "dev":[...]}        BLE advertiser table (every 2 s, BLE mode)
     {"t":"z", "dev":[...]}        802.15.4 (Zigbee / Thread) node table (every 2 s, 802.15.4 mode)
     {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
@@ -40,6 +40,7 @@ import glob
 import io
 import json
 import os
+import re
 import struct
 import sys
 import threading
@@ -131,6 +132,32 @@ SERVICE_UUID = {
     0x1803: "Link loss", 0xFE59: "Nordic DFU", 0xFEE0: "Huami (Amazfit)", 0xFDEE: "Huawei", 0xFDD2: "Bosch", 0xFD82: "Sony",
     0xFE9A: "Estimote", 0xFD84: "Tile", 0xFD65: "Razer", 0xFE0D: "Ford", 0xFEF5: "Dialog", 0xFDF7: "HP",
 }
+
+
+MAC_RE = re.compile(r"^[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){5}$")
+# "hunt" also takes an 802.15.4 identifier: an 8-byte extended address, or "pan/short" in hex. Both are
+# what the device itself printed in the "z" table, so they round-trip - but they still get checked.
+KEY154_RE = re.compile(r"^(?:[0-9a-fA-F]{2}(?::[0-9a-fA-F]{2}){7}|[0-9a-fA-F]{1,4}/[0-9a-fA-F]{1,4})$")
+
+
+def clean_mac(v):
+    """Accept only a canonical colon-separated MAC, lower-cased. Returns None otherwise.
+
+    send() already collapses newlines, so a value from the HTTP API cannot smuggle a second command onto
+    the serial line - but without this a value containing a *space* could still reshape the argument list
+    of a two-argument command (a crafted "client_mac" supplying its own "ap_bssid")."""
+    if not isinstance(v, str):
+        return None
+    v = v.strip()
+    return v.lower() if MAC_RE.match(v) else None
+
+
+def clean_hunt_id(v):
+    """A hunt target: a Wi-Fi/BLE MAC, or an 802.15.4 extended address / "pan/short"."""
+    if not isinstance(v, str):
+        return None
+    v = v.strip()
+    return v.lower() if MAC_RE.match(v) or KEY154_RE.match(v) else None
 
 
 def find_port():
@@ -565,7 +592,10 @@ class Bandwatch:
                 st["cap"] = msg["cap"]
             if msg.get("cmd") == "hunt":
                 self._set_hunt(msg.get("hunt"))
-            if msg.get("cmd") == "deauth":
+            if msg.get("cmd") in ("deauth", "dca"):
+                # "dca" too: without it a targeted attack left st["deauth"] at None, so the deauth card
+                # never appeared and the dwell handler (which only updates an existing entry) never
+                # showed a frame count - the attack ran, invisibly, until the next "hello".
                 self._set_deauth(msg.get("deauth"))
             if msg.get("cmd") in ("sdcap", "sdinfo"):
                 sd = st.get("sd") or {}
@@ -577,6 +607,11 @@ class Bandwatch:
                         sd[dest] = msg[k]
                 st["sd"] = sd
                 self._sd_track(sd)
+        elif t == "sdls":
+            files = msg.get("files", [])
+            skipped = msg.get("skipped", 0)
+            st["log"].append("sdls: " + ", ".join(f"{f[0]} ({f[1]} B)" for f in files) +
+                             (f"  [{skipped} entries omitted: serial buffer was full]" if skipped else ""))
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
 
@@ -588,6 +623,7 @@ class Bandwatch:
                     mac, rssi, mx, frames, age, ch, flags, ssid = r[:8]
                     extra = r[8:15] if len(r) >= 15 else [0, 0, 0, 0, 0, 0, ""]
                     surv = r[15] if len(r) >= 16 else 0
+                    ap_suffix = r[16] if len(r) >= 17 else ""
                 except Exception:
                     continue
                 d = self.wifi_devs.get(mac)
@@ -600,7 +636,7 @@ class Bandwatch:
                 dest_only = bool(flags & 4)
                 d.update({"rssi": rssi, "max": mx, "frames": frames, "last": now - age / 1000.0, "ch": ch,
                           "ap": bool(flags & 1), "ssid": ssid or d["ssid"],
-                          "dest_only": dest_only,
+                          "dest_only": dest_only, "ap_suffix": ap_suffix or d.get("ap_suffix", ""),
                           "surv": SURV_CAT.get(surv, ""), "surv_kind": SURV_KIND.get(surv, ""),
                           "tier": (0 if not surv else 1 if dest_only else 2)})
                 sec, pmf, phy, bw, util, stations, cc = extra
@@ -610,6 +646,23 @@ class Bandwatch:
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.wifi_devs, now)
+            self._resolve_parents()
+
+    def _resolve_parents(self):
+        """Turn each station's 3-byte association suffix into the full BSSID of an AP we actually know.
+
+        The device only has room for the last three BSSID bytes (see devices.h), so the join is completed
+        here: a station is attributed to an AP only when that AP is in our own table and its low 24 bits
+        agree, and never when two known APs share those bits. Caller holds self.dlock."""
+        by_suffix = {}
+        for d in self.wifi_devs.values():
+            if d.get("ap"):
+                by_suffix.setdefault(d["mac"].replace(":", "")[-6:], []).append(d["mac"])
+        for d in self.wifi_devs.values():
+            sfx = d.get("ap_suffix") or ""
+            hits = by_suffix.get(sfx, []) if sfx else []
+            # Exactly one candidate, and never an AP pointing at itself.
+            d["parent"] = hits[0] if len(hits) == 1 and hits[0] != d["mac"] else None
 
     def merge_ble(self, rows):
         now = time.time()
@@ -727,7 +780,7 @@ class Bandwatch:
         if not mac:
             self.send("hunt 0")
             return
-        mac = mac.lower()
+        mac = mac.strip().lower()
         if ch is None:
             d = self.wifi_devs.get(mac) or self.z_devs.get(mac)
             ch = d["ch"] if d else 0
@@ -816,13 +869,21 @@ def make_handler(bw, html_path):
                     else:
                         bw.stop_capture()
                 elif cmd == "hunt":
-                    bw.hunt(req.get("mac"), req.get("ch"))
+                    target = clean_hunt_id(req.get("mac"))
+                    if req.get("mac") and not target:
+                        return self._json({"error": "bad hunt target"}, 400)
+                    bw.hunt(target, req.get("ch"))
                 elif cmd == "deauth":
-                    bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
+                    mac = clean_mac(req.get("mac"))
+                    if req.get("mac") and not mac:
+                        return self._json({"error": "bad mac"}, 400)
+                    bw.send(f"deauth {mac or '0'}")   # the device finds the AP's channel itself
                 elif cmd == "dca":  # targeted deauth to one specific client
-                    mac = req.get("client_mac") or req.get("mac")
-                    ap_bssid = req.get("ap_bssid")
-                    bw.send(f"dca {mac} {ap_bssid}") if mac and ap_bssid else bw.send("dca 0")
+                    mac = clean_mac(req.get("client_mac") or req.get("mac"))
+                    ap_bssid = clean_mac(req.get("ap_bssid"))
+                    if (req.get("client_mac") or req.get("mac") or req.get("ap_bssid")) and not (mac and ap_bssid):
+                        return self._json({"error": "dca needs a valid client_mac and ap_bssid"}, 400)
+                    bw.send(f"dca {mac} {ap_bssid}" if mac and ap_bssid else "dca 0")
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
                 elif cmd == "addr1":

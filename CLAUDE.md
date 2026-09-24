@@ -42,6 +42,9 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    page exists as LVGL widgets; the capture ring is malloc'ed per capture; LVGL uses `LV_STDLIB_CLIB`; the BLE
    BLE keeps no result cache (we drive NimBLE directly), so BLE idles ~95 kB free. Out-of-memory shows up as
    `abort() ... lock_init_generic` or a store fault in `lv_obj_class_create_obj`.
+   **`WifiDev` is field-ordered to pack to exactly 64 bytes** and a `static_assert` in `devices.h` holds it
+   there: it lives in two `kWifiDevSlots` arrays, so one added byte costs 128 and one added byte of *padding*
+   can cost 512. If that assert fires, repack rather than raising the number.
 5. **One radio.** Wi-Fi bands, BLE and 802.15.4 are exclusive modes; `setBandMode()` tears one down and starts
    the next. Every mode change calls `releaseCapture()`: capture off *and* the ~32 KB ring returned to the heap
    (pcap link type differs per radio, and BLE mode needs that RAM). Only free the ring from the loop task.
@@ -75,6 +78,10 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
   `SURV_CAT`/`SURV_KIND` in the host. A match is evidence, not proof - keep the UI wording honest.
 - Tier-1 (`addr1`) sightings must never evict or overwrite a device we heard transmit: see
   `trackWifiDevice(..., destOnly)` and `docs/DEVELOPER.md` §15.
+- **Station-to-BSS association** is only the last 3 BSSID bytes on the device (`WifiDev.apSuffix`, from the DS
+  bits in `promiscuousCb`); the host completes the join against APs it has actually heard, and refuses to
+  guess when two of them share those bits (`_resolve_parents`). `dca` is always given an AP's *full* BSSID,
+  never the suffix. §17.
 - Channel lists / dwell / scoring: top of `bandwatch.cpp` (`kChannels`, `kChanBand`, `kDwellMs`, `computeBusyScore`).
 - Serial protocol: `sendHello/sendDwell/sendSweep/sendDevices/sendBleStatus`, `handleCommand`. Keep it in sync
   with `host/bandwatch_host.py` (`handle_line`, `merge_*`) and `docs/DEVELOPER.md`.
@@ -93,7 +100,7 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 ## Testing without the LCD
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
-`dca <client_mac> <ap_bssid>` (targeted deauth to one station) | `dca 0`, `reboot`.
+`dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`, `reboot`.
 microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>` (no RTC —
 the host sends this on connect; it dates the pcap records and names the files, in UTC).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
@@ -104,4 +111,4 @@ Crash text is printed to USB before the reboot but the port re-enumerates, so ke
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy · v1.4.2 capture telemetry in BLE mode, sdcap ack key, LCD record light · v1.5 surveillance OUI flagging, addr1 tier-1 sightings, non-blocking sdread - section 15.
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy · v1.4.2 capture telemetry in BLE mode, sdcap ack key, LCD record light · v1.5 surveillance OUI flagging, addr1 tier-1 sightings, non-blocking sdread - section 15 · v1.5.3 targeted deauth (`dca`) · v1.5.4 the 1.5.3 `dca` UI was unreachable end-to-end (four independent breaks); station-to-BSS association added to make it work, at zero static-RAM cost - section 17.

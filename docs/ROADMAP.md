@@ -1,6 +1,6 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.5**.
+Planned work, open questions and known gaps. Current release: **v1.5.4**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
@@ -80,8 +80,12 @@ case: capture ring + FATFS + an LVGL page rebuild landing together). It is check
 actual failure mode, and would let the firmware *refuse* to start a capture whose projected heap falls below
 the floor rather than crashing. Under such a rule the 512-byte hit log stops being a rule violation.
 
-Current static usage is 79,576 B — about 424 B under the existing line. That headroom is the edge of an
-unverified budget, not a wall.
+Current static usage is 79,584 B — about 416 B under the existing line. That headroom is the edge of an
+unverified budget, not a wall. 1.5.4 is a worked example of the squeeze it causes: adding a station's BSSID
+to `WifiDev` should have been 6 bytes, but that struct is in two `kWifiDevSlots` arrays and would have
+rounded 64 → 68, i.e. 512 B, which does not fit. Repacking the struct to exactly 64 bytes bought 3 bytes of
+former padding for free instead — a good outcome here, but the reason only 3 of the 6 bytes are on the device
+is this unverified line, not anything about the radio.
 
 ---
 
@@ -98,8 +102,8 @@ unverified budget, not a wall.
 
 ## Known gaps and smaller items
 
-- **`sdls` can silently truncate.** It skips entries when the TX buffer is tight, so a listing may be
-  incomplete with no indication. Should report a count or a truncation marker.
+- ~~**`sdls` can silently truncate.**~~ Fixed in 1.5.4: the reply carries `listed` and `skipped`, and the
+  host says "N entries omitted" instead of showing a short listing as if it were complete.
 - **Surveillance detection is unproven against real hardware.** The matcher is unit-tested against known
   values from both upstream sources plus a negative control, but no Ring/Flock/Axon device has ever been in
   range during testing. The first live hit is the real test.
@@ -132,3 +136,14 @@ Five releases (1.2.5 → 1.4.2) shipped with no README version entry, because do
 `str.replace()` anchored on the previous release's bullet: once one anchor was missing, every later edit
 silently matched nothing and the failure cascaded. Fixed in `088a128`. **Assert that an anchor exists before
 replacing it** — a no-op edit that reports success is worse than a crash.
+
+It happened again at 1.5.3: no README entry, no `CLAUDE.md` history line, and this file still said "current
+release v1.5". Restored in 1.5.4. Two further 1.5.3 lessons worth keeping:
+
+- **The tag was one commit early.** `v1.5.3` pointed at the feature commit, not the `kVersion` bump that
+  followed it, so a build from that tag reported `1.5`. Before tagging, check that the tag's own tree agrees:
+  `grep -q "\"$(git describe --tags --abbrev=0 | tr -d v)\"" bandwatch/bandwatch.cpp`.
+- **A feature was shipped, tagged and documented without ever being run.** The `dca` dashboard path was
+  broken in four independent places at once — a filter on a field that did not exist, buttons with no way to
+  show them, a MAC format the device rejects, and an unhandled acknowledgement. Each one alone makes the
+  feature do nothing. Reaching a new control *through the UI it ships with*, once, would have caught all four.

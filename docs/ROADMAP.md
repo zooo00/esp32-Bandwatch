@@ -147,7 +147,8 @@ release v1.5". Restored in 1.5.4. Two further 1.5.3 lessons worth keeping:
 
 - **The tag was one commit early.** `v1.5.3` pointed at the feature commit, not the `kVersion` bump that
   followed it, so a build from that tag reported `1.5`. Before tagging, check that the tag's own tree agrees:
-  `grep -q "\"$(git describe --tags --abbrev=0 | tr -d v)\"" bandwatch/bandwatch.cpp`.
+  `grep -q "\"$(git describe --tags --abbrev=0 | tr -d v)\"" bandwatch/bandwatch_core.h`
+  (`kVersion` moved out of `bandwatch.cpp` in the 1.5.1 split).
 - **A feature was shipped, tagged and documented without ever being run.** The `dca` dashboard path was
   broken in four independent places at once — a filter on a field that did not exist, buttons with no way to
   show them, a MAC format the device rejects, and an unhandled acknowledgement. Each one alone makes the

@@ -133,9 +133,11 @@ Device → host, one JSON object per line unless noted:
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
 
 Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
-`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, `deauth <bssid>` (Wi‑Fi modes only —
-parks on the AP's channel and spams spoofed deauth frames at its stations; stops itself after `kDeauthMaxMs`,
-5 min) / `deauth 0`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
+`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, 
+`deauth <bssid>` (Wi‑Fi modes only — broadcast deauth to all clients of that AP; stops itself after `kDeauthMaxMs`,
+5 min) / `deauth 0`, 
+`dca <client_mac> <ap_bssid>` (targeted deauth to one specific station) / `dca 0`, 
+`sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
 
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
@@ -145,9 +147,12 @@ instead of killing the reader thread (an exception there closes the serial port 
 
 `bandwatch_host.py`: a reader thread parses lines into a state dict (channels, history, device tables with
 per-device RSSI history, hunt state), an HTTP server exposes `GET /api/state` (everything, JSON) and
-`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
+`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"dca"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
 for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Files are named `bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` /
 `bandwatch-802154-…` in `--captures` (default `./captures`).
+
+The deauth command starts a broadcast deauth attack (`cmd: "deauth", bssid: "XX:XX..."`), while the dca command 
+starts a targeted attack on one client (`cmd: "dca", client_mac: "...", ap_bssid: "..."`).
 
 `/api/cmd` has **no authentication**, and one of its commands starts a deauth attack, so the server binds to
 `127.0.0.1` by default; `--bind 0.0.0.0` hands that to anyone who can reach the port. Values that reach the

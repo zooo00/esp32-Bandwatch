@@ -35,6 +35,10 @@ a deauth attack is running — it never transmits.
   handshakes). Stations with PMF (802.11w) enabled would ignore it by design. The attack stops itself after
   5 minutes (`kDeauthMaxMs`) so a crashed host or an unplugged cable cannot leave the board transmitting.
   Only point it at networks you are authorised to test.
+  
+  Two modes: 
+  - `deauth <ap_bssid>` sends broadcast deauth frames to **all** clients of that AP (kick everyone).
+  - `dca <client_mac> <ap_bssid>` targets a **specific client** station (disconnect just one device).
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble → 802.15.4; on the
@@ -137,7 +141,9 @@ accordingly (fewer slots, so expect more `drop` on a very busy channel than with
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
 `cap 0|1`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`,
 `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
-modes only — parks on the AP's channel and kicks its stations, auto‑stops after 5 min), `info`, `reboot`.
+modes only — broadcast deauth to all clients of that AP, auto‑stops after 5 min), 
+`dca <client_mac> <ap_bssid>` / `dca 0` (targeted deauth to one specific station), 
+`info`, `reboot`.
 Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
 `cap 1` afterwards.
 802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need

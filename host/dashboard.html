@@ -195,7 +195,7 @@
     <div>
       <div class="meta">spoofing <b id="deauthMac"></b><span id="deauthFail"></span><br><span id="deauthHint"></span></div>
       <div style="margin-top:8px"><button class="small stop" id="deauthStop">Stop deauth</button>
-        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel, so every client of that network drops and usually reconnects. Run a capture at the same time to grab WPA2 handshakes; clients with PMF (802.11w) enabled ignore it.</span></div>
+        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel. In broadcast mode, every client of that network drops and usually reconnects (run a capture to grab WPA2 handshakes). In targeted mode, only one specific client is disconnected. Clients with PMF (802.11w) enabled ignore it.</span></div>
     </div>
   </section>
 
@@ -343,7 +343,22 @@
   $('#pauseBtn').addEventListener('click', () => { paused = !paused; $('#pauseBtn').textContent = paused ? 'Resume updates' : 'Pause updates'; $('#pauseBtn').classList.toggle('stop', paused); if (!paused && state) render(state); });
   document.addEventListener('keydown', (e) => { if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('#pauseBtn').click(); } });
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
-  document.addEventListener('click', (e) => { const k = e.target.closest('button[data-deauth]'); if (k) post({ cmd: 'deauth', mac: k.dataset.deauth || null }); });
+  // Deauth button: broadcast mode (deauth all clients of an AP)
+  document.addEventListener('click', (e) => { 
+    const k = e.target.closest('button[data-deauth]'); 
+    if (!k) return;
+    const mac = k.dataset.deauth;
+    post({ cmd: 'deauth', mac: mac || null });  
+  });
+  // DCA button: targeted deauth to one specific client (client_mac + ap_bssid)
+  document.addEventListener('click', (e) => { 
+    const k = e.target.closest('button[data-dca]'); 
+    if (!k) return;
+    const parts = k.dataset.dca.split(' ');
+    if (parts.length === 2) {
+      post({ cmd: 'dca', client_mac: parts[0], ap_bssid: parts[1] });
+    }
+  });
   for (const t of ['wifi', 'ble', 'zig']) {
     const tbl = $('#' + t + 'Tbl');
     tbl.addEventListener('mouseenter', () => frozen[t] = true);
@@ -451,12 +466,23 @@
 
   function renderDeauth(s) {
     const k = s.deauth; $('#deauthCard').hidden = !k; if (!k) return;
-    $('#deauthMac').textContent = k.mac;
+    $('#deauthMac').textContent = k.targeted ? `${k.mac} (target)` : k.mac;
     $('#deauthSent').textContent = fmt(k.sent);
     $('#deauthCh').textContent = k.ch ? `parked on ch ${k.ch} (${band(k.ch)})` : 'channel unknown — hopping';
     $('#deauthFail').textContent = k.fail ? ` (${fmt(k.fail)} failed)` : '';
-    const d = (s.wifi_devs || []).find(x => x.mac === k.mac);
-    $('#deauthHint').textContent = [d && (d.ssid || '(hidden SSID)'), d && d.sec].filter(Boolean).join(' · ');
+    
+    let hint = '';
+    if (k.targeted) {
+      // Targeted mode: find the client and its AP info
+      const d = (s.wifi_devs || []).find(x => x.mac === k.mac);
+      hint = [d && (d.ssid || '(hidden SSID)'), d && d.sec].filter(Boolean).join(' · ');
+      hint += ` · targeting ${k.ap_bssid}`;
+    } else {
+      // Broadcast mode: find the AP info
+      const d = (s.wifi_devs || []).find(x => x.mac === k.mac);
+      hint = [d && (d.ssid || '(hidden SSID)'), d && d.sec].filter(Boolean).join(' · ');
+    }
+    $('#deauthHint').textContent = hint;
   }
 
   function renderTiles(s) {
@@ -581,7 +607,27 @@
     if (!freeze) for (const [k, tr] of existing) if (!seen.has(k)) tr.remove();
   }
   function huntBtn(mac, ch, s) { const on = s.hunt && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : mac}" ${ch ? `data-ch="${ch}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
-  function deauthBtn(d, s) { const on = s.deauth && s.deauth.mac === d.mac; return `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : d.mac}" title="Spoof this BSSID and kick its stations">${on ? 'Stop' : 'Deauth'}</button>`; }
+  function deauthBtn(d, s) { 
+    const on = s.deauth && s.deauth.mac === d.mac; 
+    // For APs: offer both broadcast (deauth all clients) and targeted (kick one specific client if known)
+    const title = d.ap ? `Spoof this BSSID and kick its stations` : 'Deauth';
+    let btn = `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : d.mac}" title="${title}">${on ? 'Stop' : 'Deauth'}</button>`;
+    
+    // If this is an AP and we have known clients associated with it, add a dropdown for targeted deauth
+    if (d.ap && s.wifi_devs) {
+      const clients = (s.wifi_devs || []).filter(x => x.parent === d.mac);
+      if (clients.length > 0) {
+        // Add a small popup menu to select which client to target
+        btn += `<span class="deauth-dropdown" title="Target specific client">⚙</span>`;
+        clients.forEach(c => {
+          const cMac = c.mac.replace(/:/g, '');
+          btn += `<button class="tiny dca" data-dca="${cMac} ${d.mac}" style="display:none">${c.mac.substring(0,8)}...</button>`;
+        });
+      }
+    }
+    
+    return btn; 
+  }
 
   function renderWifi(s) {
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;

@@ -20,7 +20,9 @@ serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
 - `host/bandwatch_host.py` — serial reader, HTTP API, pcap writer, OUI/vendor lookup. `host/dashboard.html` —
   the single-page UI (no build step, no dependencies).
 - `build.sh` (compile/flash via arduino-cli), `setup.sh` (install toolchain), `tools/ctags/` (Apple-Silicon
-  workaround), `docs/` (developer docs), `captures/` (pcaps, git-ignored).
+  workaround), `tools/witness/` (RX-only ESP32-S3 monitor + `verify.py`, the on-air oracle for §11),
+  `tools/deauth/patch_raw_tx.py` (post-build raw-TX patch), `docs/` (developer docs), `captures/` (pcaps,
+  git-ignored).
 
 ## Build / flash / run (all from repo root)
 ```
@@ -61,16 +63,17 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    memory instead of failing. A `#warning` fires off 3.3.x; re-verify the offset table in `docs/DEVELOPER.md` §9.
 9. **Strings off the air are hostile input.** SSID / BLE name / country code are control-character-stripped at
    ingest and JSON-escaped on the way out; keep both, or a crafted beacon corrupts a whole protocol line.
-10. **The deauth attack does not work, because nothing reaches the air** (measured 1.5.5 with an external
-   witness, `tools/witness/`). Both paths fail for unrelated reasons: the raw `esp_wifi_80211_tx()` path is
-   rejected with `ESP_ERR_INVALID_ARG` before TX (the driver only permits beacon/probe/action/non-QoS-data),
-   and the internal-slot path reports success while transmitting nothing at all - not even a beacon, so the
-   §9 offsets are wrong, not merely fragile. The counters cannot tell you this: `deauthSent`/`da` is
-   incremented unconditionally and `ic_tx_pkt()` returns `void`. The radio itself transmits fine (`txtest`
-   is witnessed at -45 dBm), and the frame is a correct `0xC0 0x00` deauth. `-Wl,--wrap` on the gate does
-   not work, and neither would an ESP-IDF rewrite - the blob is the same. Never claim it works without the
-   witness. Full log and next steps: `docs/DEVELOPER.md` §11. Note macOS redacts SSIDs in
-   `system_profiler SPAirPortDataType`, so a Mac Wi-Fi scan is not a usable witness.
+10. **The deauth attack works, but only on a patched image, and only the raw path** (1.6, measured with an
+   external witness - `tools/witness/`; §11). Two separate faults were hiding each other: the raw
+   `esp_wifi_80211_tx()` path was rejected by a subtype gate (`ESP_ERR_INVALID_ARG`), and the driver-internal
+   slot path transmits **nothing for any subtype** - its §9 offsets are wrong - while reporting success. The
+   raw path is now the default; `kickpath 1` selects the internal slot for offset work.
+   `tools/deauth/patch_raw_tx.py` is a **post-build** step that patches out the gate and reseals the image;
+   a plain `./build.sh --upload` is unpatched and fails loudly, which is the intended default.
+   **The counters still prove nothing** - `deauthSent`/`da` is incremented unconditionally and `ic_tx_pkt()`
+   returns `void`; `da` once reached 328 while the witness heard zero. Confirm on air with
+   `tools/witness/verify.py`, never from a counter. Whether a real station actually drops is still untested.
+   Never hardcode the patch address: it moved from `0x420ff3b0` to `0x420ff436` just from adding one command.
 11. **The SD card shares the LCD's SPI bus** (CS GPIO4, 20 MHz vs the LCD's 40 MHz). Safe only because both
    wrap transfers in beginTransaction/endTransaction and both run on the loop task — never touch the card
    from a radio callback or another task. Mounting FATFS costs ~30 KB, so the card is mounted only while in
@@ -115,12 +118,12 @@ microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>
 the host sends this on connect; it dates the pcap records and names the files, in UTC).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
 SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `kickfc <hex>` (FC byte0 the internal kick path writes — `kickfc 80` sends a
-beacon down the deauth descriptor path), `kickpath 0|1` (1 forces the raw `esp_wifi_80211_tx` fallback
-instead of the internal slot), `softap <ch>|0`
+beacon down the deauth descriptor path), `kickpath 0|1` (0 = raw `esp_wifi_80211_tx`, the
+default and the only path that reaches the air; 1 = the dead internal slot, for §9 offset work), `softap <ch>|0`
 (**proof of concept**: open SoftAP on that channel, injects from `WIFI_IF_AP`; tears down sniffing while up,
 and its state handling is incomplete — do not build on it as-is).
 Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
 
 ## Version history
-v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy · v1.4.2 capture telemetry in BLE mode, sdcap ack key, LCD record light · v1.5 surveillance OUI flagging, addr1 tier-1 sightings, non-blocking sdread - section 15 · v1.5.1 review pass: firmware split into modules behind `bandwatch_core.h`, capture refused below a 24 kB free-heap floor, `sdls` reports total/sent (host shows the card's file list) - sections 3 and 16 · v1.5.2 deauth sequence numbers fixed (all frames in burst now have unique seq; previously identical 0x00), diagnostic logging added for TX path verification - attack still does not work, root cause unidentified (see DEVELOPER.md §11) · v1.5.3 targeted deauth (`dca`) · v1.5.4 the 1.5.3 `dca` UI was unreachable end-to-end (four independent breaks); station-to-BSS association added to make it work, at zero static-RAM cost - section 17 · v1.5.5 merge of the two 1.5.x lines: 1.5.3/1.5.4 were built on the pre-split monolith, so `dca` and the association tracking were ported onto the module layout (1.5.3/1.5.4 firmware tags predate the split and do not build from this tree).
+v1.0 sweeps + LCD + dashboard + pcap · v1.1 BLE, device tables, hunt · v1.2 802.15.4 (Zigbee/Thread), pause/freeze tables · v1.2.2 deauth attack (spoof a BSSID, kick its stations) · v1.2.3 deauth crash fix + dead-man's-switch timeout + serial command-injection fix · v1.2.4 review pass: capture-ring leak on mode change, RF-string sanitising, host robustness · v1.2.5 deauth frame was a QoS-Null, not a deauth (fixed); attack still does not work - see docs/DEVELOPER.md section 11 · v1.3 microSD pcap recording (device writes the pcap; independent USB/SD sinks; sdls/sdread; on-demand mount) - section 12 · v1.4 BLE advertising capture as pcap link type 256, BLEScan replaced with direct NimBLE discovery - section 13 · v1.4.1 BLE MAC byte-order fix + auto scan policy · v1.4.2 capture telemetry in BLE mode, sdcap ack key, LCD record light · v1.5 surveillance OUI flagging, addr1 tier-1 sightings, non-blocking sdread - section 15 · v1.5.1 review pass: firmware split into modules behind `bandwatch_core.h`, capture refused below a 24 kB free-heap floor, `sdls` reports total/sent (host shows the card's file list) - sections 3 and 16 · v1.5.2 deauth sequence numbers fixed (all frames in burst now have unique seq; previously identical 0x00), diagnostic logging added for TX path verification - attack still does not work, root cause unidentified (see DEVELOPER.md §11) · v1.5.3 targeted deauth (`dca`) · v1.5.4 the 1.5.3 `dca` UI was unreachable end-to-end (four independent breaks); station-to-BSS association added to make it work, at zero static-RAM cost - section 17 · v1.5.5 merge of the two 1.5.x lines: 1.5.3/1.5.4 were built on the pre-split monolith, so `dca` and the association tracking were ported onto the module layout (1.5.3/1.5.4 firmware tags predate the split and do not build from this tree). · v1.6 the deauth attack transmits: an external witness (`tools/witness/`, a second ESP32 in monitor mode) proved neither path reached the air, for two unrelated reasons - the raw path was rejected by libnet80211's subtype gate, and the internal slot path radiates nothing for *any* subtype, so the section 9 offsets are wrong rather than merely fragile. Raw TX is now the default and `tools/deauth/patch_raw_tx.py` patches out the gate post-build; 289 deauth frames witnessed on air at -38 dBm - section 11.

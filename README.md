@@ -29,7 +29,7 @@ a deauth attack is running — it never transmits.
   6LoWPAN, MAC‑secured), role (beaconing coordinator/router), **permit‑join** flag, LQI.
 - **Hunt**: pick one MAC (Wi‑Fi or BLE) and the LCD shows a big live RSSI with a bar, the LED colour tracks
   distance, the radio parks on the target's channel, and the dashboard plots the RSSI trend.
-- **Deauth** — ⚠️ **does not currently work; see [Known issues](#known-issues).** The intent: pick an AP (its
+- **Deauth** — ⚠️ **requires a patched image; see [Known issues](#known-issues).** Pick an AP (its
   BSSID) over serial or from the dashboard, the radio parks on its channel and sends deauth frames with the AP
   spoofed as sender, so connected stations drop off and reconnect (run a capture alongside to catch WPA2
   handshakes). Stations with PMF (802.11w) enabled would ignore it by design. The attack stops itself after
@@ -167,30 +167,37 @@ matches the FATFS sector size), `kSdFlushMs` (5 s), `kSdBudgetUs` (8 ms of SD wr
 
 ## Known issues
 
-**The deauth attack does not work** (as of 1.2.5, verified on hardware against a Ubiquiti AP). Frames are
-built and handed to the driver, the counters climb, no errors are returned — and no station is ever kicked.
+**The deauth attack needs a patched image** (resolved in 1.6; it did not work at all before that). A plain
+`./build.sh --upload` produces firmware whose deauth fails loudly with `ESP_ERR_INVALID_ARG` and transmits
+nothing. That is deliberate — opting in is an explicit, separate step:
 
-What was measured, on a real AP with a station of ours associated to it at −62 dBm:
+```
+./build.sh
+python3 tools/deauth/patch_raw_tx.py --flash --port /dev/cu.usbmodemXXXX
+python3 tools/witness/verify.py        # confirm from the air
+```
 
-- The AP's own advertised client count (BSS-load IE) never changed during an attack, and the associated
-  station never dropped. Tried on a DFS channel (64) and a non-DFS channel (2) — no effect on either.
-- **PMF is not the explanation**: the target advertises PMF `none`.
-- **DFS is not the explanation**: it fails identically on a non-DFS channel.
-- The `deauth`/`da` counters mean "frames we handed to the driver", *not* frames that reached the air:
-  `ic_tx_pkt()` returns `void`, and `esp_wifi_80211_tx()` returning `ESP_OK` only means the frame was
-  accepted for queueing. Do not read a rising counter as a working attack.
+`esp_wifi_80211_tx()` refuses deauthentication frames: the prebuilt `libnet80211.a` calls
+`ieee80211_raw_frame_sanity_check()` first and bails if it returns nonzero. Espressif document the API as
+supporting *"beacon/probe request/probe response/action and non-QoS data"* only. The patcher overwrites that
+check's prologue with `return 0` in the linked image and reseals the checksum and SHA-256. `-Wl,--wrap` does
+**not** work — the check and its caller share an object file — and an ESP-IDF rewrite would not help, since the
+blob is identical there. See [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11.
 
-One real bug was found and fixed on the way: the frame was not a deauthentication frame at all. The code
-overwrote the driver's frame control with `0xC8 0x02` (type 2 / subtype 12 = a **QoS-Null data frame**), and
-the raw fallback used `0x80` (**Beacon**) and `0xD0` (**Action**). All are ignored by stations. The frame is
-now a correct `0xC0 0x00` deauthentication, confirmed by dumping the bytes handed to the MAC — but fixing it
-did not make the attack work, so at least one further cause remains unidentified.
+This is rule-8 fragility squared: the patch is pinned to one exact core build, the address moves whenever the
+sketch changes (it is resolved from the ELF every run, never hardcoded), and disabling the check lets malformed
+frames through generally. Re-verify with the witness after any toolchain change.
 
-Whether anything is radiated at all is **still unverified in both directions**: the only witness available
-during testing was a macOS Wi-Fi scan, and macOS redacts SSIDs in `system_profiler` output, so a
-beacon-injection self-test (`txtest`) could not be read. Confirming this needs a second radio that can see
-raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mode. See
-[`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11 for the full investigation and the next steps.
+**The counters do not prove the attack works.** `deauthSent`/`da` is incremented unconditionally and
+`ic_tx_pkt()` returns `void`; `da` once reached 328 in a window where an external witness heard exactly zero
+frames. Only a second radio in monitor mode can tell you — that is what `tools/witness/` is for.
+
+**The driver-internal slot path (`kickpath 1`) is dead.** It transmits nothing for *any* frame subtype, not
+just deauth, which means the reverse-engineered offsets in `docs/DEVELOPER.md` §9 are wrong rather than merely
+fragile. It is kept only as a starting point for fixing them.
+
+**Whether a real station actually disconnects is untested.** Correct deauth frames demonstrably reach the air;
+no client of ours has been observed dropping. PMF-enabled networks ignore these frames by design.
 
 ## Limitations
 
@@ -206,6 +213,16 @@ raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mo
 - Not a replacement for professional RF tools.
 
 ## Versions
+
+- **1.6** — **The deauth attack transmits.** Settled with an external witness (`tools/witness/`: an ESP32-S3
+  in monitor mode that never transmits, plus `verify.py` to drive both boards and report from the air). Two
+  unrelated faults had been hiding each other: the raw `esp_wifi_80211_tx()` path was rejected before TX by
+  `libnet80211`'s subtype gate, and the driver-internal slot path — which was the default, and which §11 had
+  called "the real attack path" — radiates **nothing for any subtype**, so the §9 offsets are wrong rather than
+  fragile. Raw TX is now the default (it fails loudly rather than silently), and
+  `tools/deauth/patch_raw_tx.py` patches out the gate as a post-build step, resealing the image checksum and
+  SHA-256. 289 deauth frames witnessed on air at −38 dBm. Also: `kickfc` and `kickpath` diagnostics, and
+  `-Wl,--wrap` ruled out for good (the check and its caller share an object file, on every ESP32 family).
 
 - **1.5.5** — **Merge of the two 1.5.x lines.** 1.5.3 and 1.5.4 were developed from a checkout that predated
   the 1.5.1 module split, so they edited the old monolithic `bandwatch.cpp`. Targeted deauth (`dca`) and the

@@ -299,60 +299,91 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
   budget for a line. The budgets (`40 + n*126` Wi‑Fi, `40 + n*102` BLE) are estimates, not exact lengths: a full
   64-device table already needs ~7 KB of the 8 KB TX buffer, so raising them is not free.
 
-## 11. Deauth: why it does not work (investigation log, 1.2.5)
+## 11. Deauth: why it does not work (investigation log; root cause found 1.5.5)
 
 Read this before spending another evening on the deauth path. Tested on hardware against a Ubiquiti AP
-(WPA2-PSK, 5 GHz ch 64 80 MHz, and its 2.4 GHz ch 2 BSS) with a laptop associated to it at −62 dBm.
+(WPA2-PSK, 5 GHz ch 64 80 MHz, and its 2.4 GHz ch 2 BSS) with a laptop associated to it at -62 dBm.
+Settled on 2.4 GHz ch 6 with an external witness: a second ESP32 (S3) in monitor mode, `tools/witness/`.
 
-**Symptom.** Frames are built, handed to the driver and counted; no station is ever kicked. The AP's
-BSS-load client count does not move and the associated laptop stays connected.
+**Symptom.** Frames are built, handed to the driver and counted; no station is ever kicked.
+
+**Root cause.** Nothing ever reaches the air. Both transmit paths fail, for two unrelated reasons:
+
+| path | device reports | on air (witness) |
+| --- | --- | --- |
+| raw `esp_wifi_80211_tx()` | `ESP_ERR_INVALID_ARG`, 304/304 | nothing - **rejected before TX** |
+| internal slot (`sendInternalKick()`) | no error, `da` climbing | nothing - **silently never reaches the PHY** |
+
+The investigation before 1.5.5 was spent on frame *content* for a path that has never transmitted
+anything at all.
 
 **Ruled out** (each tested, not assumed):
 
 | Hypothesis | How it was tested | Result |
 | --- | --- | --- |
-| PMF / 802.11w protecting the BSS | read the RSN capabilities out of the beacon | PMF is `none` — not it |
-| DFS blocking TX on channel 64 | ran the identical attack on non-DFS ch 2 | fails identically — not it |
-| Promiscuous mode blocking TX | `esp_wifi_set_promiscuous(false)` then inject | no change — not it |
+| PMF / 802.11w protecting the BSS | read the RSN capabilities out of the beacon | PMF is `none` - not it |
+| DFS blocking TX on channel 64 | ran the identical attack on non-DFS ch 2 | fails identically - not it |
+| Promiscuous mode blocking TX | `esp_wifi_set_promiscuous(false)` then inject | no change - not it |
+| The radio cannot transmit at all | `txtest 1`, witnessed | **it can** - 323 beacons at -45 dBm |
+| The deauth *subtype* is what the internal path drops | `kickfc 80`, witnessed | no - a **beacon** down that same path also radiates nothing |
 
-**One real bug, found and fixed.** `sendInternalKick()` let the driver build a proper deauth and then
-overwrote the frame control with `0xC8 0x02`. That decodes as type 2 / subtype 12 — a **QoS-Null data
-frame**, which every station ignores. The raw fallback was no better: `0x80` is a **Beacon** and `0xD0` an
-**Action** frame (they were chosen to get past `ieee80211_raw_frame_sanity_check`, which rejects real deauth
-subtypes — i.e. the check was being satisfied with frames that could never work). Both paths now emit a
-correct `0xC0 0x00` deauthentication. Verified by dumping the bytes as handed to the MAC:
+The last two rows are the ones that matter. The radio transmits fine, and the internal path is dead for
+every subtype, not just deauth.
+
+**Why the raw path is rejected.** `esp_wifi_80211_tx()` calls `ieee80211_raw_frame_sanity_check()` as its
+first act and bails if it returns nonzero:
+
+```
+420ff5c6:  jal  420ff3b0 <ieee80211_raw_frame_sanity_check>
+420ff5cc:  bnez a0, ...        # nonzero -> return, nothing transmitted
+```
+
+Espressif document the restriction: *"Currently only support for sending beacon/probe request/probe
+response/action and non-QoS data frame"*. Deauthentication is not on that list; beacon is, which is exactly
+the split the witness measures.
+
+**`-Wl,--wrap` does not fix it.** The usual escape fails here: in core 3.3.11 the check and its only caller
+are both inside `ieee80211_output.o`, so the call is bound within the object file and is never an undefined
+reference for `ld` to redirect. Tested - the linked image is byte-identical and still calls the original.
+Confirmed identical layout on esp32, esp32s3, esp32c3, esp32c5 and esp32c6.
+
+**A rewrite does not fix it either.** `libnet80211.a` is a closed-source binary blob shipped identically in
+ESP-IDF; migrating framework changes which `CONFIG_*` you can set, not the binary holding the restriction.
+There is no deauth-related option anywhere in the 4277-line sdkconfig. Rule 7 is real but orthogonal to this.
+
+**One real bug, found and fixed in 1.2.5.** `sendInternalKick()` let the driver build a proper deauth and
+then overwrote the frame control with `0xC8 0x02` - type 2 / subtype 12, a **QoS-Null data frame**, which
+every station ignores. Both paths now emit a correct `0xC0 0x00` deauthentication. The frame is textbook:
 
 ```
 c0 00  32 00  ff ff ff ff ff ff  78 8a 20 8e 9e f0  78 8a 20 8e 9e f0  00 00  07 00
 FC     dur    addr1 DA=broadcast  addr2 SA=AP        addr3 BSSID=AP      seq    reason 7
 ```
 
-That is a textbook broadcast deauth — and it still kicks nobody, so at least one further cause remains.
+Correct, and irrelevant while it never leaves the antenna.
 
-**The counters lie.** `deauthSent` (`da`, and element 3 of `deauth`) is incremented at the end of
-`sendInternalKick()` unconditionally; `ic_tx_pkt()` returns `void`. On the raw path, `esp_wifi_80211_tx()`
-returning `ESP_OK` only means the frame was accepted for queueing. **Neither proves anything reached the
-air.** Any future work here needs an external witness before claiming success.
+**The counters lie.** `deauthSent` (`da`, element 3 of `deauth`) is incremented at the end of
+`sendInternalKick()` unconditionally; `ic_tx_pkt()` returns `void`. On the raw path an `ESP_OK` only means
+the frame was queued. **Neither proves anything reached the air** - `da` reached 328 in a window where the
+witness heard exactly zero. Never claim success without the witness.
 
-**Unresolved: does the radio transmit at all?** `txtest 1` injects a beacon with SSID `BANDWATCH-TXTEST`,
-and `softap <ch>` (proof of concept only, not a feature) brings up an open SoftAP to give the MAC a real BSS
-context and injects from `WIFI_IF_AP`. Neither could be evaluated: the only witness to hand was a macOS
-Wi-Fi scan, and **macOS redacts every SSID** in `system_profiler SPAirPortDataType` output, so injected
-networks cannot be identified by name. A channel+security signature works around the redaction
-(an open AP on a quiet channel shows up as `Channel: N` + `Security: None`) but the SoftAP PoC's own state
-handling is incomplete, so its result is inconclusive rather than negative. Do not cite it either way.
+**Corrected:** the comment justifying the SoftAP PoC claimed raw TX "radiates nothing from an unassociated
+STA". That is false - `txtest 1` transmits from `WIFI_IF_STA`, unassociated, no SoftAP, and the witness hears
+it at -45 dBm. The SoftAP detour may have been solving a non-problem. Also, macOS redacts SSIDs in
+`system_profiler SPAirPortDataType`, which is why a Mac was never a usable witness; use `tools/witness/`.
 
 **Next steps, in order of value:**
 
-1. Get a real witness: a second ESP32 in promiscuous mode, or a USB adapter in monitor mode on the target
-   channel. Everything below is guesswork without one.
-2. With a witness, settle the open question — does *any* frame radiate? Start with `txtest` (plain STA),
-   then the SoftAP PoC. If the SoftAP's own driver-generated beacon is not on the air, the problem is the
-   radio/driver configuration, not this code.
-3. If frames do radiate but stations ignore them, look at the rate/PHY config
-   (`esp_wifi_config_80211_tx()` is pinned to HT20 MCS0) and at whether the sequence number and duration
-   survive the driver's TX path.
-4. Only then revisit the reverse-engineered offsets in §9.
+1. **Fix the §9 offsets.** They are not merely fragile, they are wrong: the descriptor `sendInternalKick()`
+   builds is never transmitted. This is the only route that reaches the driver's own frame builder and so
+   bypasses the sanity check legitimately. `tools/witness/verify.py` turns each attempt into a seconds-long
+   yes/no, so this is now iterate-and-measure rather than guesswork.
+2. **Or open the raw path.** It demonstrably radiates; only the subtype gate stops it. Patching that gate
+   out of the linked image works in principle (`tools/deauth/patch_raw_tx.py`), at the cost of rule 8
+   fragility squared - pinned to one exact core build, failing silently rather than loudly, and letting all
+   malformed frames through, not just deauths.
+3. **Or accept the chip is wrong for this.** No amount of rewriting changes the blob. An injection-capable
+   adapter under mac80211 is the reliable tool if the goal is a working deauth rather than a working C5.
 
 
 ## 12. microSD pcap recording (1.3)

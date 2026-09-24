@@ -61,12 +61,16 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    memory instead of failing. A `#warning` fires off 3.3.x; re-verify the offset table in `docs/DEVELOPER.md` §9.
 9. **Strings off the air are hostile input.** SSID / BLE name / country code are control-character-stripped at
    ingest and JSON-escaped on the way out; keep both, or a crafted beacon corrupts a whole protocol line.
-10. **The deauth attack does not work** (verified on hardware, 1.2.5) and the counters do not tell you that:
-   `deauthSent`/`da` counts frames handed to the driver, `ic_tx_pkt()` returns `void`, and an `ESP_OK` from
-   `esp_wifi_80211_tx()` only means "queued". PMF and DFS have been ruled out; the frame itself is now a
-   correct `0xC0 0x00` deauth. Never claim it works without an external witness (a second radio in monitor
-   mode). Full log and next steps: `docs/DEVELOPER.md` §11. Note macOS redacts SSIDs in
-   `system_profiler SPAirPortDataType`, so a Mac Wi-Fi scan cannot identify an injected network by name.
+10. **The deauth attack does not work, because nothing reaches the air** (measured 1.5.5 with an external
+   witness, `tools/witness/`). Both paths fail for unrelated reasons: the raw `esp_wifi_80211_tx()` path is
+   rejected with `ESP_ERR_INVALID_ARG` before TX (the driver only permits beacon/probe/action/non-QoS-data),
+   and the internal-slot path reports success while transmitting nothing at all - not even a beacon, so the
+   §9 offsets are wrong, not merely fragile. The counters cannot tell you this: `deauthSent`/`da` is
+   incremented unconditionally and `ic_tx_pkt()` returns `void`. The radio itself transmits fine (`txtest`
+   is witnessed at -45 dBm), and the frame is a correct `0xC0 0x00` deauth. `-Wl,--wrap` on the gate does
+   not work, and neither would an ESP-IDF rewrite - the blob is the same. Never claim it works without the
+   witness. Full log and next steps: `docs/DEVELOPER.md` §11. Note macOS redacts SSIDs in
+   `system_profiler SPAirPortDataType`, so a Mac Wi-Fi scan is not a usable witness.
 11. **The SD card shares the LCD's SPI bus** (CS GPIO4, 20 MHz vs the LCD's 40 MHz). Safe only because both
    wrap transfers in beginTransaction/endTransaction and both run on the loop task — never touch the card
    from a radio callback or another task. Mounting FATFS costs ~30 KB, so the card is mounted only while in

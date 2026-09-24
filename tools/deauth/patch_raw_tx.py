@@ -35,9 +35,13 @@ FRAGILITY (read this before relying on it)
 Usage:
     ./build.sh                                  # produce build/bandwatch.ino.bin
     python3 tools/deauth/patch_raw_tx.py        # writes build/bandwatch.ino.patched.bin
+    python3 tools/deauth/patch_raw_tx.py --dry-run          # locate the function, write nothing
     python3 tools/deauth/patch_raw_tx.py --flash --port /dev/cu.usbmodem1101
+
+There is no unpatch: the patch is applied to a copy, so reverting means flashing the stock image
+(./build.sh --upload --no-patch).
 """
-import argparse, os, re, subprocess, sys
+import argparse, os, subprocess, sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 BUILD = os.path.join(REPO, "build")
@@ -102,6 +106,31 @@ def read_vaddr(elf_path, vaddr, n):
     return None
 
 
+def sync_flashed_reference(written):
+    """Tell the Arduino core's fast-reflash cache what we just put on the chip.
+
+    Core 3.3.11 uploads through tools/flasher.py, an esptool wrapper that passes --diff-with a
+    reference copy of the last image it flashed (build/bandwatch.ino_flashed.bin) and only writes the
+    sectors that differ. Flashing with esptool directly, as --flash does, leaves that reference
+    describing an image that is no longer on the chip, so the next `./build.sh --upload` diffs against
+    the wrong baseline and can skip sectors that really do differ - an incoherent flash that looks
+    like a successful one. build.sh itself is unaffected: it swaps the patched image into
+    bandwatch.ino.bin before the upload, so the wrapper records the right bytes.
+
+    Copying the image we actually wrote into that reference is exactly what the wrapper would have
+    done. A failure here is not fatal - it only costs a full flash next time - but say so.
+    """
+    import shutil
+    ref = os.path.join(BUILD, "bandwatch.ino_flashed.bin")
+    try:
+        shutil.copy2(written, ref)
+        print(f"updated {os.path.basename(ref)} (the core's --diff-with reference)")
+    except OSError as e:
+        print(f"warning: could not update {ref} ({e}).\n"
+              f"         Delete it by hand before the next ./build.sh --upload, or that upload will "
+              f"diff against a stale baseline.")
+
+
 def tool(name):
     base = os.path.expanduser("~/Library/Arduino15/packages/esp32/tools/esp-rv32")
     for root, _, files in os.walk(base):
@@ -114,14 +143,18 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--flash", action="store_true", help="flash the patched image after writing it")
     ap.add_argument("--port", default="/dev/cu.usbmodem1101")
-    ap.add_argument("--revert", action="store_true", help="just report, patch nothing")
+    # Was called --revert, which it never was: it only ever reported and stopped, so anyone reaching
+    # for it to undo a patched flash got a success message and a still-patched board. Renamed rather
+    # than aliased, so the old spelling fails loudly instead of doing nothing under a promising name.
+    ap.add_argument("--dry-run", action="store_true",
+                    help="resolve and locate the function, then stop without writing anything")
     a = ap.parse_args()
 
     for f in (ELF, BIN):
         if not os.path.exists(f):
             sys.exit(f"missing {f} - run ./build.sh first")
 
-    nm, objdump = tool("riscv32-esp-elf-nm"), tool("riscv32-esp-elf-objdump")
+    nm = tool("riscv32-esp-elf-nm")   # nm only: the ELF is parsed directly below, objdump is not used
 
     addr = None
     for line in subprocess.run([nm, ELF], capture_output=True, text=True).stdout.splitlines():
@@ -150,8 +183,8 @@ def main():
     off = hits[0]
     print(f"located in {os.path.basename(BIN)} at file offset 0x{off:x}")
 
-    if a.revert:
-        print("--revert given: reporting only, nothing written")
+    if a.dry_run:
+        print("--dry-run given: reporting only, nothing written")
         return
 
     patched = bytearray(image)
@@ -171,6 +204,7 @@ def main():
                "write-flash", "0x10000", OUT]
         print("\n$ " + " ".join(cmd))
         subprocess.run(cmd, check=True)
+        sync_flashed_reference(OUT)
         print("\nflashed. Verify on air with:  python3 tools/witness/verify.py")
 
 

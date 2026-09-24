@@ -52,7 +52,11 @@ APP="$BUILD_DIR/bandwatch.ino.bin"
 STOCK="$BUILD_DIR/bandwatch.ino.stock.bin"
 
 restore_stock() {   # put the unpatched image back so the build dir is never left in a patched state
+  # Must return 0 even when there is nothing to restore (--no-patch never writes $STOCK). Under
+  # `set -e` a bare `[[ -f ... ]] && mv` returns 1 in that case, which killed the script at the
+  # unconditional call below - after a successful flash, before the download-mode recovery.
   [[ -f "$STOCK" ]] && mv -f "$STOCK" "$APP"
+  return 0
 }
 
 if [[ "$PATCH" == "1" ]]; then
@@ -76,9 +80,12 @@ trap - EXIT
 # not re-sample the BOOT strap. If the strap was latched low (first flash after holding BOOT), the chip
 # sits in ROM download mode ("waiting for download") until a full system reset. Detect that and trigger a
 # watchdog reset from the ROM loader, which is a full reset. Otherwise leave the running app alone.
-ESPTOOL="$(ls -d "$HOME"/Library/Arduino15/packages/esp32/tools/esptool_py/*/esptool 2>/dev/null | tail -1)"
+# Both of the next two assignments are `|| true`-guarded: with `pipefail` set, a glob that matches
+# nothing (or a missing python3) makes the assignment itself fail and `set -e` would abort here, i.e.
+# exactly in the recovery step, right after a flash that worked.
+ESPTOOL="$(ls -d "$HOME"/Library/Arduino15/packages/esp32/tools/esptool_py/*/esptool 2>/dev/null | tail -1 || true)"
 sleep 2
-STATE="$(python3 - "$PORT" <<'PY'
+STATE="$(python3 - "$PORT" <<'PY' || true
 import sys, time
 try:
     import serial
@@ -94,6 +101,7 @@ except Exception:
     print("unknown")
 PY
 )"
+STATE="${STATE:-unknown}"
 if [[ "$STATE" == "download" && -x "$ESPTOOL" ]]; then
   "$ESPTOOL" --chip esp32c5 --port "$PORT" --before no-reset --after watchdog-reset run >/dev/null 2>&1 \
     && echo "Chip was stuck in download mode; reset into the new firmware." \

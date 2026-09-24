@@ -8,6 +8,10 @@ radio. This drives both boards at once and prints a verdict per experiment:
     C5   (target)  - bandwatch firmware, injects
     S3   (witness) - tools/witness/witness.ino, RX only, never transmits
 
+The suite selects the transmit path with `kickpath` for every experiment instead of relying on the
+default, because the default flipped from the internal slot to raw TX in 1.6 - and `kickfc`, which
+distinguishes the internal-path experiments, is read only by sendInternalKick().
+
 Usage:
     python3 tools/witness/verify.py                    # run the standard suite
     python3 tools/witness/verify.py --fc 80            # one shot: internal path with FC byte0 = 0x80
@@ -62,12 +66,20 @@ class Link:
 
 
 def observe(c5, w, secs, expect_src=None):
-    """Watch the witness for `secs`. Returns (mgmt frames matching expect_src, last stat)."""
+    """Watch the witness for `secs`. Returns (mgmt frames matching expect_src, last stat).
+
+    The stat line carries the RX-liveness counters, so ask for one explicitly at the end of the
+    window rather than hoping the witness's 5 s periodic stat lands inside it: observe() clears the
+    input buffer immediately before draining, so with a short window it usually does not, and the
+    liveness guard is then left with nothing to judge on.
+    """
     w.s.write(b"clear\n")
     time.sleep(0.3)
     w.s.reset_input_buffer()
     c5.s.reset_input_buffer()
     msgs = w.drain(secs)
+    w.s.write(b"stat\n")
+    msgs += w.drain(0.6)                       # counters accumulate since `clear`; last stat wins
     stat = next((m for m in reversed(msgs) if m.get("t") == "stat"), None)
     rx = [m for m in msgs if m.get("t") == "rx"]
     if expect_src:
@@ -75,18 +87,46 @@ def observe(c5, w, secs, expect_src=None):
     return rx, stat
 
 
+def rx_alive(hits, stat):
+    """Was the witness demonstrably receiving during the window?
+
+    This is what makes a result mean anything: silence from a deaf radio is not evidence. Ambient
+    traffic is the usual proof, but a quiet room may have none - and having heard the injected
+    frames themselves proves the receiver was awake just as well, so a hit counts too.
+    """
+    if hits:
+        return True
+    if not stat:
+        return False
+    return any(stat.get(k, 0) for k in ("mgmt", "data", "ctrl"))
+
+
 def verdict(label, hits, stat, want):
-    """want=True  -> we expect frames on air; want=False -> this is a baseline."""
-    alive = stat and stat.get("beacon", 0) > 0
-    ok = (len(hits) > 0) == want
-    mark = "PASS" if ok else "FAIL"
+    """want=True  -> we expect frames on air; want=False -> this is a baseline.
+
+    Printed mark and return value are the same judgement. They used to differ - the mark ignored
+    the liveness guard that the return value applied - so a run could print PASS and still be
+    counted as a miss in the summary.
+    """
+    met = (len(hits) > 0) == want
+    alive = rx_alive(hits, stat)
+    ok = met and alive
+    # Without a live receiver neither outcome is evidence, so that is INCONCLUSIVE rather than FAIL.
+    mark = "PASS" if ok else ("INCONCLUSIVE" if not alive else "FAIL")
     print(f"  [{mark}] {label}")
     print(f"         on air: {len(hits)} matching frame(s)" +
           (f", first={hits[0]['k']} seq={hits[0]['seq']} rssi={hits[0]['rssi']}" if hits else ""))
-    if stat:
-        print(f"         witness ch{stat['ch']} heard {stat['beacon']} ambient beacons "
-              f"({'RX alive' if alive else 'RX DEAD - result is meaningless'})")
-    return ok and (alive or not want)
+    if not stat:
+        print("         witness sent no stat line in this window - RX liveness unknown")
+    else:
+        state = ("RX alive" if stat.get("mgmt") or stat.get("data") or stat.get("ctrl")
+                 else "RX alive: no ambient traffic, but it heard the injection" if alive
+                 else "RX DEAD - result is meaningless")
+        print(f"         witness ch{stat.get('ch')} heard {stat.get('beacon', 0)} ambient beacons, "
+              f"{stat.get('mgmt', 0)} mgmt / {stat.get('data', 0)} data / "
+              f"{stat.get('ctrl', 0)} ctrl frames, {stat.get('dropped', 0)} ring-dropped "
+              f"({state})")
+    return ok
 
 
 def main():
@@ -111,15 +151,18 @@ def main():
         results = []
 
         if a.fc:
+            # kickfc is read only by sendInternalKick(), so the internal path has to be selected
+            # first or this measures the raw path with a hard-coded 0xC0 and the label is a lie.
+            c5.send("kickpath 1")
             c5.send(f"kickfc {a.fc}")
             c5.send(f"deauth {a.bssid}")
             hits, stat = observe(c5, w, a.secs, expect_src=a.bssid)
             results.append(verdict(f"internal path, FC=0x{a.fc} (expect frames on air)",
                                    hits, stat, want=True))
-            c5.send("deauth 0"); c5.send("kickfc c0")
+            c5.send("deauth 0"); c5.send("kickfc c0"); c5.send("kickpath 0")
         else:
             # 1. Baseline - nothing injected. Guards against counting ambient traffic as a hit.
-            hits, stat = observe(c5, w, 5, expect_src=a.bssid)
+            hits, stat = observe(c5, w, a.secs, expect_src=a.bssid)
             results.append(verdict("baseline, nothing injected (expect silence)",
                                    hits, stat, want=False))
 
@@ -132,25 +175,41 @@ def main():
 
             # 3. The question - internal descriptor path carrying a BEACON. If this radiates, the path
             #    works and only the deauth subtype is being dropped. If not, the path itself is dead.
+            #    `kickpath 1` is required: raw TX is the default since 1.6, and it ignores kickfc, so
+            #    without this both of the next two steps would be the same raw-path deauth.
+            c5.send("kickpath 1")
             c5.send("kickfc 80")
             c5.send(f"deauth {a.bssid}")
             hits, stat = observe(c5, w, a.secs, expect_src=a.bssid)
             results.append(verdict("internal path carrying a beacon (FC=0x80)", hits, stat, want=True))
             c5.send("deauth 0")
 
-            # 4. The attack itself.
+            # 4. The same path carrying the real deauth subtype.
             c5.send("kickfc c0")
             c5.send(f"deauth {a.bssid}")
             hits, stat = observe(c5, w, a.secs, expect_src=a.bssid)
             results.append(verdict("internal path carrying a deauth (FC=0xC0)", hits, stat, want=True))
             c5.send("deauth 0")
 
+            # 5. The shipping attack: raw esp_wifi_80211_tx. Needs the image patched with
+            #    tools/deauth/patch_raw_tx.py - on a stock build the driver rejects the subtype and
+            #    this is silence rather than a regression.
+            c5.send("kickpath 0")
+            c5.send(f"deauth {a.bssid}")
+            hits, stat = observe(c5, w, a.secs, expect_src=a.bssid)
+            results.append(verdict("raw path carrying a deauth (the shipping attack)",
+                                   hits, stat, want=True))
+            c5.send("deauth 0")
+
         print("\n" + "=" * 68)
-        print(f"{sum(1 for r in results if r)}/{len(results)} checks met expectation")
+        print(f"{sum(1 for r in results if r)}/{len(results)} checks passed "
+              f"(expectation met AND the witness proven to be receiving)")
         print("Anything the witness did not hear did not reach the air, whatever `da` says.")
     finally:
         try:
-            c5.send("deauth 0", 0.6); c5.send("txtest 0", 0.6); c5.send("kickfc c0", 0.6)
+            # kickpath back to the 1.6 default, or the board is left on the dead internal path.
+            c5.send("deauth 0", 0.6); c5.send("txtest 0", 0.6)
+            c5.send("kickfc c0", 0.6); c5.send("kickpath 0", 0.6)
         except Exception:
             pass
         c5.close(); w.close()

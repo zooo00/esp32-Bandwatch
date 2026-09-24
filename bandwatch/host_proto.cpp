@@ -352,8 +352,11 @@ void handleCommand(char* line) {
         char m[26];
         fmtMac(m, sizeof(m), deauth.bssid);
         const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;   // startDeauth parks before this ack, so ch is known
+        // "fc" is the FC byte0 now in force on the internal kick path: startDeauth resets the "kickfc"
+        // diagnostic override, and echoing it here is the only place the host can see that it happened.
         if (deauth.active)
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":[\"%s\",%d,0,0],\"park\":%d}\n", m, ch, ch);
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":[\"%s\",%d,0,0],\"park\":%d,\"fc\":\"0x%02x\"}\n",
+                          m, ch, ch, kickFc);
         else
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
         if (deauth.active && serialRoom(140))   // DIAGNOSTIC: hmac slot used by the internal path + its state byte (picks the DA/SA mapping)
@@ -371,14 +374,18 @@ void handleCommand(char* line) {
         fmtMac(a, sizeof(a), deauth.bssid);
         const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;   // startDeauthTargeted parks before this ack
         if (deauth.active)
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d}\n",
-                          c, a, deauth.targeted ? 1 : 0, ch);
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d,\"fc\":\"0x%02x\"}\n",
+                          c, a, deauth.targeted ? 1 : 0, ch, kickFc);
         else
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
     } else if (!strcmp(line, "kickfc")) {
         // DIAGNOSTIC (§11): override the FC byte0 the internal kick path writes. "kickfc 80" sends a
         // beacon down the deauth descriptor path, so an external monitor can tell whether that path
-        // radiates at all. "kickfc c0" restores the real deauth subtype.
+        // radiates at all. "kickfc c0" restores the real deauth subtype, and so does the next "deauth"
+        // or "dca" — the override never survives into an attack the operator did not ask it for.
+        // 0 is rejected rather than stored (FC 0x00 is an association request, not anything worth
+        // sending), which also makes a bare "kickfc" a query; either way the ack below is the value in
+        // force, so a refused write is visible rather than silent.
         const uint8_t v = static_cast<uint8_t>(strtoul(arg, nullptr, 16));
         if (v) kickFc = v;
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"kickfc\",\"fc\":\"0x%02x\"}\n", kickFc);

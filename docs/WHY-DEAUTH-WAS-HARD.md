@@ -90,6 +90,46 @@ It does not error. The build succeeds, the wrapper is silently dropped as unrefe
 comes out byte-identical. Tried without the witness, this looks exactly like "the patch worked but the
 attack still fails" — another release lost. The byte-identical size was the only tell.
 
+## What the fix actually is
+
+Worth spelling out, because "patched image" is easy to misread.
+
+Bandwatch is entirely custom firmware — but the compiled image is not only Bandwatch's code. The build
+links your code against Espressif's **precompiled, closed-source** Wi-Fi driver, `libnet80211.a`. It ships
+as machine code; there is no source for it, in the Arduino core or in ESP-IDF. The gate lives in there.
+
+So the fix cannot be a source change. There is no source to change, and the linker will not redirect the
+call. What is left is editing the **linked output** — the `.bin` — after compilation. The whole change:
+
+```
+your build:     1,881,040 bytes
+patched build:  1,881,040 bytes
+bytes that differ: 37
+  0x14f436   4 bytes  <- c.li a0,0 ; c.jr ra   (the patch)
+  0x1cb3af  33 bytes  <- checksum + SHA-256    (bookkeeping)
+```
+
+Four instruction bytes deep inside a vendor binary, plus the 33 bytes of integrity data that must be
+recomputed. Which is the next trap: an ESP32 app image carries a one-byte XOR checksum over segment data
+and an appended SHA-256. Patch without recomputing both and the second-stage bootloader refuses the image —
+`Checksum failed ... No bootable app partitions` — and the board reboot-loops until BOOT is held to force
+ROM download mode. Found the hard way, on the first attempt. `reseal_image()` handles it now, and its
+self-test is that resealing an *unpatched* image reproduces it byte-for-byte.
+
+Two deliberate choices around it:
+
+**The patcher edits the build output, not the toolchain copy of `libnet80211.a`.** Patching the toolchain
+would be easier and would survive rebuilds — and would silently disable that check for *every* ESP32
+project on the machine, including ones where nobody would think to look. Keeping it to the output means the
+blast radius is one firmware image.
+
+**`build.sh` applies it by default, with `--no-patch` to opt out.** It was a separate manual step at first,
+on the reasoning that disabling a vendor safety check should require typing something different. That was
+the wrong trade: the step is easy to forget, and a forgotten patch means silently testing the wrong
+firmware — exactly the class of mistake this whole episode was about. Default-on with an explicit escape
+hatch is the safer shape. The address is resolved from the ELF on every run, never hardcoded: it moved from
+`0x420ff3b0` to `0x420ff436` just from adding one diagnostic command.
+
 ## The lesson
 
 The bug was in the measurement, not the mechanism.

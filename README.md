@@ -167,13 +167,13 @@ matches the FATFS sector size), `kSdFlushMs` (5 s), `kSdBudgetUs` (8 ms of SD wr
 
 ## Known issues
 
-**The deauth attack needs a patched image** (resolved in 1.6; it did not work at all before that). A plain
-`./build.sh --upload` produces firmware whose deauth fails loudly with `ESP_ERR_INVALID_ARG` and transmits
-nothing. That is deliberate — opting in is an explicit, separate step:
+**The deauth attack needs a patched image** (resolved in 1.6; it did not work at all before that).
+`./build.sh --upload` applies the patch automatically and restores the stock `.bin` afterwards, so the build
+directory is never left in a patched state. `./build.sh --upload --no-patch` flashes the stock image, whose
+deauth fails loudly with `ESP_ERR_INVALID_ARG` and transmits nothing.
 
 ```
-./build.sh
-python3 tools/deauth/patch_raw_tx.py --flash --port /dev/cu.usbmodemXXXX
+./build.sh --upload                    # patched
 python3 tools/witness/verify.py        # confirm from the air
 ```
 
@@ -221,8 +221,8 @@ no client of ours has been observed dropping. PMF-enabled networks ignore these 
   `libnet80211`'s subtype gate, and the driver-internal slot path — which was the default, and which §11 had
   called "the real attack path" — radiates **nothing for any subtype**, so the §9 offsets are wrong rather than
   fragile. Raw TX is now the default (it fails loudly rather than silently), and
-  `tools/deauth/patch_raw_tx.py` patches out the gate as a post-build step, resealing the image checksum and
-  SHA-256. 289 deauth frames witnessed on air at −38 dBm. Also: `kickfc` and `kickpath` diagnostics, and
+  `tools/deauth/patch_raw_tx.py` patches out the gate between compile and flash (applied by `build.sh` by
+  default, `--no-patch` to opt out), resealing the image checksum and SHA-256. 289 deauth frames witnessed on air at −38 dBm. Also: `kickfc` and `kickpath` diagnostics, and
   `-Wl,--wrap` ruled out for good (the check and its caller share an object file, on every ESP32 family).
 
 - **1.5.5** — **Merge of the two 1.5.x lines.** 1.5.3 and 1.5.4 were developed from a checkout that predated

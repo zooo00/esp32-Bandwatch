@@ -28,7 +28,8 @@ serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
 ```
 ./setup.sh                      # once per machine
 ./build.sh                      # compile
-./build.sh --upload             # flash (stop the host tool first: it holds the serial port)
+./build.sh --upload             # flash, raw-TX patched (stop the host tool first: it holds the serial port)
+./build.sh --upload --no-patch  # flash the stock image (deauth then transmits nothing - rule 10)
 python3 host/bandwatch_host.py  # dashboard + pcap
 ```
 Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (see below).
@@ -68,8 +69,10 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
    `esp_wifi_80211_tx()` path was rejected by a subtype gate (`ESP_ERR_INVALID_ARG`), and the driver-internal
    slot path transmits **nothing for any subtype** - its §9 offsets are wrong - while reporting success. The
    raw path is now the default; `kickpath 1` selects the internal slot for offset work.
-   `tools/deauth/patch_raw_tx.py` is a **post-build** step that patches out the gate and reseals the image;
-   a plain `./build.sh --upload` is unpatched and fails loudly, which is the intended default.
+   `build.sh` applies `tools/deauth/patch_raw_tx.py` to the linked image by default (it patches out the gate
+   and reseals the checksum/SHA-256, then restores the stock `.bin`); `./build.sh --upload --no-patch` flashes
+   the stock image, whose deauth fails loudly with `ESP_ERR_INVALID_ARG`. The patch cannot live in the source
+   tree - it edits the vendor blob inside the linked output, so every build re-applies it.
    **The counters still prove nothing** - `deauthSent`/`da` is incremented unconditionally and `ic_tx_pkt()`
    returns `void`; `da` once reached 328 while the witness heard zero. Confirm on air with
    `tools/witness/verify.py`, never from a counter. Whether a real station actually drops is still untested.

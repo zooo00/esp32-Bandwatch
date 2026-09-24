@@ -361,14 +361,18 @@ real but orthogonal to this problem.
 ### Using it
 
 ```
-./build.sh
-python3 tools/deauth/patch_raw_tx.py --flash --port /dev/cu.usbmodemXXXX
+./build.sh --upload                      # patched by default
 python3 tools/witness/verify.py          # confirm from the air, never from the counters
 ```
 
-**The patch is a post-build step and is not in the source tree.** A plain `./build.sh --upload` produces an
-unpatched image whose deauth fails loudly with `ESP_ERR_INVALID_ARG` - that is the intended default for anyone
-who has not deliberately opted in.
+`build.sh` applies `tools/deauth/patch_raw_tx.py` to the linked image before flashing, then restores the
+stock `.bin` in the build directory so it is never left in a patched state. `--no-patch` flashes the stock
+image instead, whose deauth fails loudly with `ESP_ERR_INVALID_ARG` and transmits nothing.
+
+**The patch is not in the source tree and cannot be.** It edits `libnet80211.a`'s code inside the linked
+output, so every build must be patched again - which is why it is wired into `build.sh` rather than left as
+a step to remember. It edits the build output, not the toolchain's copy of the blob: patching that would
+disable the check for every ESP32 project on the machine.
 
 **The image must be resealed.** An app image carries a 1-byte XOR checksum over segment data plus an appended
 SHA-256. Patching without recomputing both makes the second-stage bootloader refuse the image

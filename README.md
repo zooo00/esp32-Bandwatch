@@ -182,7 +182,8 @@ python3 tools/witness/verify.py        # confirm from the air
 supporting *"beacon/probe request/probe response/action and non-QoS data"* only. The patcher overwrites that
 check's prologue with `return 0` in the linked image and reseals the checksum and SHA-256. `-Wl,--wrap` does
 **not** work — the check and its caller share an object file — and an ESP-IDF rewrite would not help, since the
-blob is identical there. See [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11.
+blob is identical there. See [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11, and
+[`docs/WHY-DEAUTH-WAS-HARD.md`](docs/WHY-DEAUTH-WAS-HARD.md) for why this took seven releases to find.
 
 This is rule-8 fragility squared: the patch is pinned to one exact core build, the address moves whenever the
 sketch changes (it is resolved from the ELF every run, never hardcoded), and disabling the check lets malformed

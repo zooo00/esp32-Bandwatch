@@ -301,6 +301,9 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
 
 ## 11. Deauth: why it did not work, and what fixed it (resolved 1.6)
 
+> A short post-mortem on why this took seven releases to find — and what to do differently next
+> time — is in [`WHY-DEAUTH-WAS-HARD.md`](WHY-DEAUTH-WAS-HARD.md).
+
 Settled with an external witness - a second ESP32 (S3) in monitor mode, `tools/witness/`. Every claim below
 is an observation from that witness, not an inference from the device's own counters.
 

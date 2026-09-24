@@ -19,10 +19,13 @@ wifi_interface_t txIface = WIFI_IF_STA;
 // 0x80 with "kickfc 80" to send a beacon down the SAME descriptor path: the witness then tells us whether
 // that path radiates at all, separating "internal path is dead" from "deauth subtype is dropped".
 volatile uint8_t kickFc = 0xC0;
-// DIAGNOSTIC (§11): the internal slot path is preferred whenever a slot exists, so the raw
-// esp_wifi_80211_tx fallback normally never runs and has never been measured on this silicon.
-// "kickpath 1" forces it so the witness can say what that path actually does.
-volatile bool forceRawKick = false;
+// Which transmit path the attack uses. The raw esp_wifi_80211_tx path is the default because it is
+// the only one measured to reach the air (§11): an external witness heard 331 deauth frames from it,
+// while the driver-internal slot path radiates nothing for ANY subtype - its §9 offsets are wrong.
+// The raw path needs the image patched with tools/deauth/patch_raw_tx.py; on an unpatched build it
+// fails loudly with ESP_ERR_INVALID_ARG and the `df` counter climbs, which beats the internal path's
+// silent fake success. "kickpath 1" selects the internal slot again, for work on those offsets.
+volatile bool useInternalKick = false;
 bool softApPoc = false;
 
 // DIAGNOSTIC build 2: the driver-internal deauth path. These live in libnet80211.a with no public
@@ -339,10 +342,10 @@ void serviceDeauth() {
         stopDeauth();
         return;
     }
-    if (!forceRawKick && *(const uint32_t*)deauth.slotPad) {   // driver-internal deauth with spoofed SA/BSSID (the normal case)
+    if (useInternalKick && *(const uint32_t*)deauth.slotPad) {   // driver-internal slot: dead, kept for §9 work
         for (int k = 0; k < 4; k++) sendInternalKick();
     } else {
-        for (int k = 0; k < 4; k++) sendKickFrame(deauth.bssid, false);   // no slot: fall back to raw [80] kicks
+        for (int k = 0; k < 4; k++) sendKickFrame(deauth.bssid, false);   // raw TX: the path that reaches the air
     }
     if (deauth.sent == 4 && serialRoom(160))   // one report after the first burst: home-channel flag + deferred-TX queue words (g_ic+436/+440)
         Serial.printf("{\"t\":\"log\",\"msg\":\"home %d q %lx/%lx\"}\n", chm_is_at_home_channel(),

@@ -202,14 +202,15 @@
   <section class="card hunt" id="deauthCard" hidden>
     <div>
       <div class="note">Deauthing</div>
-      <div class="big"><span id="deauthSent">0</span><small>frames sent</small></div>
+      <div class="big" title="Frames handed to the Wi‑Fi driver. The driver call returns no status, so this is not evidence that anything was transmitted."><span id="deauthSent">0</span><small>frames queued</small></div>
       <div class="meter"><div id="deauthMeter" style="width:100%;background:var(--critical)"></div></div>
       <div class="note" id="deauthCh"></div>
     </div>
     <div>
-      <div class="meta">spoofing <b id="deauthMac"></b><span id="deauthFail"></span><br><span id="deauthHint"></span></div>
+      <div class="meta">spoofing <b id="deauthMac"></b><span id="deauthFail" style="color:var(--warning)"></span><br><span id="deauthHint"></span></div>
+      <div class="note" id="deauthWarn" style="color:var(--warning);margin-top:4px" hidden></div>
       <div style="margin-top:8px"><button class="small stop" id="deauthStop">Stop deauth</button>
-        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel. In broadcast mode, every client of that network drops and usually reconnects (run a capture to grab WPA2 handshakes). In targeted mode, only one specific client is disconnected. Clients with PMF (802.11w) enabled ignore it.</span></div>
+        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel. In broadcast mode, every client of that network drops and usually reconnects (run a capture to grab WPA2 handshakes). In targeted mode, only one specific client is disconnected. Clients with PMF (802.11w) enabled ignore it. These counters only describe what the firmware handed to the driver — neither a rising count nor a zero reject count proves a frame reached the air; only a second radio in monitor mode (<code>tools/witness/</code>) can confirm that.</span></div>
     </div>
   </section>
 
@@ -516,7 +517,14 @@
     $('#deauthMac').textContent = k.targeted ? `${k.mac} (one station)` : `${k.mac} (all stations)`;
     $('#deauthSent').textContent = fmt(k.sent);
     $('#deauthCh').textContent = k.ch ? `parked on ch ${k.ch} (${band(k.ch)})` : 'channel unknown — hopping';
-    $('#deauthFail').textContent = k.fail ? ` (${fmt(k.fail)} failed)` : '';
+    // df counts frames the driver *rejected*. Since 1.6 the raw TX path is the default and it returns
+    // ESP_ERR_INVALID_ARG unless the image was patched by tools/deauth/patch_raw_tx.py, so a climbing
+    // fail count almost always means "unpatched image, nothing is going out". Say so, rather than "failed".
+    $('#deauthFail').textContent = k.fail ? ` · ${fmt(k.fail)} rejected by the driver` : '';
+    $('#deauthWarn').hidden = !k.fail;
+    if (k.fail) $('#deauthWarn').textContent = 'The driver is rejecting the raw transmit — almost always an '
+      + 'unpatched image, in which case nothing is being transmitted. Re-flash with ./build.sh --upload, '
+      + 'which applies tools/deauth/patch_raw_tx.py by default.';
     // The AP carries the SSID and security, so describe the *AP* in both modes. In targeted mode k.mac is
     // the client, which has neither - 1.5.3 looked it up there and always rendered an empty hint.
     const apMac = k.targeted ? k.ap_bssid : k.mac;

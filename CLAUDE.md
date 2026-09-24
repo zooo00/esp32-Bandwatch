@@ -116,7 +116,9 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 ## Testing without the LCD
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
-`dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`, `reboot`.
+`dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`,
+`snap <32..1600>` (capture snap length), `blescan active|passive|auto` (BLE scan policy; default `auto` stays
+passive and opens a short active window when a new scannable device has no name), `reboot`.
 microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>` (no RTC —
 the host sends this on connect; it dates the pcap records and names the files, in UTC).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with

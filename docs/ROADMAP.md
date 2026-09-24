@@ -1,6 +1,6 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.5.5**.
+Planned work, open questions and known gaps. Current release: **v1.6**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
@@ -118,20 +118,30 @@ anything about the radio.
 - **Device names are environment-capped, not code-capped.** Measured: 31 distinct advertisers, 3 ever
   broadcast a name. Most nearby traffic is Apple continuity and non-connectable beacons that never answer a
   `SCAN_REQ`. No scanning strategy changes that.
+- **Whether a deauth actually disconnects a real station is untested.** 1.6 established that correct deauth
+  frames reach the air at the target; it did not establish that any particular client honours them. That
+  needs a device you own, associated to an AP you own. Unprotected-frame handling varies by supplicant, and
+  PMF-enabled networks ignore these frames by design. [`DEVELOPER.md`](DEVELOPER.md) §11.
 
 ---
 
 ## Blocked
 
-- **Deauth does not work and the root cause is unidentified.** PMF, DFS and promiscuous mode are all ruled
-  out by measurement, and the frame is now a byte-correct `0xC0 0x00` deauthentication. Whether anything
-  radiates at all is *still unverified in both directions* — the only witness available during testing was a
-  macOS Wi-Fi scan, and macOS redacts SSIDs, so the `txtest` beacon self-test could not be read.
-  **Needs a second radio** (another ESP32 in promiscuous mode, or a USB adapter in monitor mode). Everything
-  else here is guesswork until that exists. Full investigation log in
-  [`DEVELOPER.md`](DEVELOPER.md) §11.
-- **SoftAP injection PoC is inconclusive**, not negative — its own state handling is incomplete. Do not cite
-  it as evidence either way.
+Nothing, as of 1.6. Both entries that stood here are resolved; they are kept struck through because the
+conclusions reversed.
+
+- ~~**Deauth does not work and the root cause is unidentified.**~~ Resolved in 1.6 by building the second
+  radio this entry asked for: `tools/witness/` is an ESP32-S3 in monitor mode plus `verify.py`, and every
+  claim about the attack is now an observation from it rather than from the device's own counters. Two
+  unrelated faults had been hiding each other — the raw `esp_wifi_80211_tx()` path was rejected before TX by
+  a subtype gate inside the closed-source `libnet80211.a` (`ESP_ERR_INVALID_ARG`, 304 of 304), and the
+  driver-internal slot path radiates nothing for *any* subtype, so the §9 offsets are wrong rather than
+  merely fragile. Raw TX is now the default and `tools/deauth/patch_raw_tx.py` patches the gate out between
+  compile and flash (`build.sh` does this by default; `--no-patch` opts out). 289 deauth frames witnessed on
+  air at -38 dBm. Full log in [`DEVELOPER.md`](DEVELOPER.md) §11.
+- ~~**SoftAP injection PoC is inconclusive**, not negative.~~ Its premise was disproven in 1.6: raw TX does
+  radiate from an unassociated STA — `txtest` injects from `WIFI_IF_STA` with no SoftAP up and was witnessed
+  at -45 dBm. The PoC is not a route to anything and its state handling is still incomplete.
 
 ---
 

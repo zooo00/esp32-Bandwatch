@@ -43,8 +43,8 @@ USB: the board's USB-C goes to the chip's native **USB-Serial-JTAG** (no externa
   version is **pinned** there (`ESP32_CORE_VERSION`, default 3.3.11) because of the deauth offsets in §9.
   On arm64 it also installs universal-ctags unconditionally: `build.sh` always routes ctags through
   `tools/ctags/ctags`, which fails if universal-ctags is missing, whether or not Rosetta is available.
-- Reference build (core 3.3.11, lvgl 9.3.0, **v1.5.4**): 0 errors, 0 warnings, **1 876 475 B flash (59 % of the
-  3 MB app partition)** and **79 584 B static RAM (24 %)** — that static figure is ~400 B under the ~80 KB
+- Reference build (core 3.3.11, lvgl 9.3.0, **v1.6**): 0 errors, 0 warnings, **1 880 889 B flash (59 % of the
+  3 MB app partition)** and **79 592 B static RAM (24 %)** — that static figure is ~400 B under the ~80 KB
   ceiling in `CLAUDE.md` rule 4, so watch it when adding globals, and see §17 for how `apSuffix` was added
   without moving it at all.
 - The core's `sdkconfig` is fixed (prebuilt). Relevant values: `CONFIG_SOC_WIFI_SUPPORT_5G=y`,

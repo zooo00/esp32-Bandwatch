@@ -110,7 +110,9 @@ lines. Useful commands: `band 5g|2.4g|both|ble|154`, `park <ch>`, `cap 1/0`, `hu
 microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>` (no RTC —
 the host sends this on connect; it dates the pcap records and names the files, in UTC).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
-SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `softap <ch>|0`
+SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `kickfc <hex>` (FC byte0 the internal kick path writes — `kickfc 80` sends a
+beacon down the deauth descriptor path), `kickpath 0|1` (1 forces the raw `esp_wifi_80211_tx` fallback
+instead of the internal slot), `softap <ch>|0`
 (**proof of concept**: open SoftAP on that channel, injects from `WIFI_IF_AP`; tears down sniffing while up,
 and its state handling is incomplete — do not build on it as-is).
 Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode

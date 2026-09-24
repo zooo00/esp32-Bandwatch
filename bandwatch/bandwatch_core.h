@@ -289,6 +289,8 @@ extern SdSink sd;
 extern volatile bool txTestActive;
 extern uint32_t txTestSent, txTestFail;
 extern wifi_interface_t txIface;
+extern volatile uint8_t kickFc;      // DIAGNOSTIC: FC byte0 on the internal kick path ("kickfc <hex>")
+extern volatile bool forceRawKick;   // DIAGNOSTIC: force the esp_wifi_80211_tx path ("kickpath 1")
 extern bool softApPoc;
 
 void fmtMac(char* out, size_t n, const uint8_t* m);

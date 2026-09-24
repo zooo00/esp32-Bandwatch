@@ -375,6 +375,19 @@ void handleCommand(char* line) {
                           c, a, deauth.targeted ? 1 : 0, ch);
         else
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
+    } else if (!strcmp(line, "kickfc")) {
+        // DIAGNOSTIC (§11): override the FC byte0 the internal kick path writes. "kickfc 80" sends a
+        // beacon down the deauth descriptor path, so an external monitor can tell whether that path
+        // radiates at all. "kickfc c0" restores the real deauth subtype.
+        const uint8_t v = static_cast<uint8_t>(strtoul(arg, nullptr, 16));
+        if (v) kickFc = v;
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"kickfc\",\"fc\":\"0x%02x\"}\n", kickFc);
+    } else if (!strcmp(line, "kickpath")) {
+        // DIAGNOSTIC (§11): 1 = force the raw esp_wifi_80211_tx fallback, 0 = normal (internal slot
+        // when one exists). The internal path is preferred whenever a slot is up, so the raw path had
+        // never actually been exercised on this silicon.
+        forceRawKick = atoi(arg) != 0;
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"kickpath\",\"raw\":%d}\n", forceRawKick ? 1 : 0);
     } else if (!strcmp(line, "txtest")) {
         // 0 = off, 1 = beacon with promiscuous RX still on, 2 = beacon with promiscuous RX turned off.
         // Mode 2 tests whether promiscuous mode is what stops the PHY from transmitting.

@@ -127,7 +127,7 @@ void IRAM_ATTR parseBeaconIes(WifiDev& d, const uint8_t* payload, uint16_t sigLe
 // sighting: it must never evict a device we have actually heard, and it never overwrites signal data,
 // because the RSSI belongs to whoever sent the frame, not to this device.
 void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, const uint8_t* payload,
-                               uint16_t sigLen, bool destOnly = false) {
+                               uint16_t sigLen, bool destOnly = false, const uint8_t* bssid = nullptr) {
     const uint32_t now = millis();
     const bool isBeacon = (fc0 == 0x80) || (fc0 == 0x50);   // beacon / probe response
     portENTER_CRITICAL_ISR(&g_devMux);
@@ -146,6 +146,10 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
         if (destOnly) d.flags |= 4;
     }
     if (!destOnly) d.flags &= ~4;   // heard it transmit: upgrade to tier 2
+    // Association, when the DS bits made it unambiguous. Never cleared once learned: a station that goes
+    // quiet is still on that BSS, and a roam overwrites it on the next frame. Skipped when the BSSID is
+    // this device itself, which is just an AP talking on its own BSS.
+    if (bssid && !macEq(bssid, mac)) { d.apSuffix[0] = bssid[3]; d.apSuffix[1] = bssid[4]; d.apSuffix[2] = bssid[5]; }
     if (destOnly) {
         if (d.frames < 65535) d.frames++;
         d.lastMs = now;
@@ -200,11 +204,19 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     portEXIT_CRITICAL_ISR(&g_accumMux);
 
     if (hasAddr2 && type != WIFI_PKT_CTRL) {
-        trackWifiDevice(ipkt->hdr.addr2, pkt->rx_ctrl.rssi, pkt->payload[0], pkt->payload, sigLen);
+        // Which address is the BSSID depends on the DS bits (802.11-2020 9.3.2.1, table 9-26). Only the two
+        // unambiguous single-hop cases are used; ToDS+FromDS (WDS/mesh) has no station-to-BSS meaning here,
+        // and ToDS=FromDS=0 puts the BSSID in addr3, which is the AP's own address for the beacons that
+        // dominate that case. txBssid = the transmitter's BSS, rxBssid = the addr1 device's BSS.
+        const uint8_t fc1 = pkt->payload[1];
+        const bool toDs = fc1 & 0x01, fromDs = fc1 & 0x02;
+        const uint8_t* txBssid = (toDs && !fromDs) ? ipkt->hdr.addr1 : nullptr;   // station -> AP: addr1 is the BSSID
+        const uint8_t* rxBssid = (!toDs && fromDs) ? ipkt->hdr.addr2 : nullptr;   // AP -> station: addr2 is the BSSID
+        trackWifiDevice(ipkt->hdr.addr2, pkt->rx_ctrl.rssi, pkt->payload[0], pkt->payload, sigLen, false, txBssid);
         // Receiver-side sighting: a device that never transmits during our dwell is still named as addr1
         // by whoever talks to it. Unicast only - broadcast/multicast destinations are not devices.
         if (trackAddr1 && !(ipkt->hdr.addr1[0] & 0x01) && !macEq(ipkt->hdr.addr1, ipkt->hdr.addr2))
-            trackWifiDevice(ipkt->hdr.addr1, pkt->rx_ctrl.rssi, 0, pkt->payload, sigLen, true);
+            trackWifiDevice(ipkt->hdr.addr1, pkt->rx_ctrl.rssi, 0, pkt->payload, sigLen, true, rxBssid);
     }
 
     uint8_t nh;

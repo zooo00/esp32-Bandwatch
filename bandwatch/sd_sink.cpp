@@ -111,10 +111,15 @@ bool sdOpenCapture() {
                  is154 ? "802154" : isBle ? "ble" : "wifi", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     } else {            // no clock: fall back to a counter so files never collide
-        for (int i = 1; i < 10000; i++) {
+        // Resume from the last index used this session instead of rescanning from 1: on a card with many
+        // captures that was up to 10000 FATFS lookups, all of them on the loop task that also hops channels.
+        static int nextSeq = 1;
+        int i = nextSeq;
+        for (; i < 10000; i++) {
             snprintf(sd.path, sizeof(sd.path), "/bandwatch-%s-%04d.pcap", is154 ? "802154" : isBle ? "ble" : "wifi", i);
             if (!SD.exists(sd.path)) break;
         }
+        nextSeq = i + 1;
     }
     sd.file = SD.open(sd.path, FILE_WRITE);
     if (!sd.file) { free(sd.buf); sd.buf = nullptr; return false; }

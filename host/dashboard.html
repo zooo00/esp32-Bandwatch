@@ -46,6 +46,20 @@
   button.ghost { font: inherit; padding: 3px 10px; font-size: 12px; border-radius: 8px; border: 1px solid var(--border); background: transparent; color: var(--ink-2); cursor: pointer; }
   /* .capinfo shares the .control class, which is display:grid - that puts the recording dot and the
      bold counter on separate rows. Force normal inline flow. */
+  /* Targeted-deauth ("dca") client picker: a gear that reveals one button per station we have seen
+     associated with this AP. Both classes were referenced by the 1.5.3 markup but never styled, so even
+     when the buttons were emitted they were invisible. */
+  .deauth-menu { position: relative; display: inline-block; }
+  .deauth-dropdown { cursor: pointer; padding: 0 5px; color: var(--ink-2); user-select: none; font-size: 13px; }
+  .deauth-dropdown:hover { color: var(--ink); }
+  .deauth-menu.open .dca-list { display: block; }
+  .dca-list { display: none; position: absolute; right: 0; top: 100%; z-index: 20; margin-top: 4px; padding: 5px;
+              min-width: 190px; background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+              box-shadow: 0 6px 20px rgba(0,0,0,.35); text-align: left; }
+  .dca-list .hdr { font-size: 11px; color: var(--muted); padding: 2px 6px 5px; }
+  button.tiny { display: block; width: 100%; text-align: left; font: inherit; font-size: 12px; padding: 4px 6px;
+                border: 0; border-radius: 6px; background: transparent; color: var(--ink); cursor: pointer; }
+  button.tiny:hover { background: var(--grid); }
   .surv { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600;
           background: var(--critical); color: #fff; margin-right: 6px; }
   .surv.t1 { background: transparent; color: var(--warning); border: 1px solid var(--warning); font-weight: 500; }
@@ -195,7 +209,7 @@
     <div>
       <div class="meta">spoofing <b id="deauthMac"></b><span id="deauthFail"></span><br><span id="deauthHint"></span></div>
       <div style="margin-top:8px"><button class="small stop" id="deauthStop">Stop deauth</button>
-        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel, so every client of that network drops and usually reconnects. Run a capture at the same time to grab WPA2 handshakes; clients with PMF (802.11w) enabled ignore it.</span></div>
+        <span class="note">Broadcasts deauth + disassoc frames on the AP's channel. In broadcast mode, every client of that network drops and usually reconnects (run a capture to grab WPA2 handshakes). In targeted mode, only one specific client is disconnected. Clients with PMF (802.11w) enabled ignore it.</span></div>
     </div>
   </section>
 
@@ -311,7 +325,7 @@
   }
   // The state poll is only 1 Hz and starting an SD capture has to mount the card, so latch a pending
   // label on the button immediately; renderControls leaves it alone until the device confirms.
-  const pending = { cap: 0, sd: 0 };
+  const pending = { cap: 0, sd: 0, deauth: 0 };
   const prev = {};   // last seen on/off state per sink, so transitions can be announced once
   function armPending(which, btn, label) {
     pending[which] = Date.now();
@@ -338,12 +352,38 @@
     post({ cmd: 'sdcap', value: on });
   });
   $('#huntStop').addEventListener('click', () => post({ cmd: 'hunt', mac: null }));
-  $('#deauthStop').addEventListener('click', () => post({ cmd: 'deauth', mac: null }));
+  $('#deauthStop').addEventListener('click', () => { armPending('deauth', $('#deauthStop'), 'Stopping…'); post({ cmd: 'deauth', mac: null }); });
   $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (!b) return; tab = b.dataset.tab; document.querySelectorAll('#tabs button[data-tab]').forEach(x => x.classList.toggle('active', x === b)); ['overview', 'wifi', 'ble', 'zig'].forEach(t => $('#tab-' + t).hidden = t !== tab); if (state) render(state); });
   $('#pauseBtn').addEventListener('click', () => { paused = !paused; $('#pauseBtn').textContent = paused ? 'Resume updates' : 'Pause updates'; $('#pauseBtn').classList.toggle('stop', paused); if (!paused && state) render(state); });
   document.addEventListener('keydown', (e) => { if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('#pauseBtn').click(); } });
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
-  document.addEventListener('click', (e) => { const k = e.target.closest('button[data-deauth]'); if (k) post({ cmd: 'deauth', mac: k.dataset.deauth || null }); });
+  // Deauth button: broadcast mode (kick every station on an AP)
+  document.addEventListener('click', (e) => {
+    const k = e.target.closest('button[data-deauth]');
+    if (!k) return;
+    const mac = k.dataset.deauth;
+    armPending('deauth', k, mac ? 'Starting…' : 'Stopping…');
+    post({ cmd: 'deauth', mac: mac || null });
+  });
+  // The gear that reveals the client picker. One menu open at a time; a click anywhere else closes it.
+  document.addEventListener('click', (e) => {
+    const g = e.target.closest('.deauth-dropdown');
+    const open = g && g.parentElement;
+    document.querySelectorAll('.deauth-menu.open').forEach(m => { if (m !== open) m.classList.remove('open'); });
+    if (open) { open.classList.toggle('open'); e.stopPropagation(); }
+  });
+  // dca: targeted deauth to one station. data-dca is "<client mac> <ap bssid>", colons intact.
+  document.addEventListener('click', (e) => {
+    const k = e.target.closest('button[data-dca]');
+    if (!k) return;
+    const [client, ap] = k.dataset.dca.split(' ');
+    if (!client || !ap) return;
+    const menu = k.closest('.deauth-menu');
+    if (menu) menu.classList.remove('open');
+    armPending('deauth', k, 'Starting…');
+    toast('Targeted deauth', `disconnecting ${client} from ${ap}`);
+    post({ cmd: 'dca', client_mac: client, ap_bssid: ap });
+  });
   for (const t of ['wifi', 'ble', 'zig']) {
     const tbl = $('#' + t + 'Tbl');
     tbl.addEventListener('mouseenter', () => frozen[t] = true);
@@ -465,13 +505,28 @@
   }
 
   function renderDeauth(s) {
-    const k = s.deauth; $('#deauthCard').hidden = !k; if (!k) return;
-    $('#deauthMac').textContent = k.mac;
+    const k = s.deauth;
+    // Release the click latch as soon as the device's own state agrees with what was asked for (or after
+    // 6 s, if the command was lost). The table buttons are re-rendered every poll, so the latch lives here
+    // rather than on the element.
+    if (pending.deauth && (Date.now() - pending.deauth > 6000 || !!k !== prev.deauthOn)) pending.deauth = 0;
+    prev.deauthOn = !!k;
+    $('#deauthCard').hidden = !k;
+    if (!k) return;
+    $('#deauthMac').textContent = k.targeted ? `${k.mac} (one station)` : `${k.mac} (all stations)`;
     $('#deauthSent').textContent = fmt(k.sent);
     $('#deauthCh').textContent = k.ch ? `parked on ch ${k.ch} (${band(k.ch)})` : 'channel unknown — hopping';
     $('#deauthFail').textContent = k.fail ? ` (${fmt(k.fail)} failed)` : '';
-    const d = (s.wifi_devs || []).find(x => x.mac === k.mac);
-    $('#deauthHint').textContent = [d && (d.ssid || '(hidden SSID)'), d && d.sec].filter(Boolean).join(' · ');
+    // The AP carries the SSID and security, so describe the *AP* in both modes. In targeted mode k.mac is
+    // the client, which has neither - 1.5.3 looked it up there and always rendered an empty hint.
+    const apMac = k.targeted ? k.ap_bssid : k.mac;
+    const ap = (s.wifi_devs || []).find(x => x.mac === apMac);
+    let hint = [ap && (ap.ssid || '(hidden SSID)'), ap && ap.sec].filter(Boolean).join(' · ');
+    if (k.targeted) {
+      const c = (s.wifi_devs || []).find(x => x.mac === k.mac);
+      hint = [hint || apMac, `target ${k.mac}${c && c.vendor ? ` (${c.vendor})` : ''}`].filter(Boolean).join(' · ');
+    }
+    $('#deauthHint').textContent = hint;
   }
 
   function renderTiles(s) {
@@ -595,8 +650,39 @@
     }
     if (!freeze) for (const [k, tr] of existing) if (!seen.has(k)) tr.remove();
   }
+  // "on <ssid>" for a station whose BSS the device worked out. Association comes from the DS bits of a
+  // data frame, joined against an AP we have also heard - see docs/DEVELOPER.md section 17.
+  function apOf(d, s) {
+    if (!d.parent) return '';
+    const ap = (s.wifi_devs || []).find(x => x.mac === d.parent);
+    const name = (ap && ap.ssid) || d.parent;
+    return ` · on <span title="${esc(d.parent)}">${esc(name)}</span>`;
+  }
   function huntBtn(mac, ch, s) { const on = s.hunt && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : mac}" ${ch ? `data-ch="${ch}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
-  function deauthBtn(d, s) { const on = s.deauth && s.deauth.mac === d.mac; return `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : d.mac}" title="Spoof this BSSID and kick its stations">${on ? 'Stop' : 'Deauth'}</button>`; }
+  function deauthBtn(d, s) {
+    // "Stop" belongs on whichever row the running attack is pinned to: in targeted mode the device
+    // reports the client as .mac and the AP as .ap_bssid, so an AP row matches on either.
+    const k = s.deauth;
+    const on = !!k && (k.mac === d.mac || k.ap_bssid === d.mac);
+    const title = d.ap ? 'Spoof this BSSID and kick every station on it' : 'Deauth';
+    let btn = pending.deauth
+      ? `<button class="small" disabled>…</button>`
+      : `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : d.mac}" title="${esc(title)}">${on ? 'Stop' : 'Deauth'}</button>`;
+    // Stations the device has heard on this BSS (host/bandwatch_host.py resolves .parent from the 3-byte
+    // association suffix the firmware reports). No clients seen -> no picker, which is the honest state.
+    const clients = d.ap ? (s.wifi_devs || []).filter(x => x.parent === d.mac && x.mac !== d.mac) : [];
+    if (clients.length) {
+      // MACs keep their colons here: the firmware's parseMac() only accepts "aa:bb:.." or "aa-bb-..",
+      // and 1.5.3 stripped them, so every targeted kick was parsed as garbage and silently stopped
+      // the attack instead of starting one.
+      const items = clients.slice(0, 12).map(c =>
+        `<button class="tiny" data-dca="${c.mac} ${d.mac}" title="Disconnect just this station">${c.mac}` +
+        `${c.vendor ? ` <span class="sub">${esc(c.vendor)}</span>` : ''}</button>`).join('');
+      btn += `<span class="deauth-menu"><span class="deauth-dropdown" title="Kick one specific station">⚙</span>` +
+             `<span class="dca-list"><div class="hdr">${clients.length} station${clients.length > 1 ? 's' : ''} on this BSS</div>${items}</span></span>`;
+    }
+    return btn;
+  }
 
   function renderWifi(s) {
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
@@ -607,7 +693,7 @@
     $('#wifiNote').textContent = `${rows.length} shown · ${s.wifi_devs.length} known · vendors: ${s.oui_source}`;
     const survBadge = (d) => d.surv
       ? `<span class="surv${d.tier === 1 ? ' t1' : ''}" title="${esc(d.surv_kind)} — OUI match${d.tier === 1 ? ', seen only as a frame destination (weaker evidence)' : ''}">${esc(d.surv)}${d.tier === 1 ? ' ?' : ''}</span>` : '';
-    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}</span>`}</td>
+    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}</td>
       <td class="l mono">${d.mac}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? d.bw + ' MHz' : ''}</td><td>${d.ch}</td>
       <td>${d.util != null ? d.util + ' %' : ''}</td><td>${d.stations != null && d.ap ? d.stations : ''}</td>

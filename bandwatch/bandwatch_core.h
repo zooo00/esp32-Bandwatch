@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.5.2";
+constexpr const char* kVersion = "1.5.5";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -163,6 +163,12 @@ struct Hunt {
 // network drops (they usually reconnect — with capture running you can grab the EAPOL handshakes).
 struct Deauth {
     uint8_t bssid[6] = {};
+    // Targeted mode ("dca"): kick one named station instead of every client of the BSS. targetMac is the
+    // station, bssid stays the AP we spoof. The flag is explicit rather than inferred from targetMac being
+    // non-zero, because a real station MAC may legitimately start 00:00 (the IANA 00:00:5E range, for one)
+    // and a first-two-bytes test silently demoted such a target back to a broadcast kick.
+    uint8_t targetMac[6] = {};
+    volatile bool targeted = false;
     volatile bool active = false;
     bool parked = false;          // like hunt.parked: we hold the park on the target's channel
     volatile uint32_t sent = 0, txFail = 0;
@@ -328,6 +334,7 @@ void sdServiceFlush();                  // fsync cadence, called from drainCaptu
 
 // Deauth + diagnostics (deauth_diag.cpp).
 void startDeauth(const uint8_t* mac);
+void startDeauthTargeted(const uint8_t* clientMac, const uint8_t* apBssid);
 void stopDeauth();
 void serviceDeauth();
 

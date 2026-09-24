@@ -49,10 +49,18 @@ void printHunt() {
 // [bssid, park channel (0 if hopping), frames sent, frames failed]
 void printDeauth() {
     if (!deauth.active) { Serial.print("\"deauth\":null"); return; }
+    const bool targeted = deauth.targeted;   // read once: the attack can stop between the two uses below
     char mac[26];
-    fmtMac(mac, sizeof(mac), deauth.bssid);
-    Serial.printf("\"deauth\":[\"%s\",%d,%lu,%lu]", mac, parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
-                  static_cast<unsigned long>(deauth.sent), static_cast<unsigned long>(deauth.txFail));
+    fmtMac(mac, sizeof(mac), targeted ? deauth.targetMac : deauth.bssid);
+    if (targeted) {
+        char ap[26];
+        fmtMac(ap, sizeof(ap), deauth.bssid);
+        Serial.printf("\"deauth\":[\"%s\",\"%s\",1,%lu,%lu]", mac, ap,
+                      static_cast<unsigned long>(deauth.sent), static_cast<unsigned long>(deauth.txFail));
+    } else {
+        Serial.printf("\"deauth\":[\"%s\",%d,%lu,%lu]", mac, parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
+                      static_cast<unsigned long>(deauth.sent), static_cast<unsigned long>(deauth.txFail));
+    }
 }
 
 } // namespace
@@ -70,7 +78,10 @@ void huntIdText(char* out, size_t n) {
 }
 
 void sendHello() {
-    if (!serialRoom(780)) return;
+    // 900, not 780: "both" mode (38 channels) + an active hunt + a targeted deauth + an SD path summed to
+    // ~790, and a line that passes the check and then overruns is truncated mid-JSON, which is exactly what
+    // the drop-whole-lines rule exists to prevent.
+    if (!serialRoom(900)) return;
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(kDwellMs), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
@@ -178,7 +189,7 @@ void sendDevices() {
     if (wifiMode()) {
         WifiDev* snap = devSnap.w;
         const int n = snapshotWifi(snap, kWifiDevSlots, kDevFreshMs);
-        if (!serialRoom(40 + n * 118)) return;
+        if (!serialRoom(40 + n * 126)) return;   // +8: the association suffix field added in 1.5.5
         Serial.print("{\"t\":\"w\",\"dev\":[");
         for (int i = 0; i < n; i++) {
             fmtMac(mac, sizeof(mac), snap[i].mac);
@@ -188,7 +199,12 @@ void sendDevices() {
             printJsonStr(d.ssid);
             Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
             printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
-            Serial.printf(",%u]", d.surv);
+            // Association suffix as "aabbcc", or "" when this device was never seen on a BSS. The host joins
+            // it against the APs it already knows to recover the full BSSID (see docs/DEVELOPER.md §17).
+            if (d.apSuffix[0] || d.apSuffix[1] || d.apSuffix[2])
+                Serial.printf(",%u,\"%02x%02x%02x\"]", d.surv, d.apSuffix[0], d.apSuffix[1], d.apSuffix[2]);
+            else
+                Serial.printf(",%u,\"\"]", d.surv);
         }
         Serial.print("]}\n");
     } else {
@@ -229,7 +245,8 @@ bool parseKey154(const char* s, uint8_t* key) {
 
 void handleCommand(char* line) {
     // Commands: "cap 0|1", "snap N", "park <ch>|0", "band 5g|2.4g|both|ble", "hunt <mac> [ch]" | "hunt 0",
-    //           "deauth <bssid>" | "deauth 0" (Wi-Fi modes only), "info"
+    //           "deauth <bssid>" | "deauth 0" (Wi-Fi modes only, kicks every station),
+    //           "dca <client_mac> <ap_bssid>" | "dca 0" (targeted: one station), "info"
     char* sp = strchr(line, ' ');
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
@@ -341,6 +358,23 @@ void handleCommand(char* line) {
             Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
         if (deauth.active && serialRoom(140))   // DIAGNOSTIC: hmac slot used by the internal path + its state byte (picks the DA/SA mapping)
             Serial.printf("{\"t\":\"log\",\"msg\":\"deauth slot %lx hstate %d\"}\n", *(const uint32_t*)deauth.slotPad, deauth.hstate);
+    } else if (!strcmp(line, "dca")) {
+        // "dca <client_mac> <ap_bssid>": kick one station off one AP. Anything unparseable, a missing second
+        // argument or a non-Wi-Fi mode stops the attack rather than starting a broadcast one by accident.
+        uint8_t client[6], ap[6];
+        char* sp2 = strchr(arg, ' ');
+        if (sp2) *sp2 = 0;
+        if (wifiMode() && sp2 && parseMac(arg, client) && parseMac(sp2 + 1, ap)) startDeauthTargeted(client, ap);
+        else stopDeauth();
+        char c[26], a[26];
+        fmtMac(c, sizeof(c), deauth.targeted ? deauth.targetMac : deauth.bssid);
+        fmtMac(a, sizeof(a), deauth.bssid);
+        const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;   // startDeauthTargeted parks before this ack
+        if (deauth.active)
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d}\n",
+                          c, a, deauth.targeted ? 1 : 0, ch);
+        else
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
     } else if (!strcmp(line, "txtest")) {
         // 0 = off, 1 = beacon with promiscuous RX still on, 2 = beacon with promiscuous RX turned off.
         // Mode 2 tests whether promiscuous mode is what stops the PHY from transmitting.

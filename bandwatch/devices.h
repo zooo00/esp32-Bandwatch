@@ -8,28 +8,37 @@ constexpr int kWifiDevSlots = 64;
 constexpr int kBleDevSlots = 48;
 constexpr int kDevProbe = 8;
 
+// Field order here is deliberate and load-bearing: it packs to exactly 64 bytes with no padding, which
+// is what let apSuffix be added in 1.5.4 at zero static-RAM cost (the table and the snapshot buffer each
+// hold kWifiDevSlots of these, so every byte counts twice). Re-check the static_assert after any edit.
 struct WifiDev {
+    uint32_t lastMs;     // 0 = empty slot
     uint8_t mac[6];
     int8_t rssi;
     int8_t maxRssi;
     uint16_t frames;
-    uint32_t lastMs;     // 0 = empty slot
+    uint16_t stations;   // BSS load station count
+    // Last 3 bytes of the BSSID this device is associated with, from the DS bits of a data frame
+    // (ToDS: BSSID is addr1; FromDS: BSSID is addr2). Zero = never seen associated. Only the suffix is
+    // kept because the full 6 bytes would push this struct to 68 and cost 512 B of static RAM; the host
+    // joins it against APs it already knows, so a match needs a *known* AP whose low 24 bits agree.
+    uint8_t apSuffix[3];
     uint8_t ch;
     uint8_t flags;       // bit0: AP (beacon/probe resp), bit1: IEs parsed, bit2: seen ONLY as a frame
                          //   destination (addr1) - we have never heard it transmit, so rssi/ch belong to
                          //   whoever addressed it. Tier 1 evidence; cleared as soon as it transmits.
     uint8_t surv;        // SurvCat: known surveillance hardware by OUI, 0 = none
-    char ssid[33];
     // From beacon / probe-response information elements (APs only)
     uint8_t sec;         // bit0 WEP, bit1 WPA1, bit2 WPA2-PSK, bit3 WPA2-ENT, bit4 WPA3-SAE, bit5 WPA3-ENT, bit6 OWE, bit7 open
     uint8_t pmf;         // 0 none, 1 capable, 2 required (802.11w)
     uint8_t phy;         // bit0 legacy(a/b/g), bit1 n (HT), bit2 ac (VHT), bit3 ax (HE), bit4 be (EHT)
     uint8_t bw;          // channel width in units of 10 MHz (2, 4, 8, 16)
     uint8_t util;        // BSS load channel utilisation, 0-255 (255 = 100 %), 0 if not advertised
-    uint16_t stations;   // BSS load station count
     uint8_t beacons;     // beacon counter (IEs re-parsed every 16th)
     char cc[3];          // country IE
+    char ssid[33];
 };
+static_assert(sizeof(WifiDev) == 64, "WifiDev must stay 64 bytes: see the packing note above");
 
 struct BleDev {
     uint8_t mac[6];

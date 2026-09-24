@@ -35,6 +35,10 @@ a deauth attack is running — it never transmits.
   handshakes). Stations with PMF (802.11w) enabled would ignore it by design. The attack stops itself after
   5 minutes (`kDeauthMaxMs`) so a crashed host or an unplugged cable cannot leave the board transmitting.
   Only point it at networks you are authorised to test.
+  
+  Two modes: 
+  - `deauth <ap_bssid>` sends broadcast deauth frames to **all** clients of that AP (kick everyone).
+  - `dca <client_mac> <ap_bssid>` targets a **specific client** station (disconnect just one device).
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle, hold BOOT ≈0.7 s to cycle mode 5g → 2.4g → both → ble → 802.15.4; on the
@@ -137,7 +141,9 @@ accordingly (fewer slots, so expect more `drop` on a very busy channel than with
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
 `cap 0|1`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`,
 `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
-modes only — parks on the AP's channel and kicks its stations, auto‑stops after 5 min), `info`, `reboot`.
+modes only — broadcast deauth to all clients of that AP, auto‑stops after 5 min), 
+`dca <client_mac> <ap_bssid>` / `dca 0` (targeted deauth to one specific station), 
+`info`, `reboot`.
 Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
 `cap 1` afterwards.
 802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need
@@ -201,6 +207,48 @@ raw 802.11 — another ESP32 in promiscuous mode, or a USB adapter in monitor mo
 
 ## Versions
 
+- **1.5.5** — **Merge of the two 1.5.x lines.** 1.5.3 and 1.5.4 were developed from a checkout that predated
+  the 1.5.1 module split, so they edited the old monolithic `bandwatch.cpp`. Targeted deauth (`dca`) and the
+  station-to-BSS association were ported onto the module layout: attack state into `Deauth` in
+  `bandwatch_core.h`, `startDeauthTargeted()` and the DA steering into `deauth_diag.cpp`, the `dca` command
+  and its acknowledgement into `host_proto.cpp`, the DS-bit association into `wifi_sniff.cpp`. Two behaviour
+  differences fell out of the merge: the raw-TX fallback now honours targeted mode (it would have broadcast to
+  the whole BSS when the driver-internal slot was unavailable — worse than doing nothing), and `sdls` keeps
+  1.5.1's `total`/`sent` reporting rather than 1.5.4's `listed`/`skipped`, since both fixed the same gap.
+  Static RAM 79,592 B. **The 1.5.3 and 1.5.4 tags predate the split and do not build from this tree.**
+  As with every deauth path here, **the attack still does not work** ([`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11).
+- **1.5.4** — **The targeted deauth from 1.5.3 could not actually be reached.** Four separate breaks between
+  the dashboard and the device, any one of them fatal: the client picker filtered on a `parent` field nothing
+  ever produced, so it was always empty; its buttons were emitted with `display:none` and had no styling or
+  handler to reveal them; the client MAC was sent with its colons stripped, which the device's parser rejects,
+  so a targeted kick *stopped* the running attack instead of starting one; and the host never dispatched the
+  `dca` acknowledgement, so a targeted attack left no trace in the UI at all. All four fixed, and the missing
+  piece underneath them built: the firmware now tracks **which BSS each station is on**, read from the DS bits
+  of data frames, so the Wi‑Fi table shows *on &lt;network&gt;* per station and the picker has real clients in
+  it. That association cost **zero** static RAM — `WifiDev` was repacked from 64 bytes-with-padding to 64
+  bytes-exactly ([`docs/DEVELOPER.md`](docs/DEVELOPER.md) §17).
+  Also: a targeted deauth whose client MAC began `00:00` was silently demoted to a broadcast kick (the
+  "is this targeted?" test read two bytes of a MAC); starting a deauth before the Wi‑Fi driver had an
+  `ieee80211com` dereferenced a null pointer and panicked; the deauth channel lookup walked the device table
+  without its lock; the System page named the AP instead of the station being kicked; `sdls` now reports how
+  many entries it had to omit instead of silently shortening the listing (superseded in the 1.5.5 merge by
+  1.5.1's `total`/`sent`, which fixed the same gap); `hello` reserved ~10 bytes less
+  serial room than its longest possible line; and the HTTP API now rejects malformed MACs rather than
+  forwarding them.
+- **1.5.3** — **Targeted deauth (`dca <client_mac> <ap_bssid>`).** `deauth <bssid>` kicks every station on a
+  network; `dca` sends the deauthentication to one station only, with the AP's BSSID as SA/BSSID and the
+  client as DA. Reachable from the dashboard only as of 1.5.4 — see above. As with every deauth path here,
+  **the attack still does not work** and the counters do not tell you otherwise
+  ([`docs/DEVELOPER.md`](docs/DEVELOPER.md) §11).
+- **1.5.2** — **Deauth sequence numbers.** Every frame in a burst carried sequence number `0x00`, so a
+  receiver could treat the whole burst as one retransmitted frame. Each frame now gets a unique sequence, and
+  the TX path logs which branch it took (home-channel vs deferred queue, alloc failures, hstate) to narrow
+  down §11. The attack still does not work; the root cause is still unidentified.
+- **1.5.1** — **Review pass.** The firmware sketch was split into modules behind one shared header
+  (`bandwatch_core.h`): core, the three radios, deauth/diagnostics, capture, SD, host protocol and LCD UI are
+  now separate translation units. A capture is refused below a 24 kB free-heap floor rather than crashing on
+  allocation, and `sdls` reports `total`/`sent` so a listing truncated by a full serial buffer is visible as
+  truncated ([`docs/DEVELOPER.md`](docs/DEVELOPER.md) §3 and §16).
 - **1.5** — **Surveillance-hardware flagging and receiver-side sightings.** 64 OUI prefixes across 7
   categories (Flock Safety, Ring, Axon, DJI, Parrot, Skydio, Meta/Ray-Ban) are matched in firmware, so hits
   show on the LCD (`!`, orange) as well as the dashboard (red badge, plus a *surveillance only* filter).

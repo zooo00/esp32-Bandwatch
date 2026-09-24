@@ -336,7 +336,7 @@ void buildHuntPage(lv_obj_t* page) {
 void buildSystemPage(lv_obj_t* page) {
     lv_obj_t* hdrRight;
     make_header(page, "System", &hdrRight);
-    char v[8];
+    char v[16];   // "v1.10.0" already overflowed the old char[8]
     snprintf(v, sizeof(v), "v%s", kVersion);
     lv_label_set_text(hdrRight, v);
     lv_obj_t* box = make_panel(page, 280, BG_565, 2);
@@ -704,7 +704,7 @@ void refreshSystem(float global) {
     else snprintf(buf, sizeof(buf), "hunt off");
     if (deauth.active) {
         char d[26];
-        fmtMac(d, sizeof(d), deauth.bssid);
+        fmtMac(d, sizeof(d), deauth.targeted ? deauth.targetMac : deauth.bssid);   // the MAC actually being kicked
         snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " · kick %s", d);   // buf is 64: both MACs fit
     }
     lv_label_set_text(sysLines[n++], buf);

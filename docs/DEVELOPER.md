@@ -43,9 +43,10 @@ USB: the board's USB-C goes to the chip's native **USB-Serial-JTAG** (no externa
   version is **pinned** there (`ESP32_CORE_VERSION`, default 3.3.11) because of the deauth offsets in §9.
   On arm64 it also installs universal-ctags unconditionally: `build.sh` always routes ctags through
   `tools/ctags/ctags`, which fails if universal-ctags is missing, whether or not Rosetta is available.
-- Reference build (core 3.3.11, lvgl 9.3.0): 0 errors, 0 warnings, **1 812 457 B flash (57 % of the 3 MB app
-  partition)** and **78 960 B static RAM (24 %)** — that static figure is close to the ~80 KB ceiling in
-  `CLAUDE.md` rule 4, so watch it when adding globals.
+- Reference build (core 3.3.11, lvgl 9.3.0, **v1.5.4**): 0 errors, 0 warnings, **1 876 475 B flash (59 % of the
+  3 MB app partition)** and **79 584 B static RAM (24 %)** — that static figure is ~400 B under the ~80 KB
+  ceiling in `CLAUDE.md` rule 4, so watch it when adding globals, and see §17 for how `apSuffix` was added
+  without moving it at all.
 - The core's `sdkconfig` is fixed (prebuilt). Relevant values: `CONFIG_SOC_WIFI_SUPPORT_5G=y`,
   `CONFIG_BT_NIMBLE_ENABLED=y`, `CONFIG_BT_NIMBLE_EXT_ADV` **not set** (no BLE 5 extended advertising),
   `CONFIG_IEEE802154_ENABLED=y`, `CONFIG_IEEE802154_RX_BUFFER_SIZE=20`, `CONFIG_SPIRAM=y` (harmless
@@ -137,7 +138,7 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}`) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
-| `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv]`; flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
+| `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv, apSuffix]`; `apSuffix` = last 3 bytes of the BSSID this device was heard associated with, lower-case hex, `""` if never seen on a BSS (§17); flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
 | `{"t":"b","dev":[...]}` | every 2 s in BLE mode | rows `[mac, rssi, max, adverts, age_ms, addrType, company, name, appearance, txPower(127=none), svcUuid16, svcDataUuid16, appleType, flags, surv]`; flags bit0 connectable, bit1 legacy adv, bit2 scannable |
 | `{"t":"z","dev":[...]}` | every 2 s in 802.15.4 mode | rows `[id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]`; `id` = extended address `aa:bb:cc:dd:ee:ff:00:11` or `pan/short` hex; `proto` 0 unknown, 1 Zigbee, 2 Zigbee GP, 3 Thread/6LoWPAN, 4 MAC‑secured; flags bit0 ext addr, bit1 beacons, bit2 permit join, bit3 MAC security, bit4 data seen |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
@@ -147,9 +148,12 @@ Device → host, one JSON object per line unless noted:
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
 
 Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
-`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, `deauth <bssid>` (Wi‑Fi modes only —
-parks on the AP's channel and spams spoofed deauth frames at its stations; stops itself after `kDeauthMaxMs`,
-5 min) / `deauth 0`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
+`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, 
+`deauth <bssid>` (Wi‑Fi modes only — broadcast deauth to all clients of that AP; stops itself after `kDeauthMaxMs`,
+5 min) / `deauth 0`, 
+`dca <client_mac> <ap_bssid>` (targeted deauth to one specific station — both MACs colon-separated, the
+device rejects anything else) / `dca 0`, 
+`sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
 
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
@@ -159,9 +163,12 @@ instead of killing the reader thread (an exception there closes the serial port 
 
 `bandwatch_host.py`: a reader thread parses lines into a state dict (channels, history, device tables with
 per-device RSSI history, hunt state), an HTTP server exposes `GET /api/state` (everything, JSON) and
-`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
+`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"dca"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
 for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Files are named `bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` /
 `bandwatch-802154-…` in `--captures` (default `./captures`).
+
+The deauth command starts a broadcast deauth attack (`cmd: "deauth", bssid: "XX:XX..."`), while the dca command 
+starts a targeted attack on one client (`cmd: "dca", client_mac: "...", ap_bssid: "..."`).
 
 `/api/cmd` has **no authentication**, and one of its commands starts a deauth attack, so the server binds to
 `127.0.0.1` by default; `--bind 0.0.0.0` hands that to anyone who can reach the port. Values that reach the
@@ -277,9 +284,19 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
   `captureEnabled` and `capRing` on entry and run to completion, so they can never be suspended holding a
   pointer that the loop task then frees. Do not move that free anywhere else, and do not cache `capRing` in a
   local inside the producers.
+
+  The two facts that argument rests on, written down because it reads like a bug if you do not have them
+  (it was re-reported as a use-after-free in 1.5.4 and re-checked against the pinned toolchain):
+  `CONFIG_FREERTOS_UNICORE=y` and `CONFIG_SOC_CPU_CORES_NUM=1` in
+  `tools/esp32c5-libs/3.3.11/sdkconfig`, so there is no second core to run a producer in parallel; **and**
+  every producer outranks the consumer — Wi-Fi task priority 23, NimBLE host task 21,
+  `esp_ieee802154_receive_done` a true ISR, against the Arduino loop task at 1. A higher-priority producer
+  preempts the loop task, never the reverse, so the loop task cannot be scheduled while one is mid-`memcpy`.
+  If either fact ever changes — a dual-core target, or the free moved to a task that can preempt — the ring
+  needs real synchronisation.
 - Strings captured off the air (SSID, BLE name, country code) are stripped of control characters at ingest
   (`sanitizeText`) so `printJsonStr` cannot expand them into `\u00xx` escapes that overshoot the `serialRoom()`
-  budget for a line. The budgets (`40 + n*110` Wi‑Fi, `40 + n*95` BLE) are estimates, not exact lengths: a full
+  budget for a line. The budgets (`40 + n*126` Wi‑Fi, `40 + n*102` BLE) are estimates, not exact lengths: a full
   64-device table already needs ~7 KB of the 8 KB TX buffer, so raising them is not free.
 
 ## 11. Deauth: why it does not work (investigation log, 1.2.5)
@@ -593,3 +610,41 @@ heap against `kMinFreeHeapB` (24 kB); below that the ring goes back to the heap 
 JSON error — better than OOMing an LVGL page rebuild later. It guards only the one biggest allocation, so rule 4
 still keeps the rest honest: current static usage is 79,560 B, about 440 B under the line, and that headroom is
 the edge of an unverified budget rather than a wall.
+
+## 17. Station-to-BSS association (1.5.4, ported to the module layout in 1.5.5)
+
+Every station row can now say which BSS it is on. This is what makes the targeted deauth (`dca`) usable from
+the dashboard: picking a client to kick requires knowing which AP it belongs to, and before 1.5.4 nothing in
+the firmware, the host or the UI tracked that (the dashboard filtered on a `parent` field that was never
+produced by anything, so the client picker was permanently empty).
+
+**Where the BSSID comes from.** `promiscuousCb` (`wifi_sniff.cpp`) reads the two DS bits of the frame control field and uses
+only the unambiguous single-hop cases (802.11-2020 9.3.2.1, table 9-26):
+
+| ToDS | FromDS | addr1 | addr2 | addr3 | what we take |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 0 | BSSID | SA | DA | the transmitter (addr2) is a station; its BSSID is **addr1** |
+| 0 | 1 | DA | BSSID | SA | the addr1 device is a station; its BSSID is **addr2** |
+| 0 | 0 | DA | SA | BSSID | skipped — dominated by beacons, where addr3 is the AP's own address |
+| 1 | 1 | RA | TA | DA | skipped — WDS/mesh, no station-to-BSS meaning here |
+
+Both `trackWifiDevice` call sites (also `wifi_sniff.cpp`) pass their case's BSSID, so a tier-1 device (heard only as `addr1`, §15)
+gets an association too — which is exactly the sleepy-camera case that tier 1 exists for.
+
+**Why only three bytes.** `WifiDev` sits in two arrays of `kWifiDevSlots` (the live table and the `devSnap`
+snapshot buffer), so a byte added to it costs 128 bytes of static RAM. The struct was 64 bytes with three
+bytes of interior padding; the full 6-byte BSSID would have rounded it to 68 and cost 512 B, against ~420 B
+of headroom under the rule in §16. Reordering the fields so the `uint32_t` leads packs it to **exactly 64
+bytes with no padding**, which is where `apSuffix[3]` now lives — measured cost zero. A
+`static_assert(sizeof(WifiDev) == 64)` holds the line; if it ever fires, re-read the packing note in
+`devices.h` rather than just bumping the number.
+
+**Completing the join.** Three bytes is not a BSSID, so the host finishes the work in `_resolve_parents()`:
+a station is attributed to an AP only when that AP is in *our own* table and its low 24 bits match, and
+never when two known APs share those bits (the join resolves to nothing rather than guessing). A station on
+an AP we have not heard shows no association at all. `dca` (handled in `host_proto.cpp`, acting on `startDeauthTargeted()` in `deauth_diag.cpp`)
+is then always sent the AP's **full** BSSID, read
+from that AP's own row — the suffix is a join key and never goes back to the device.
+
+Same standard as the surveillance OUIs in §15: a match is evidence, and the UI says "on &lt;ssid&gt;" only
+for a BSS we independently heard.

@@ -355,10 +355,11 @@ class Bandwatch:
         self.cap_band = None
         self.history = deque(maxlen=HISTORY_LEN)
         self._last_hist = 0
-        self.spec_hist = {}          # spectrum mode: 15.4 channel -> deque of recent edMax (dBm)
-        # Combined "wide" view: the single radio scans one band at a time, so we keep each band's last-seen
-        # data across mode switches. 2.4 GHz is real energy (spec mode); 5 GHz is packet activity (Wi-Fi mode).
-        self.energy24 = {}; self.energy24_ts = 0     # 15.4 ch 11-26 -> {ed_min,ed_mean,ed_max,ed_samples}
+        self.spec_hist = {}          # spectrum mode: MHz -> deque of recent edMax (dBm), for the noise floor/duty
+        # Fine 2.4 GHz spectrum (spec mode): the device sweeps 2400-2483 MHz in `step` MHz bins via off-grid
+        # tuning. bins is a list of [edMin, edMean, edMax, edSamples] in frequency order (lo + i*step).
+        self.fine = {"step": 2, "lo": 2400, "count": 0, "bins": [], "current_mhz": 0, "ts": 0}
+        # Combined view keeps the 5 GHz packet-activity picture across mode switches (single radio, one at a time).
         self.activity5 = {}; self.activity5_ts = 0   # 5 GHz Wi-Fi ch -> {s,f,b,u,st}
 
     # ---------------- serial side ----------------
@@ -516,6 +517,7 @@ class Bandwatch:
             if self.pcap and msg.get("band") and self.cap_band != msg.get("band"):
                 self.stop_capture()
             st["band"] = msg.get("band")
+            st["spec_step"] = msg.get("spec_step", st.get("spec_step", 2))
             st["chs"] = msg.get("chs", [])
             st["park"] = msg.get("park", 0)
             st["cap"] = msg.get("cap", 0)
@@ -565,7 +567,6 @@ class Bandwatch:
             st["aps"] = msg.get("aps", 0)
             st["drop"] = msg.get("drop", 0)
             st["heap"] = msg.get("heap")
-            is_spec = st["band"] == "spec"
             chs = []
             for row in msg["ch"]:
                 c, s, f, b, strong, u, state = row[:7]
@@ -573,15 +574,28 @@ class Bandwatch:
                 prev = st["channels"].get(c, {})
                 entry = {"s": s, "r": prev.get("r", s), "f": f, "b": b, "st": strong, "u": u,
                          "state": state, "t": prev.get("t", 0)}
-                if is_spec and len(row) >= 10:
-                    # spectrum rows carry raw energy: [..., state, edMin, edMean, edMax, edSamples?] (dBm)
-                    entry.update({"ed_min": row[7], "ed_mean": row[8], "ed_max": row[9],
-                                  "ed_samples": row[10] if len(row) >= 11 else None})
-                    self._spec_track(c, row[9])
                 st["channels"][c] = entry
-                self._cache_wide(st["band"], c, entry)
+                self._cache_wide(st["band"], c, entry)   # caches 5 GHz activity for the combined view
             st["chs"] = chs
             st["channels"] = {c: v for c, v in st["channels"].items() if c in chs}
+        elif t == "fs":
+            # Fine 2.4 GHz spectrum sweep: full set of frequency bins.
+            bins = msg.get("bins", [])
+            self.fine.update({"step": msg.get("step", 2), "lo": msg.get("lo", 2400),
+                              "count": msg.get("count", len(bins)), "bins": bins, "ts": time.time()})
+            st["spec_step"] = msg.get("step", st.get("spec_step", 2))
+            st["sweep"] = msg.get("n", st.get("sweep", 0))
+            st["heap"] = msg.get("heap", st.get("heap"))
+            lo, step = self.fine["lo"], self.fine["step"]
+            for i, row in enumerate(bins):
+                if len(row) >= 4 and row[3]:   # edSamples > 0
+                    self._spec_track(lo + i * step, row[2])   # track edMax per MHz for the noise floor
+        elif t == "fd":
+            # Fine spectrum per-dwell: which frequency the sweep is on now + that bin's energy (walking cursor).
+            self.fine["current_mhz"] = msg.get("mhz", 0)
+            self.fine["step"] = msg.get("step", self.fine["step"])
+            st["spec_step"] = msg.get("step", st.get("spec_step", 2))
+            st["sweep"] = msg.get("n", st.get("sweep", 0))
         elif t == "w":
             self.merge_wifi(msg.get("dev", []))
         elif t == "z":
@@ -758,35 +772,28 @@ class Bandwatch:
             del table[mac]
 
     def _cache_wide(self, band, c, entry):
-        """Keep each band's last-seen data for the combined 2.4-energy + 5-GHz-activity view, since the single
-        radio only scans one band at a time. 2.4 GHz is real energy (spec); 5 GHz is packet activity (Wi-Fi)."""
-        now = time.time()
-        # dlock: these dicts are read by _wide()/_unidentified() on HTTP threads while this runs on the reader.
-        with self.dlock:
-            if band == "spec" and "ed_max" in entry:
-                self.energy24[c] = {k: entry.get(k) for k in ("ed_min", "ed_mean", "ed_max", "ed_samples")}
-                self.energy24_ts = now
-            elif band in ("5g", "both") and c > 14 and "s" in entry:   # 5 GHz Wi-Fi channels only
+        """Cache the 5 GHz packet-activity picture for the combined view (the single radio scans one band at a
+        time, so 5 GHz is shown as last-seen while 2.4 GHz energy is live). 2.4 GHz energy lives in self.fine."""
+        if band in ("5g", "both") and c > 14 and "s" in entry:   # 5 GHz Wi-Fi channels only
+            with self.dlock:   # read by _wide() on HTTP threads
                 self.activity5[c] = {"s": entry["s"], "f": entry.get("f", 0), "b": entry.get("b", 0),
                                      "u": entry.get("u", 0), "st": entry.get("st", 0)}
-                self.activity5_ts = now
+                self.activity5_ts = time.time()
 
     def _wide(self):
         now = time.time()
         with self.dlock:
             return {
-                "energy24": [dict(ch=c, freq=2405 + 5 * (c - 11), **self.energy24[c]) for c in sorted(self.energy24)],
-                "energy24_age": round(now - self.energy24_ts, 1) if self.energy24_ts else None,
                 "activity5": [dict(ch=c, freq=5000 + 5 * c, **self.activity5[c]) for c in sorted(self.activity5)],
                 "activity5_age": round(now - self.activity5_ts, 1) if self.activity5_ts else None,
             }
 
-    def _spec_track(self, ch, ed_max):
-        with self.dlock:   # read by _unidentified() on HTTP threads
-            h = self.spec_hist.get(ch)
+    def _spec_track(self, mhz, ed_max):
+        with self.dlock:   # read by _unidentified() on HTTP threads; keyed by frequency (MHz)
+            h = self.spec_hist.get(mhz)
             if h is None:
                 h = deque(maxlen=SPEC_HIST_LEN)
-                self.spec_hist[ch] = h
+                self.spec_hist[mhz] = h
             h.append(ed_max)
 
     def _unidentified(self):
@@ -816,24 +823,23 @@ class Bandwatch:
         # off the copy. Noise floor = the band-wide quiet level (a low percentile across all bins and recent
         # sweeps), so a continuously-on emitter is still measured against ambient quiet, not its own history.
         with self.dlock:
-            hist = {ch: list(h) for ch, h in self.spec_hist.items()}
+            hist = {mhz: list(h) for mhz, h in self.spec_hist.items()}   # keyed by frequency (MHz)
         all_samples = sorted(v for h in hist.values() for v in h)
         if len(all_samples) < 8:
             return []
         floor = all_samples[max(0, int(len(all_samples) * 0.15) - 1)]
         gate = floor + SPEC_FLOOR_MARGIN
         out = []
-        for ch, h in hist.items():
-            if not (11 <= ch <= 26) or not h:
+        for mhz, h in hist.items():
+            if not h:
                 continue
             peak = max(h)
             duty = sum(1 for v in h if v > gate) / len(h)
             if peak <= gate or duty < SPEC_MIN_DUTY:
                 continue
-            f = 2405 + 5 * (ch - 11)
-            if any(lo <= f <= hi for lo, hi in known):
+            if any(lo <= mhz <= hi for lo, hi in known):
                 continue
-            out.append({"ch": ch, "freq_mhz": f, "peak_dbm": peak, "floor_dbm": floor, "duty": round(duty, 2)})
+            out.append({"freq_mhz": mhz, "peak_dbm": peak, "floor_dbm": floor, "duty": round(duty, 2)})
         out.sort(key=lambda e: e["peak_dbm"], reverse=True)
         return out
 
@@ -920,6 +926,13 @@ class Bandwatch:
             "channels": chans, "history": list(self.history), "capture": st["capture"],
             "unidentified": self._unidentified() if st["band"] == "spec" else [],
             "wide": self._wide(),
+            "spec_step": st.get("spec_step", 2),
+            "fine": {"step": self.fine["step"], "lo": self.fine["lo"], "count": self.fine["count"],
+                     "current_mhz": self.fine["current_mhz"],
+                     "age": round(now - self.fine["ts"], 1) if self.fine["ts"] else None,
+                     "bins": [{"mhz": self.fine["lo"] + i * self.fine["step"],
+                               "min": r[0], "mean": r[1], "max": r[2], "n": r[3]}
+                              for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"], "saved": st["saved"],
             "oui_source": self.oui.source,
@@ -972,6 +985,8 @@ def make_handler(bw, html_path):
             try:
                 if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154", "spec"):
                     bw.send(f"band {req['value']}")
+                elif cmd == "specstep" and int(req.get("value") or 0) in (1, 2, 5):
+                    bw.send(f"specstep {int(req['value'])}")
                 elif cmd == "park":
                     bw.send(f"park {int(req.get('value') or 0)}")
                 elif cmd == "capture":

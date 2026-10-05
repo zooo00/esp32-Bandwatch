@@ -3,6 +3,7 @@
 #include "bandwatch_core.h"
 
 #include <esp_ieee802154.h>
+#include "hal/ieee802154_common_ll.h"   // POC: ieee802154_ll_set_freq() tunes the synth below the channel API
 
 bool r154Running = false;   // instance lives with its module; core reads it via bandwatch_core.h
 bool specRunning = false;   // energy-detect spectrum sweep up (15.4 radio powered, no RX armed)
@@ -185,6 +186,10 @@ void edReset() {
 }
 
 void edKick() { esp_ieee802154_energy_detect(kEdDurationSym); }
+
+// POC: tune the 15.4 synthesiser to an arbitrary MHz (the channel register's freq field is MHz-2400, 7 bits),
+// so energy detect can sweep off the standard 5 MHz channel grid. Validity of off-grid reads is TBD.
+void edSetFreqMhz(int mhz) { ieee802154_ll_set_freq(static_cast<uint8_t>(mhz - 2400)); }
 
 // Re-arm the next energy-detect window from the loop task. Arming is not safe from the done callback (ISR)
 // — doing it there yields exactly one sample per dwell — so the callback only flags completion and the loop

@@ -758,10 +758,21 @@ from `Bandwatch_Loop()` (~2 ms cadence) was reverted: the radio needs ~>100 ms t
 `esp_ieee802154_set_channel()`, and hopping sooner made energy detection return a stuck ~−40 dBm on *every*
 channel — a flat reading that did not track real occupancy (verified against the Wi-Fi busy map: channels the
 Wi-Fi radio showed empty still read −40). At the ~120 ms dwell the floor sits near −110 dBm with 40+ dB of
-real structure that lines up with actual traffic. **Resolution is fixed at 5 MHz / 16 bins:**
-`esp_ieee802154_set_channel()` takes a channel number (11–26) only — there is no frequency API — and Wi-Fi's
-2.4 GHz channels are also 5 MHz-spaced with no energy primitive, so sub-5 MHz would require poking
-undocumented RF registers (same fragility class as the §9 deauth offsets) and is not done.
+real structure that lines up with actual traffic.
+
+**Fine resolution — off-grid tuning (1.8).** The public `esp_ieee802154_set_channel()` takes a channel number
+(11–26) only, but the HAL exposes `ieee802154_ll_set_freq(uint8_t)` (inline in `hal/ieee802154_common_ll.h`)
+which writes the synth's 7-bit `channel.freq` register = MHz−2400. So spec mode no longer sweeps the 16
+channel entries — it sweeps **2400–2483 MHz in `specStepMhz` (1/2/5 MHz, default 2) steps** via `edSetFreqMhz()`
+(`ieee154.cpp`), giving up to 84 bins and covering the band edges the channel grid can't reach. This is below
+the public API but it is a documented inline function, not a vendor-blob patch like the §9 deauth offsets, and
+off-grid reads were verified against known APs (ch6 AP → peak at 2435–2437 MHz; clean −111 floor between
+emitters). In `bandwatch.cpp`, spec mode repurposes `currentIdx` as the bin index into `specFine[kSpecMaxBins]`
+(a lean per-bin struct, ~0.5 kB) and `advanceChannel`/`finishDwell` have early spec branches that bypass the
+channel machinery. **Still 2.4 GHz only** — the 15.4 radio is 2.4 GHz silicon; no register reaches 5 GHz.
+Serial: `sendSweep()` emits `{"t":"fs",...,"bins":[[min,mean,max,n],...]}` (frequency = lo+i·step, not sent
+per bin) once per sweep, `sendDwell()` emits a light `{"t":"fd","mhz":...}` per dwell for the dashboard's live
+cursor, and `specstep` sets the step. More bins = slower sweep (~120 ms/bin), so 84 bins ≈ 10 s, 42 ≈ 5 s.
 
 ### Host: flagging unexplained energy (not identifying protocols)
 The radio **cannot demodulate an unknown protocol** — it only knows 802.11/BLE/802.15.4. What the host does

@@ -338,7 +338,7 @@
       <section class="card">
         <h2>2.4 GHz waterfall <small>frequency across · time down, newest at the bottom</small></h2>
         <canvas id="waterfall" width="320" height="180" style="width:100%;height:180px;image-rendering:pixelated;border-radius:8px;background:#0b0f14"></canvas>
-        <div class="wfaxis"><span>2405</span><span>2425</span><span>2445</span><span>2465</span><span>2480 MHz</span></div>
+        <div class="wfaxis"><span>2400</span><span>2420</span><span>2440</span><span>2460</span><span>2483 MHz</span></div>
       </section>
       <section class="card">
         <h2>Unexplained energy <small>no decoded Wi‑Fi / BLE / Zigbee accounts for it</small></h2>
@@ -417,6 +417,7 @@
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
   document.addEventListener('click', (e) => { if (e.target.closest('[data-startspec]')) post({ cmd: 'band', value: 'spec' }); });
   document.addEventListener('click', (e) => { if (e.target.closest('[data-start5g]')) post({ cmd: 'band', value: '5g' }); });
+  document.addEventListener('click', (e) => { const b = e.target.closest('[data-specstep]'); if (b) post({ cmd: 'specstep', value: +b.dataset.specstep }); });
   // Deauth button: broadcast mode (kick every station on an AP)
   document.addEventListener('click', (e) => {
     const k = e.target.closest('button[data-deauth]');
@@ -830,73 +831,71 @@
 
   // Combined "wide" view: 2.4 GHz is real RF energy (dBm, auto-ranged); 5 GHz is traffic activity (0–100).
   // The single radio scans one band at a time, so each chart draws from the host's last-seen cache (s.wide).
-  function energyBins(s) {
-    const by = {}; ((s.wide && s.wide.energy24) || []).forEach(e => { by[e.ch] = e; });
-    return Array.from({ length: 16 }, (_, i) => ({ ch: 11 + i, freq: 2405 + 5 * i, d: by[11 + i] || null }));
+  function fineBins(s) {
+    return ((s.fine && s.fine.bins) || []).map(b => ({ mhz: b.mhz, min: b.min, mean: b.mean, max: b.max, n: b.n }));
   }
 
   function renderSpecStatus(s) {
-    const w = s.wide || {};
+    const w = s.wide || {}, f = s.fine || {};
     const txt = a => a == null ? 'never' : a < 1.5 ? 'live' : `${Math.round(a)}s ago`;
-    const e = s.band === 'spec' ? 'live' : txt(w.energy24_age);
+    const e = s.band === 'spec' ? 'live' : txt(f.age);
     const a = (s.band === '5g' || s.band === 'both') ? 'live' : txt(w.activity5_age);
     const pill = v => v === 'live' ? 'pill on' : 'pill';
+    const step = s.spec_step || f.step || 2;
+    const toggles = [1, 2, 5].map(k => `<button class="${k === step ? 'small' : 'ghost'}" data-specstep="${k}">${k} MHz</button>`).join(' ');
     $('#specStatus').innerHTML =
       `<span class="${pill(e)}"><span class="dot"></span>2.4 GHz energy: ${e}</span>` +
       (s.band === 'spec' ? '' : `<button class="small" data-startspec>Scan 2.4 GHz</button>`) +
-      `<span class="${pill(a)}"><span class="dot"></span>5 GHz activity: ${a}</span>` +
-      ((s.band === '5g' || s.band === 'both') ? '' : `<button class="small" data-start5g>Scan 5 GHz</button>`) +
-      `<span style="opacity:.7">single radio — one band at a time; the other is last-seen</span>`;
+      `<span style="opacity:.7;margin-left:4px">resolution</span>${toggles}` +
+      `<span class="${pill(a)}" style="margin-left:4px"><span class="dot"></span>5 GHz activity: ${a}</span>` +
+      ((s.band === '5g' || s.band === 'both') ? '' : `<button class="small" data-start5g>Scan 5 GHz</button>`);
   }
 
   function renderEnergy24(s) {
     const svg = $('#spec'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 46, padR = 12, padT = 18, padB = 42;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    const bins = energyBins(s), plotW = W - padL - padR, plotH = H - padT - padB;
-    // Receiver-blocked / stuck-radio warning: a healthy floor sits near -110 dBm. If *every* bin's minimum is
-    // elevated (even channels with no emitter), a strong signal is desensitizing the receiver (or the radio is
-    // in a stuck state) and per-channel energy can't be trusted.
-    const withData = bins.filter(b => b.d);
-    const floor = withData.length ? Math.min(...withData.map(b => b.d.ed_min)) : null;
+    const bins = fineBins(s), plotW = W - padL - padR, plotH = H - padT - padB;
+    if (!bins.length) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">Switch band to “2.4 GHz energy” to sweep the spectrum.</text>'; $('#specWarn').hidden = true; return; }
+    const withData = bins.filter(b => b.n > 0);
+    // Receiver-blocked / stuck-radio warning: healthy floor ~-110 dBm. If every bin's minimum is elevated
+    // (even frequencies with no emitter), a strong signal is desensitizing the receiver (or it's stuck).
+    const floor = withData.length ? Math.min(...withData.map(b => b.min)) : null;
     const warn = $('#specWarn');
     if (floor != null && floor > -85) {
       warn.hidden = false;
-      warn.textContent = `⚠ Strong signal / receiver blocked — every channel's noise floor is ≥ ${floor} dBm, so per-channel energy is unreliable right now. If the band is actually quiet, power-cycle or reboot the device to clear a stuck radio state.`;
-    } else {
-      warn.hidden = true;
-    }
-    // Auto-range the dBm window to the live data (min 30 dB span) so differences show even when the whole band
-    // is hot — a fixed -95..-20 scale squashes a band sitting at, say, -35 dBm flat into identical tall bars.
-    const vals = []; bins.forEach(b => { if (b.d) vals.push(b.d.ed_min, b.d.ed_max); });
+      warn.textContent = `⚠ Strong signal / receiver blocked — every frequency's noise floor is ≥ ${floor} dBm, so the spectrum is unreliable right now. If the band is actually quiet, power-cycle or reboot the device to clear a stuck radio state.`;
+    } else { warn.hidden = true; }
+    // Auto-range the dBm window to the live data (min 30 dB span).
+    const vals = []; withData.forEach(b => vals.push(b.min, b.max));
     let lo = vals.length ? Math.min(...vals) - 3 : -100, hi = vals.length ? Math.max(...vals) + 3 : -30;
     if (hi - lo < 30) { const m = (hi + lo) / 2; lo = m - 15; hi = m + 15; }
     lo = Math.max(-115, lo); hi = Math.min(0, hi);
     const yOf = d => { const v = Math.max(lo, Math.min(hi, d)); return padT + plotH - (v - lo) / (hi - lo) * plotH; };
-    const slot = plotW / 16, bw = Math.min(34, Math.max(4, slot - 3)), out = [];
+    const n = bins.length, slot = plotW / n, bw = Math.max(1, Math.min(34, slot - (n > 50 ? 0.5 : 2))), out = [];
     out.push(gridAxis(W, padL, padR, [0, 1, 2, 3].map(k => { const v = lo + (hi - lo) * k / 3; return { y: yOf(v), label: Math.round(v) }; }), `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text>`));
+    const cur = s.band === 'spec' ? (s.fine && s.fine.current_mhz) : 0;
     bins.forEach((b, i) => {
       const cx = padL + slot * i + slot / 2, bx = cx - bw / 2;
       out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
-      if (b.d) {
-        const top = yOf(b.d.ed_mean), h = Math.max(1, yOf(lo) - top);
-        out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="2" style="fill:${edColor(b.d.ed_mean)}"/>`);
-        out.push(`<line x1="${bx - 1}" x2="${bx + bw + 1}" y1="${yOf(b.d.ed_max)}" y2="${yOf(b.d.ed_max)}" style="stroke:var(--ink);stroke-width:1.5;opacity:.65"/>`);
-        if (s.band === 'spec' && b.ch === s.current) out.push(`<path class="marker" d="M${cx - 5},${yOf(lo) + 28} l5,-6 l5,6 z"/>`);
+      if (b.n > 0) {   // bar = peak (max-hold), the clearest way to show emitters at fine resolution
+        const top = yOf(b.max), h = Math.max(1, yOf(lo) - top);
+        out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="${bw > 3 ? 2 : 0}" style="fill:${edColor(b.max)}"/>`);
       } else {
         out.push(`<rect x="${bx}" y="${yOf(lo) - 2}" width="${bw}" height="2" style="fill:var(--grid)"/>`);
       }
-      if (i % 4 === 0 || i === 15) out.push(`<text class="axis" x="${cx}" y="${yOf(lo) + 18}" text-anchor="middle">${b.freq}</text>`);
+      if (b.mhz === cur) out.push(`<path class="marker" d="M${cx - 5},${yOf(lo) + 28} l5,-6 l5,6 z"/>`);
+      if (b.mhz % 20 === 0) out.push(`<text class="axis" x="${cx}" y="${yOf(lo) + 18}" text-anchor="middle">${b.mhz}</text>`);
     });
-    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">2.4 GHz · frequency (MHz)</text>`);
+    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">2.4 GHz · frequency (MHz) · ${s.spec_step || 2} MHz steps</text>`);
     svg.innerHTML = out.join('');
-    chartTips(svg, '#specTip', bins, b => b.d ? `<b>${b.freq} MHz</b> <span style="opacity:.55">15.4 ch ${b.ch}</span><br>avg ${b.d.ed_mean} dBm · peak ${b.d.ed_max} dBm<br>min ${b.d.ed_min} dBm${b.d.ed_samples != null ? ` · ${b.d.ed_samples} samp` : ''}` : `<b>${b.freq} MHz</b><br>no data yet`);
-    // Waterfall (peak energy, 16 fixed columns) — only while actively scanning 2.4 GHz.
+    chartTips(svg, '#specTip', bins, b => b.n > 0 ? `<b>${b.mhz} MHz</b><br>peak ${b.max} dBm · avg ${b.mean} dBm<br>min ${b.min} dBm · ${b.n} samples` : `<b>${b.mhz} MHz</b><br>no data yet`);
+    // Waterfall: one row per completed sweep, columns = frequency bins (peak energy).
     const cv = $('#waterfall');
     if (s.band === 'spec' && s.sweep !== wfSweep) {
       wfSweep = s.sweep;
-      const ctx = cv.getContext('2d'), w = cv.width, hg = cv.height, cw = w / 16;
+      const ctx = cv.getContext('2d'), w = cv.width, hg = cv.height, cw = w / n;
       ctx.drawImage(cv, 0, -1);
-      bins.forEach((b, i) => { ctx.fillStyle = b.d ? edColor(b.d.ed_max) : '#0b0f14'; ctx.fillRect(Math.floor(i * cw), hg - 1, Math.ceil(cw), 1); });
+      bins.forEach((b, i) => { ctx.fillStyle = b.n > 0 ? edColor(b.max) : '#0b0f14'; ctx.fillRect(Math.floor(i * cw), hg - 1, Math.ceil(cw), 1); });
     }
   }
 
@@ -932,7 +931,7 @@
     const list = s.unidentified || [];
     $('#unid').innerHTML = list.length
       ? '<table><thead><tr><th class="l">Frequency</th><th>Peak</th><th>Floor</th><th>Duty</th></tr></thead><tbody>'
-        + list.map(e => `<tr><td class="l">${e.freq_mhz} MHz <span style="opacity:.55">ch ${e.ch}</span></td><td>${e.peak_dbm} dBm</td><td>${e.floor_dbm} dBm</td><td>${Math.round(e.duty * 100)}%</td></tr>`).join('')
+        + list.map(e => `<tr><td class="l">${e.freq_mhz} MHz</td><td>${e.peak_dbm} dBm</td><td>${e.floor_dbm} dBm</td><td>${Math.round(e.duty * 100)}%</td></tr>`).join('')
         + '</tbody></table>'
       : '<p class="note">Nothing unexplained — every 2.4 GHz bin with sustained energy lines up with a Wi‑Fi, BLE or Zigbee device seen recently, or the band is quiet. Scan those bands first so the comparison has something to match against.</p>';
   }

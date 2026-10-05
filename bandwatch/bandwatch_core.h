@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.7.5";
+constexpr const char* kVersion = "1.8";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -48,6 +48,12 @@ constexpr uint32_t kEdDwellMs = 60;          // spec dwell: much shorter than kD
                                              // so a full 16-channel sweep is ~1 s instead of ~3.5 s
 constexpr int kEdFloorDbm = -95;             // bottom of the on-screen/scored energy range
 constexpr int kEdCeilDbm  = -20;             // top of that range
+// Fine spectrum: spec mode sweeps 2400-2483 MHz in specStepMhz steps, tuning off the 15.4 channel grid via
+// ieee802154_ll_set_freq() (DEVELOPER §18). step 5 ~= the old 16-channel view; 2 (default) and 1 are finer.
+constexpr int kSpecLoMhz = 2400;
+constexpr int kSpecHiMhz = 2483;
+constexpr int kSpecMaxBins = kSpecHiMhz - kSpecLoMhz + 1;   // 84 (1 MHz step, the finest)
+constexpr uint8_t kSpecStepDefault = 2;
 
 // Channels to sweep. The C5 has ONE radio, so bands are time-shared: a "both" sweep simply
 // interleaves 2.4 GHz channels 1-13 with the 5 GHz list below (38 dwells, ~8.4 s per sweep).
@@ -161,6 +167,19 @@ struct ChannelState {
     bool hasData = false;
     bool unavailable = false;  // Driver rejected esp_wifi_set_channel for this channel
 };
+
+// One fine-spectrum bin (spec mode): raw energy over the dwell at one off-grid frequency, in dBm.
+struct SpecBin {
+    int8_t edMin = 0;
+    int8_t edMean = 0;
+    int8_t edMax = -128;
+    uint16_t edSamples = 0;
+};
+extern uint8_t specStepMhz;                                 // 1 | 2 | 5 MHz; default kSpecStepDefault
+extern SpecBin specFine[kSpecMaxBins];
+extern int currentSpecMhz;                                  // frequency the fine sweep is currently parked on
+inline int specBinCount() { return (kSpecHiMhz - kSpecLoMhz) / specStepMhz + 1; }
+inline int specBinMhz(int i) { return kSpecLoMhz + i * specStepMhz; }
 
 // One captured frame, as it lands in the ring before either sink streams it out.
 struct CapFrame {
@@ -343,6 +362,7 @@ void start154();  void stop154();
 void startSpectrum();  void stopSpectrum();
 void edReset();
 void edKick();                                              // arm one energy-detect window on the current channel
+void edSetFreqMhz(int mhz);                                 // POC: tune synth off the channel grid (2400-2483 MHz)
 void serviceSpectrum();                                    // re-arm the next ED window from the loop task
 void edSnapshot(int8_t& mn, int8_t& mx, int8_t& mean, uint16_t& n);
 bool advanceChannel();

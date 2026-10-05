@@ -53,7 +53,10 @@ int enabledCount() {
 }
 
 ChannelState channels[kChannelCount];
-int currentIdx = 0;                 // Index into kChannels
+uint8_t specStepMhz = kSpecStepDefault;   // fine-spectrum step; in spec mode currentIdx indexes specFine[]
+SpecBin specFine[kSpecMaxBins];
+int currentSpecMhz = 0;
+int currentIdx = 0;                 // Index into kChannels (in spec mode: index into specFine[])
 int parkedIdx = -1;                 // >= 0: stay on this channel instead of hopping
 uint32_t dwellStartedMs = 0;
 uint32_t sweepCount = 0;
@@ -83,15 +86,6 @@ void resetAccum() {
 // Channel control (the radio lifecycle halves live in wifi_sniff.cpp and ieee154.cpp)
 // ---------------------------------------------------------------------------------------------
 bool applyChannelIdx(int idx) {
-    if (modeSpec()) {   // energy-detect sweep: same 15.4 channels, but sample raw energy instead of decoding
-        if (!specRunning) return false;
-        esp_ieee802154_set_channel(kChannels[idx]);
-        edReset();
-        edKick();
-        currentChannelNum = kChannels[idx];
-        dwellStartedMs = millis();
-        return true;
-    }
     if (is154(idx)) {
         if (!r154Running) return false;
         esp_ieee802154_set_channel(kChannels[idx]);
@@ -115,6 +109,17 @@ bool applyChannelIdx(int idx) {
 
 bool advanceChannel() {
     if (!hopActive()) return false;
+    if (modeSpec()) {   // fine spectrum: step off the channel grid in specStepMhz increments across 2.4 GHz
+        currentIdx += 1;
+        if (currentIdx < 0 || currentIdx >= specBinCount()) currentIdx = 0;
+        currentSpecMhz = specBinMhz(currentIdx);
+        edSetFreqMhz(currentSpecMhz);
+        edReset();
+        edKick();
+        currentChannelNum = 0;
+        dwellStartedMs = millis();
+        return true;
+    }
     if (parkedIdx >= 0 && chanEnabled(parkedIdx) && !channels[parkedIdx].unavailable) {
         currentIdx = parkedIdx;
         return applyChannelIdx(currentIdx);
@@ -144,6 +149,7 @@ void resetChannelStats() {
         channels[i].metrics = ChannelMetrics{};
         channels[i].edMin = 0; channels[i].edMax = -128; channels[i].edMean = 0; channels[i].edSamples = 0;
     }
+    for (int i = 0; i < kSpecMaxBins; i++) specFine[i] = SpecBin{};
     sweepCount = 0;
     resetAccum();
 }
@@ -332,6 +338,13 @@ void stopHunt() {
 // Dwell / hop
 // ---------------------------------------------------------------------------------------------
 void finishDwell() {
+    if (modeSpec()) {   // fine spectrum: store this frequency bin's energy; currentIdx indexes specFine[]
+        int8_t mn, mx, mean; uint16_t n;
+        edSnapshot(mn, mx, mean, n);
+        if (currentIdx >= 0 && currentIdx < specBinCount()) specFine[currentIdx] = SpecBin{mn, mean, mx, n};
+        sendDwell(currentIdx);
+        return;
+    }
     ChannelMetrics snap{};
     portENTER_CRITICAL(&g_accumMux);
     snap.frames = g_accum.frames;

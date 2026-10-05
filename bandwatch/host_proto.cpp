@@ -82,9 +82,9 @@ void sendHello() {
     // ~790, and a line that passes the check and then overruns is truncated mid-JSON, which is exactly what
     // the drop-whole-lines rule exists to prevent.
     if (!serialRoom(900)) return;
-    Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
+    Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"spec_step\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
-                  kVersion, static_cast<unsigned>(dwellMs()), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
+                  kVersion, static_cast<unsigned>(dwellMs()), static_cast<unsigned>(specStepMhz), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
                   esp_err_to_name(errProto), esp_err_to_name(errPromisc));
     bool first = true;
     for (int i = 0; i < kChannelCount; i++) {
@@ -114,6 +114,15 @@ void sendHello() {
 }
 
 void sendDwell(int idx) {
+    if (modeSpec()) {
+        // Fine spectrum: lightweight per-dwell line so the dashboard can walk the current frequency live.
+        if (!serialRoom(120) || idx < 0 || idx >= specBinCount()) return;
+        const SpecBin& b = specFine[idx];
+        Serial.printf("{\"t\":\"fd\",\"mhz\":%d,\"min\":%d,\"mean\":%d,\"max\":%d,\"ns\":%u,\"step\":%u,\"n\":%lu}\n",
+                      specBinMhz(idx), b.edMin, b.edMean, b.edMax, b.edSamples, specStepMhz,
+                      static_cast<unsigned long>(sweepCount));
+        return;
+    }
     if (!serialRoom(380)) return;
     const ChannelState& ch = channels[idx];
     Serial.printf("{\"t\":\"d\",\"c\":%u,\"s\":%.1f,\"r\":%.1f,\"f\":%lu,\"b\":%lu,\"st\":%u,\"u\":%u,"
@@ -126,14 +135,25 @@ void sendDwell(int idx) {
                   captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped), static_cast<unsigned long>(deauth.sent),
                   static_cast<unsigned long>(deauth.txFail),
                   sd.capEnabled ? 1 : 0, static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes));
-    // Spectrum: stream this bin's energy per dwell so the dashboard fills in bars and walks the current
-    // frequency live, like the LCD, instead of only updating once per full sweep.
-    if (modeSpec()) Serial.printf("\"e\":[%d,%d,%d,%u],", ch.edMin, ch.edMean, ch.edMax, ch.edSamples);
     printHunt();
     Serial.print("}\n");
 }
 
 void sendSweep() {
+    if (modeSpec()) {
+        // Fine spectrum: one message per full sweep, all bins, as [edMin, edMean, edMax, edSamples] in order.
+        // Frequency is lo + i*step (not sent per bin). Up to 84 bins (~1.7 kB) — dropped whole if no room.
+        const int nb = specBinCount();
+        if (!serialRoom(static_cast<size_t>(nb) * 22 + 80)) return;
+        Serial.printf("{\"t\":\"fs\",\"n\":%lu,\"step\":%u,\"lo\":%d,\"count\":%d,\"bins\":[",
+                      static_cast<unsigned long>(sweepCount), specStepMhz, kSpecLoMhz, nb);
+        for (int i = 0; i < nb; i++) {
+            const SpecBin& b = specFine[i];
+            Serial.printf("%s[%d,%d,%d,%u]", i ? "," : "", b.edMin, b.edMean, b.edMax, b.edSamples);
+        }
+        Serial.printf("],\"heap\":%u}\n", static_cast<unsigned>(ESP.getFreeHeap()));
+        return;
+    }
     if (!serialRoom(1500)) return;
     Serial.printf("{\"t\":\"s\",\"n\":%lu,\"g\":%.1f,\"band\":\"%s\",\"ch\":[", static_cast<unsigned long>(sweepCount),
                   globalActivityMax(), kBandName[bandMode]);
@@ -142,18 +162,9 @@ void sendSweep() {
         if (!chanEnabled(i)) continue;
         const ChannelState& ch = channels[i];
         const int state = ch.unavailable ? 2 : (ch.hasData ? 0 : 1);
-        if (modeSpec()) {
-            // Spectrum mode appends raw energy (dBm) + sample count:
-            // [ch, score, frames, bytes, strong, unique, state, edMin, edMean, edMax, edSamples].
-            // Only 16 channels sweep here, so the extra fields stay well inside the serialRoom() budget.
-            Serial.printf("%s[%u,%.1f,%lu,%lu,%u,%u,%d,%d,%d,%d,%u]", first ? "" : ",", kChannels[i], ch.busyEma,
-                          static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
-                          ch.metrics.strong, ch.metrics.unique, state, ch.edMin, ch.edMean, ch.edMax, ch.edSamples);
-        } else {
-            Serial.printf("%s[%u,%.1f,%lu,%lu,%u,%u,%d]", first ? "" : ",", kChannels[i], ch.busyEma,
-                          static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
-                          ch.metrics.strong, ch.metrics.unique, state);
-        }
+        Serial.printf("%s[%u,%.1f,%lu,%lu,%u,%u,%d]", first ? "" : ",", kChannels[i], ch.busyEma,
+                      static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
+                      ch.metrics.strong, ch.metrics.unique, state);
         first = false;
     }
     Serial.printf("],\"aps\":%u,\"drop\":%lu,\"heap\":%u}\n", lastApSeen, static_cast<unsigned long>(capDropped),
@@ -423,6 +434,13 @@ void handleCommand(char* line) {
     } else if (!strcmp(line, "txstat")) {
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"txstat\",\"sent\":%lu,\"fail\":%lu,\"ch\":%u}\n",
                       static_cast<unsigned long>(txTestSent), static_cast<unsigned long>(txTestFail), currentChannelNum);
+    } else if (!strcmp(line, "specstep")) {
+        const int st = atoi(arg);
+        if (st == 1 || st == 2 || st == 5) {
+            specStepMhz = static_cast<uint8_t>(st);
+            if (modeSpec()) { resetChannelStats(); currentIdx = -1; monitorReady = advanceChannel(); }
+        }
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"specstep\",\"step\":%u}\n", specStepMhz);
     } else if (!strcmp(line, "reboot")) {
         Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);

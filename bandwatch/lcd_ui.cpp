@@ -94,7 +94,8 @@ lv_obj_t* sysLines[kSysLines] = {nullptr};
 lv_obj_t* spChanLabel = nullptr;   // header right: current bin
 lv_obj_t* spPeakLabel = nullptr;
 lv_obj_t* spStatsLabel = nullptr;
-lv_obj_t* spBars[kChannelCount] = {nullptr};
+constexpr int kLcdSpecBars = 42;   // fixed LCD bar slots; the fine bins (up to 84) map onto these (max-per-group)
+lv_obj_t* spBars[kLcdSpecBars] = {nullptr};
 lv_obj_t* spFoot = nullptr;
 
 uint16_t apMaxWindow = 0;
@@ -377,10 +378,9 @@ void buildSpectrumPage(lv_obj_t* page) {
     lv_obj_set_flex_flow(barsRow, LV_FLEX_FLOW_ROW);
     lv_obj_set_flex_align(barsRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
     lv_obj_remove_flag(barsRow, LV_OBJ_FLAG_SCROLLABLE);
-    for (int i = 0; i < kChannelCount; i++) {
-        if (!is154(i)) { spBars[i] = nullptr; continue; }   // energy-detect covers only the 2.4 GHz 15.4 channels
+    for (int i = 0; i < kLcdSpecBars; i++) {
         lv_obj_t* b = lv_obj_create(barsRow);
-        lv_obj_set_size(b, 8, 2);
+        lv_obj_set_size(b, 3, 2);
         lv_obj_set_style_bg_color(b, c565(DIM_565), 0);
         lv_obj_set_style_border_width(b, 0, 0);
         lv_obj_set_style_radius(b, 1, 0);
@@ -388,7 +388,7 @@ void buildSpectrumPage(lv_obj_t* page) {
         lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
         spBars[i] = b;
     }
-    spFoot = make_label(spec, "2405    2440    2480 MHz", c565(GREY_565), &lv_font_montserrat_12);
+    spFoot = make_label(spec, "2400    2440    2483 MHz", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(spFoot, LV_PCT(100));
     lv_obj_set_style_text_align(spFoot, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_align(spFoot, LV_ALIGN_BOTTOM_MID, 0, 2);
@@ -769,39 +769,46 @@ void refreshSystem(float global) {
 // Spectrum page: per-bin energy bars (dBm) for the 2.4 GHz 15.4 channels, plus the current peak.
 void refreshSpectrum() {
     char buf[64];
-    const int curIdx = (currentIdx >= 0 && is154(currentIdx)) ? currentIdx : -1;
+    const int nb = specBinCount();
 
-    int peakDbm = -128, peakIdx = -1;
-    for (int i = 0; i < kChannelCount; i++) {
-        if (!is154(i) || !channels[i].hasData || channels[i].edSamples == 0) continue;
-        if (channels[i].edMax > peakDbm) { peakDbm = channels[i].edMax; peakIdx = i; }
+    int peakDbm = -128, peakMhz = 0;
+    for (int i = 0; i < nb; i++) {
+        if (specFine[i].edSamples == 0) continue;
+        if (specFine[i].edMax > peakDbm) { peakDbm = specFine[i].edMax; peakMhz = specBinMhz(i); }
     }
-    if (peakIdx >= 0) {
+    if (peakMhz) {
         snprintf(buf, sizeof(buf), "%d dBm", peakDbm);
         lv_label_set_text(spPeakLabel, buf);
-        snprintf(buf, sizeof(buf), "peak %d MHz", ch154Freq(kChannels[peakIdx]));
+        snprintf(buf, sizeof(buf), "peak %d MHz · %d MHz step", peakMhz, specStepMhz);
         lv_label_set_text(spStatsLabel, buf);
     } else {
         lv_label_set_text(spPeakLabel, "-- dBm");
         lv_label_set_text(spStatsLabel, "scanning...");
     }
-    if (curIdx >= 0 && monitorReady) snprintf(buf, sizeof(buf), "%d MHz%s", ch154Freq(kChannels[curIdx]), recTag());
+    if (monitorReady && currentSpecMhz) snprintf(buf, sizeof(buf), "%d MHz%s", currentSpecMhz, recTag());
     else snprintf(buf, sizeof(buf), "scan%s", recTag());
     lv_label_set_text(spChanLabel, buf);
     applyRecColor(spChanLabel);
 
-    for (int i = 0; i < kChannelCount; i++) {
-        if (!is154(i) || !spBars[i]) continue;
+    // Map the nb fine bins onto the fixed LCD bar slots (max-per-group so 1-bin peaks survive downsampling).
+    const int curBar = (nb > 0 && currentSpecMhz) ? (currentIdx * kLcdSpecBars / nb) : -1;
+    for (int j = 0; j < kLcdSpecBars; j++) {
+        if (!spBars[j]) continue;
+        int lo = j * nb / kLcdSpecBars, hi = (j + 1) * nb / kLcdSpecBars;
+        if (hi <= lo) hi = lo + 1;
+        if (lo >= nb) lo = nb - 1, hi = nb;
+        int mx = -128; bool any = false;
+        for (int i = lo; i < hi && i < nb; i++) if (specFine[i].edSamples > 0) { any = true; if (specFine[i].edMax > mx) mx = specFine[i].edMax; }
         int h = 2;
         lv_color_t col = c565(DIM_565);
-        if (channels[i].hasData && channels[i].edSamples > 0) {
-            const float sc = edDbmToScore(channels[i].edMax);
+        if (any) {
+            const float sc = edDbmToScore(mx);
             h = 2 + static_cast<int>(sc * 120.0f / 100.0f);
             col = (sc < 3.0f) ? c565(GREY_565) : scoreColor(sc);
         }
-        if (i == curIdx && monitorReady) col = c565(CYAN_565);
-        lv_obj_set_height(spBars[i], h);
-        lv_obj_set_style_bg_color(spBars[i], col, 0);
+        if (j == curBar && monitorReady) col = c565(CYAN_565);
+        lv_obj_set_height(spBars[j], h);
+        lv_obj_set_style_bg_color(spBars[j], col, 0);
     }
 }
 

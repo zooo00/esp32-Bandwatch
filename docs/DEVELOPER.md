@@ -705,3 +705,73 @@ from that AP's own row — the suffix is a join key and never goes back to the d
 
 Same standard as the surveillance OUIs in §15: a match is evidence, and the UI says "on &lt;ssid&gt;" only
 for a BSS we independently heard.
+
+## 18. Spectrum mode: 2.4 GHz energy detection + unexplained-energy flagging (1.7)
+
+Every other mode measures RF only as its radio *decodes* it: a Wi-Fi/BLE/15.4 RSSI exists only on a frame
+that demodulated, and `computeBusyScore()` is a packet-activity proxy, not a noise floor. `spec` mode is
+different — it reads **raw channel energy, no decode**.
+
+### The one real energy primitive on this board
+The prebuilt core's 802.15.4 driver exposes `esp_ieee802154_energy_detect(uint32_t duration)` (duration in
+16 µs symbols) with the weak callback `esp_ieee802154_energy_detect_done(int8_t power)` giving a detected
+level in **dBm**. `ieee154.cpp` already included `<esp_ieee802154.h>`, so nothing new had to be pulled in.
+It covers only the 15.4 channels **11–26 (≈2402–2480 MHz, 5 MHz bins)** — which overlaps all of 2.4 GHz
+Wi-Fi (ch 1–13), BLE and Zigbee/Thread, plus most proprietary 2.4 GHz traffic. **There is no equivalent for
+Wi-Fi/5 GHz**: `rx_ctrl.rssi` only ever arrives attached to a decoded packet, so a true swept analyzer is
+2.4 GHz only. This is the single most important constraint on the feature.
+
+### Firmware path
+`BAND_SPEC` reuses the 15.4 radio and its 11–26 channel set (`chanEnabled()` returns `is154(idx)`), but
+`startSpectrum()` powers the radio **without** `set_promiscuous`/`receive()` — so `esp_ieee802154_receive_done`
+never fires. Per channel, `applyChannelIdx()` calls `edReset()` then `edKick()` (one energy-detect window);
+`esp_ieee802154_energy_detect_done()` folds `power` into a spinlock-guarded accumulator (sum/min/max/count).
+**Re-arming the next window must happen from the loop task, not the done callback** — arming from inside the
+ISR callback silently fails and yields exactly one sample per dwell (measured). So the callback only sets a
+`s_edReady` flag and `serviceSpectrum()` (called from `Bandwatch_Loop()`, ~every 2 ms) kicks the next ED.
+That gives **~25–30 samples per `kEdDwellMs` (60 ms) dwell**, which is what lets `edMax` catch bursty emitters (a BLE advert
+or Wi-Fi burst between windows) rather than a single lucky/unlucky snapshot. `finishDwell()` snapshots
+min/mean/max dBm and the sample count into `ChannelState.edMin/edMean/edMax/edSamples` and maps the peak onto
+the shared 0–100 bar/LED range via `edDbmToScore()` (clamped to `kEdFloorDbm`/`kEdCeilDbm`, −95…−20). The
+accumulator lives in `ieee154.cpp` behind `edReset/edKick/serviceSpectrum/edSnapshot`; `specRunning` gates the
+mode exactly like `r154Running` gates 15.4 (`advanceChannel`/`hopIfNeeded`/`setBandMode`). RAM cost is ~6 B ×
+`kChannelCount` in `ChannelState` (not the packed `WifiDev`) plus a handful of accumulator ints — trivial.
+
+### Serial
+`sendSweep()` appends four energy fields to each row **only in `spec` mode**:
+`[ch, score, frames, bytes, strong, unique, state, edMin, edMean, edMax, edSamples]` (all dBm except the
+sample count). Only 16 channels sweep here, so the longer rows stay well inside the `serialRoom(1500)` budget;
+Wi-Fi/154 rows are byte-for-byte unchanged. `edSamples` doubles as a confidence indicator.
+
+`sendDwell()` also appends `"e":[edMin,edMean,edMax,edSamples]` per dwell **only in `spec` mode**, so the
+dashboard fills bars in and walks the current-frequency marker live (like the LCD) between the full-sweep `s`
+messages rather than refreshing the whole chart once per sweep.
+
+**Speed and resolution.** The spec dwell is `kEdDwellMs` (60 ms, vs `kDwellMs` 220 ms) — energy detection needs
+only ~25 samples, so a full 16-channel sweep is ~1 s. To honor a dwell that short, channel hopping
+(`hopIfNeeded`) runs from `Bandwatch_Loop()` (~2 ms cadence) instead of the 120 ms LVGL UI timer. **Resolution
+is fixed at 5 MHz / 16 bins:** `esp_ieee802154_set_channel()` takes a channel number (11–26) only — there is no
+frequency API — and Wi-Fi's 2.4 GHz channels are also 5 MHz-spaced with no energy primitive, so sub-5 MHz
+would require poking undocumented RF registers (same fragility class as the §9 deauth offsets) and is not done.
+
+### Host: flagging unexplained energy (not identifying protocols)
+The radio **cannot demodulate an unknown protocol** — it only knows 802.11/BLE/802.15.4. What the host does
+is correlate: `_unidentified()` (in `bandwatch_host.py`) maps each decoded emitter to the frequency span it
+occupies — Wi-Fi 2.4 ch *C* → 2412+5·(*C*−1) MHz ±11 MHz, BLE adv → 2402/2426/2480, 15.4 ch → its own bin —
+using only devices seen in the last `SPEC_KNOWN_AGE_S` (120 s). It estimates the **band-wide noise floor** as
+a low percentile across all bins/recent sweeps (`spec_hist`), then flags any bin whose peak sits
+`SPEC_FLOOR_MARGIN` dB above that floor with duty ≥ `SPEC_MIN_DUTY` and whose center frequency no known span
+covers. The floor is band-wide on purpose: a per-bin min makes a *continuously-on* emitter look quiet
+against its own flat history.
+
+The honest caveat, stated in the UI: one radio can't decode and energy-scan at once, so "known" is whatever
+the Wi-Fi/BLE/15.4 modes last saw — sweep those first, then switch to `spec`. A hit means *energy with no
+decoded explanation* (evidence of an emitter — proprietary link, video sender, RC/drone controller, microwave,
+interferer), **not** a device identification. Same standard as §15/§17: a match is evidence, and the wording
+says so.
+
+### UI
+LCD: `PAGE_SPECTRUM` (`buildSpectrumPage`/`refreshSpectrum` in `lcd_ui.cpp`), one bar per 15.4 bin scaled
+from `edMax` via `edDbmToScore()`, available only in `spec` mode (`pageAvailable`). Dashboard: a Spectrum tab
+with a dBm bar chart, a client-side waterfall (`<canvas>`, one row per completed sweep), and the
+unexplained-energy list from `s.unidentified`.

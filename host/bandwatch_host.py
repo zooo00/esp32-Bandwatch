@@ -58,6 +58,12 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 HISTORY_LEN = 600       # ~10 minutes of 1 Hz samples for the global trend
+# Spectrum mode (band "spec"): per-bin energy history used to estimate a noise floor and a duty cycle, and
+# to flag 2.4 GHz energy no recently-decoded Wi-Fi/BLE/Zigbee emitter explains.
+SPEC_HIST_LEN = 40          # recent energy-detect samples kept per 15.4 channel (~2 min of sweeps)
+SPEC_FLOOR_MARGIN = 6       # dB above the rolling floor that counts as "energy present"
+SPEC_MIN_DUTY = 0.10        # need energy in at least this fraction of recent sweeps to flag a bin
+SPEC_KNOWN_AGE_S = 120      # a decoded emitter older than this no longer "explains" a frequency
 DEV_HIST_LEN = 120      # per-device RSSI samples (one per device report, ~2 s)
 DEV_EXPIRE_S = 600      # forget devices not seen for this long
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
@@ -349,6 +355,11 @@ class Bandwatch:
         self.cap_band = None
         self.history = deque(maxlen=HISTORY_LEN)
         self._last_hist = 0
+        self.spec_hist = {}          # spectrum mode: 15.4 channel -> deque of recent edMax (dBm)
+        # Combined "wide" view: the single radio scans one band at a time, so we keep each band's last-seen
+        # data across mode switches. 2.4 GHz is real energy (spec mode); 5 GHz is packet activity (Wi-Fi mode).
+        self.energy24 = {}; self.energy24_ts = 0     # 15.4 ch 11-26 -> {ed_min,ed_mean,ed_max,ed_samples}
+        self.activity5 = {}; self.activity5_ts = 0   # 5 GHz Wi-Fi ch -> {s,f,b,u,st}
 
     # ---------------- serial side ----------------
     def open(self, port):
@@ -520,8 +531,13 @@ class Bandwatch:
                 self._sd_track(st["sd"])
         elif t == "d":
             c = msg["c"]
-            st["channels"][c] = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
-                                 "u": msg["u"], "state": 0, "t": time.time()}
+            entry = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
+                     "u": msg["u"], "state": 0, "t": time.time()}
+            e = msg.get("e")   # spectrum: [edMin, edMean, edMax, edSamples] for this dwell
+            if e and len(e) >= 4:
+                entry.update({"ed_min": e[0], "ed_mean": e[1], "ed_max": e[2], "ed_samples": e[3]})
+            st["channels"][c] = entry
+            self._cache_wide(st.get("band"), c, entry)
             st["current"] = c
             st["global"] = msg["g"]
             st["sweep"] = msg["n"]
@@ -549,13 +565,21 @@ class Bandwatch:
             st["aps"] = msg.get("aps", 0)
             st["drop"] = msg.get("drop", 0)
             st["heap"] = msg.get("heap")
+            is_spec = st["band"] == "spec"
             chs = []
             for row in msg["ch"]:
-                c, s, f, b, strong, u, state = row
+                c, s, f, b, strong, u, state = row[:7]
                 chs.append(c)
                 prev = st["channels"].get(c, {})
-                st["channels"][c] = {"s": s, "r": prev.get("r", s), "f": f, "b": b, "st": strong, "u": u,
-                                     "state": state, "t": prev.get("t", 0)}
+                entry = {"s": s, "r": prev.get("r", s), "f": f, "b": b, "st": strong, "u": u,
+                         "state": state, "t": prev.get("t", 0)}
+                if is_spec and len(row) >= 10:
+                    # spectrum rows carry raw energy: [..., state, edMin, edMean, edMax, edSamples?] (dBm)
+                    entry.update({"ed_min": row[7], "ed_mean": row[8], "ed_max": row[9],
+                                  "ed_samples": row[10] if len(row) >= 11 else None})
+                    self._spec_track(c, row[9])
+                st["channels"][c] = entry
+                self._cache_wide(st["band"], c, entry)
             st["chs"] = chs
             st["channels"] = {c: v for c, v in st["channels"].items() if c in chs}
         elif t == "w":
@@ -733,6 +757,79 @@ class Bandwatch:
         for mac in [m for m, d in table.items() if now - d["last"] > DEV_EXPIRE_S]:
             del table[mac]
 
+    def _cache_wide(self, band, c, entry):
+        """Keep each band's last-seen data for the combined 2.4-energy + 5-GHz-activity view, since the single
+        radio only scans one band at a time. 2.4 GHz is real energy (spec); 5 GHz is packet activity (Wi-Fi)."""
+        now = time.time()
+        if band == "spec" and "ed_max" in entry:
+            self.energy24[c] = {k: entry.get(k) for k in ("ed_min", "ed_mean", "ed_max", "ed_samples")}
+            self.energy24_ts = now
+        elif band in ("5g", "both") and c > 14 and "s" in entry:   # 5 GHz Wi-Fi channels only
+            self.activity5[c] = {"s": entry["s"], "f": entry.get("f", 0), "b": entry.get("b", 0),
+                                 "u": entry.get("u", 0), "st": entry.get("st", 0)}
+            self.activity5_ts = now
+
+    def _wide(self):
+        now = time.time()
+        return {
+            "energy24": [dict(ch=c, freq=2405 + 5 * (c - 11), **self.energy24[c]) for c in sorted(self.energy24)],
+            "energy24_age": round(now - self.energy24_ts, 1) if self.energy24_ts else None,
+            "activity5": [dict(ch=c, freq=5000 + 5 * c, **self.activity5[c]) for c in sorted(self.activity5)],
+            "activity5_age": round(now - self.activity5_ts, 1) if self.activity5_ts else None,
+        }
+
+    def _spec_track(self, ch, ed_max):
+        h = self.spec_hist.get(ch)
+        if h is None:
+            h = deque(maxlen=SPEC_HIST_LEN)
+            self.spec_hist[ch] = h
+        h.append(ed_max)
+
+    def _unidentified(self):
+        """Flag 2.4 GHz energy bins carrying sustained power that no recently-decoded Wi-Fi/BLE/Zigbee
+        emitter explains. The single radio can't decode and energy-scan at once, so "known" is drawn from
+        the last time those modes ran: this is an unexplained-energy flag, not a device identification."""
+        now = time.time()
+        known = []   # (lo_mhz, hi_mhz) spans we have actually decoded recently
+        with self.dlock:
+            for d in self.wifi_devs.values():
+                ch = d.get("ch") or 0
+                if 1 <= ch <= 14 and now - d["last"] <= SPEC_KNOWN_AGE_S:
+                    f = 2412 + 5 * (ch - 1)
+                    known.append((f - 11, f + 11))   # ~22 MHz occupied bandwidth
+            for d in self.z_devs.values():
+                ch = d.get("ch") or 0
+                if 11 <= ch <= 26 and now - d["last"] <= SPEC_KNOWN_AGE_S:
+                    f = 2405 + 5 * (ch - 11)
+                    known.append((f - 1, f + 1))
+            ble_recent = any(now - d["last"] <= SPEC_KNOWN_AGE_S for d in self.ble_devs.values())
+        if ble_recent:
+            # BLE advertises on 2402/2426/2480 and hops data channels across the band; if we've decoded any
+            # BLE recently, treat at least the advertising frequencies as explained.
+            for f in (2402, 2426, 2480):
+                known.append((f - 1, f + 1))
+        # Noise floor = the band-wide quiet level (a low percentile across all bins and recent sweeps), so a
+        # continuously-on emitter is still measured against ambient quiet rather than its own flat history.
+        all_samples = sorted(v for h in self.spec_hist.values() for v in h)
+        if len(all_samples) < 8:
+            return []
+        floor = all_samples[max(0, int(len(all_samples) * 0.15) - 1)]
+        gate = floor + SPEC_FLOOR_MARGIN
+        out = []
+        for ch, h in self.spec_hist.items():
+            if not (11 <= ch <= 26) or not h:
+                continue
+            peak = max(h)
+            duty = sum(1 for v in h if v > gate) / len(h)
+            if peak <= gate or duty < SPEC_MIN_DUTY:
+                continue
+            f = 2405 + 5 * (ch - 11)
+            if any(lo <= f <= hi for lo, hi in known):
+                continue
+            out.append({"ch": ch, "freq_mhz": f, "peak_dbm": peak, "floor_dbm": floor, "duty": round(duty, 2)})
+        out.sort(key=lambda e: e["peak_dbm"], reverse=True)
+        return out
+
     def handle_frame(self, raw):
         pcap = self.pcap          # stop_capture() runs on the HTTP thread and may clear/close it mid-frame
         if pcap is None:
@@ -814,6 +911,8 @@ class Bandwatch:
             "band": st["band"], "current": st["current"], "global": st["global"], "sweep": st["sweep"], "aps": st["aps"],
             "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
             "channels": chans, "history": list(self.history), "capture": st["capture"],
+            "unidentified": self._unidentified() if st["band"] == "spec" else [],
+            "wide": self._wide(),
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"], "saved": st["saved"],
             "oui_source": self.oui.source,
@@ -864,7 +963,7 @@ def make_handler(bw, html_path):
                 return
             cmd = req.get("cmd")
             try:
-                if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154"):
+                if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154", "spec"):
                     bw.send(f"band {req['value']}")
                 elif cmd == "park":
                     bw.send(f"park {int(req.get('value') or 0)}")

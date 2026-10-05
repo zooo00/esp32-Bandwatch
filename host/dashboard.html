@@ -23,6 +23,7 @@
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--page); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 20px 16px 40px; }
   .wrap { max-width: 1180px; margin: 0 auto; display: grid; gap: 14px; }
+  .wrap > * { min-width: 0; }   /* grid items default to min-width:auto; 0 lets wide tables scroll instead of blowing out the page width */
   header { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
   header h1 { font-size: 20px; margin: 0; font-weight: 650; }
   .pill { display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 999px; border: 1px solid var(--border); font-size: 12px; color: var(--ink-2); background: var(--surface); }
@@ -107,6 +108,17 @@
   .stale { opacity: .55; }
   .note { font-size: 12px; color: var(--muted); }
   .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
+  .wfaxis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .specstatus { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; min-height: 28px; }
+  #unid { overflow-x: auto; }
+  #spec { min-height: 150px; }
+  @media (max-width: 760px) {
+    body { padding: 12px 10px 32px; }
+    .grid2, .hunt { grid-template-columns: 1fr; }
+    .tabs { flex-wrap: wrap; }
+    .tabs button { padding: 8px 10px; }
+    .tile.hero .value { font-size: 34px; }
+  }
   .hunt { display: grid; grid-template-columns: 200px 1fr; gap: 16px; align-items: center; border-color: var(--series); }
   .hunt[hidden], [hidden] { display: none !important; }
   .hunt .big { font-size: 56px; font-weight: 650; line-height: 1; }
@@ -154,6 +166,7 @@
           <button data-band="both">Both</button>
           <button data-band="ble">Bluetooth LE</button>
           <button data-band="154">802.15.4</button>
+          <button data-band="spec">2.4 GHz energy</button>
         </div>
       </div>
       <div class="control" id="parkCtl">
@@ -219,6 +232,7 @@
     <button data-tab="wifi">Wi‑Fi devices<span class="n" id="nWifi">0</span></button>
     <button data-tab="ble">Bluetooth LE<span class="n" id="nBle">0</span></button>
     <button data-tab="zig">Zigbee / Thread<span class="n" id="nZig">0</span></button>
+    <button data-tab="spectrum">Spectrum<span class="n" id="nUnid">0</span></button>
     <button class="ghost" id="pauseBtn" style="margin-left:auto;align-self:center" title="Freeze the page (space bar). Tables also freeze while the mouse is over them.">Pause updates</button>
   </nav>
 
@@ -250,6 +264,10 @@
   </div>
 
   <div id="tab-wifi" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <h2>Channel activity <small>busy score 0–100 per Wi‑Fi channel · live while in a Wi‑Fi band</small></h2>
+      <div class="chart-wrap"><svg id="wifiBars" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="wifiBarTip"></div></div>
+    </section>
     <section class="card">
       <div class="toolbar">
         <label class="note"><input type="checkbox" id="survOnly"> surveillance only</label>
@@ -269,6 +287,10 @@
   </div>
 
   <div id="tab-ble" hidden>
+    <section class="card" style="margin-bottom:14px">
+      <h2>Devices by signal <small>RSSI per advertiser, strongest first · live while scanning BLE</small></h2>
+      <div class="chart-wrap"><svg id="bleBars" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="bleBarTip"></div></div>
+    </section>
     <section class="card">
       <div class="toolbar">
         <input type="search" id="bleFilter" placeholder="filter name / MAC / vendor / kind">
@@ -299,6 +321,30 @@
       <p class="note">Rows keep their order while the mouse is over a table. 802.15.4 mode sweeps channels 11–26 (Zigbee usually sits on 11, 15, 20 or 25; Thread on any). Nodes are keyed by their 64‑bit extended address when a frame carried one (vendor from its OUI), otherwise by PAN/short address. Protocol is inferred from the network-layer header: Zigbee NWK, Zigbee Green Power, 6LoWPAN (Thread), or MAC-layer encryption (Thread secures at the MAC layer, Zigbee does not). <b>Permit join</b> means a coordinator/router is currently accepting new devices. Captures in this mode use the 802.15.4 TAP link type; Wireshark decodes Zigbee and Thread and knows the default Zigbee trust-centre key.</p>
     </section>
   </div>
+
+  <div id="tab-spectrum" hidden>
+    <div id="specStatus" class="specstatus" style="margin-bottom:12px"></div>
+    <section class="card" style="margin-bottom:14px">
+      <h2>2.4 GHz — RF energy <small>true dBm per 5 MHz bin · auto-ranged · bar = average, cap ▔ = peak</small></h2>
+      <div class="chart-wrap"><svg id="spec" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="specTip"></div></div>
+    </section>
+    <section class="card" style="margin-bottom:14px">
+      <h2>5 GHz — traffic activity <small>busy score 0–100 from decoded packets · <em>not</em> RF energy (no 5 GHz energy sensor)</small></h2>
+      <div class="chart-wrap"><svg id="spec5" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="spec5Tip"></div></div>
+    </section>
+    <div class="grid2" style="margin-bottom:14px">
+      <section class="card">
+        <h2>2.4 GHz waterfall <small>frequency across · time down, newest at the bottom</small></h2>
+        <canvas id="waterfall" width="320" height="180" style="width:100%;height:180px;image-rendering:pixelated;border-radius:8px;background:#0b0f14"></canvas>
+        <div class="wfaxis"><span>2405</span><span>2425</span><span>2445</span><span>2465</span><span>2480 MHz</span></div>
+      </section>
+      <section class="card">
+        <h2>Unexplained energy <small>no decoded Wi‑Fi / BLE / Zigbee accounts for it</small></h2>
+        <div id="unid"></div>
+      </section>
+    </div>
+    <p class="note"><b>Two different measurements, one view.</b> The single radio scans one band at a time, so each chart is as of its last scan — the status row above shows how fresh each is, with a button to re-scan it. <b>2.4 GHz</b> is <b>real RF energy</b> (dBm) from the 802.15.4 energy detector: true power whether or not anything decodes. <b>5 GHz</b> has no energy sensor on this chip, so it shows <b>traffic activity</b> (a 0–100 busy score from decoded Wi‑Fi) — a proxy for occupancy, not power; the two axes are not comparable. <b>Unexplained energy</b> flags 2.4 GHz bins with sustained power that no recently-decoded Wi‑Fi/BLE/Zigbee device accounts for — evidence of an emitter (proprietary link, video sender, RC/drone controller, microwave, interferer), <em>not</em> an identification.</p>
+  </div>
 </div>
 
 <script>
@@ -310,6 +356,15 @@
   const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
   const rate = (n) => n >= 10000 ? (n / 1000).toFixed(0) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n.toFixed(0);
   const band = (c) => (state && state.band === '154') ? '802.15.4' : c > 14 ? '5 GHz' : '2.4 GHz';
+  const ED_FLOOR = -95, ED_CEIL = -20;   // dBm range for the spectrum display (matches firmware kEdFloor/Ceil)
+  let wfSweep = -1;                        // last sweep number painted into the waterfall
+  function edColor(dbm) {
+    const v = Math.max(0, Math.min(1, (dbm - ED_FLOOR) / (ED_CEIL - ED_FLOOR)));
+    const stops = [[18, 26, 48], [0, 150, 180], [240, 200, 0], [230, 40, 30]];   // navy → cyan → yellow → red
+    const seg = v * (stops.length - 1), i = Math.min(stops.length - 2, Math.floor(seg)), f = seg - i;
+    const mix = (a, b) => Math.round(a + (b - a) * f);
+    return `rgb(${mix(stops[i][0], stops[i + 1][0])},${mix(stops[i][1], stops[i + 1][1])},${mix(stops[i][2], stops[i + 1][2])})`;
+  }
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const ago = (s) => s == null ? '–' : s < 1 ? 'now' : s < 60 ? fmt(s) + ' s' : s < 3600 ? fmt(s / 60) + ' min' : fmt(s / 3600, 1) + ' h';
   const post = (body) => fetch('/api/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -354,10 +409,12 @@
   });
   $('#huntStop').addEventListener('click', () => post({ cmd: 'hunt', mac: null }));
   $('#deauthStop').addEventListener('click', () => { armPending('deauth', $('#deauthStop'), 'Stopping…'); post({ cmd: 'deauth', mac: null }); });
-  $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (!b) return; tab = b.dataset.tab; document.querySelectorAll('#tabs button[data-tab]').forEach(x => x.classList.toggle('active', x === b)); ['overview', 'wifi', 'ble', 'zig'].forEach(t => $('#tab-' + t).hidden = t !== tab); if (state) render(state); });
+  $('#tabs').addEventListener('click', (e) => { const b = e.target.closest('button[data-tab]'); if (!b) return; tab = b.dataset.tab; document.querySelectorAll('#tabs button[data-tab]').forEach(x => x.classList.toggle('active', x === b)); ['overview', 'wifi', 'ble', 'zig', 'spectrum'].forEach(t => $('#tab-' + t).hidden = t !== tab); if (state) render(state); });
   $('#pauseBtn').addEventListener('click', () => { paused = !paused; $('#pauseBtn').textContent = paused ? 'Resume updates' : 'Pause updates'; $('#pauseBtn').classList.toggle('stop', paused); if (!paused && state) render(state); });
   document.addEventListener('keydown', (e) => { if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('#pauseBtn').click(); } });
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
+  document.addEventListener('click', (e) => { if (e.target.closest('[data-startspec]')) post({ cmd: 'band', value: 'spec' }); });
+  document.addEventListener('click', (e) => { if (e.target.closest('[data-start5g]')) post({ cmd: 'band', value: '5g' }); });
   // Deauth button: broadcast mode (kick every station on an AP)
   document.addEventListener('click', (e) => {
     const k = e.target.closest('button[data-deauth]');
@@ -552,8 +609,8 @@
     $('#tAps').textContent = wifi ? fmt(s.aps) : fmt(s.ble.devs);
   }
 
-  function renderBars(s) {
-    const svg = $('#bars'), W = 1000, H = 300, padL = 36, padR = 10, padT = 24, padB = 44;
+  function renderBars(s, svgSel, tipSel) {
+    const svg = $(svgSel || '#bars'), W = 1000, H = 300, padL = 36, padR = 10, padT = 24, padB = 44;
     const chs = s.channels; if (!chs.length) { svg.innerHTML = s.band === 'ble' ? '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">Bluetooth LE mode — switch to a Wi‑Fi band to see channel scores</text>' : ''; return; }
     const plotW = W - padL - padR, plotH = H - padT - padB;
     const z = s.band === '154';
@@ -585,7 +642,7 @@
     for (const g in groups) { const a = groups[g]; out.push(`<text x="${(a[0] + a[a.length - 1]) / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">${names[g]}</text>`); }
     out.push(labels.join(''));
     svg.innerHTML = out.join('');
-    const tip = $('#barTip'), wrap = svg.parentElement;
+    const tip = $(tipSel || '#barTip'), wrap = svg.parentElement;
     svg.querySelectorAll('.hit').forEach(h => {
       h.addEventListener('mousemove', (e) => {
         const c = chs[+h.dataset.i]; const r = wrap.getBoundingClientRect();
@@ -693,6 +750,8 @@
   }
 
   function renderWifi(s) {
+    if (['5g', '2.4g', 'both'].includes(s.band)) renderBars(s, '#wifiBars', '#wifiBarTip');
+    else $('#wifiBars').innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">Switch Mode to a Wi‑Fi band to see channel activity.</text>';
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
     const survOnly = $('#survOnly') && $('#survOnly').checked;
     let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy].join(' ').toLowerCase().includes(f)));
@@ -709,7 +768,37 @@
     for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.deauth && s.deauth.mac === d.mac ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
+  function rssiBarColor(r) { return r >= -55 ? 'var(--critical)' : r >= -70 ? 'var(--warning)' : r >= -82 ? '#caa23a' : 'var(--series)'; }
+  function renderBleBars(s) {
+    const svg = $('#bleBars'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 36, padR = 10, padT = 18, padB = 46;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const devs = (s.ble_devs || []).filter(d => d.age < 60).sort((a, b) => b.rssi - a.rssi).slice(0, 32);
+    if (!devs.length) { svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">${s.band === 'ble' ? 'scanning…' : 'Switch Mode to Bluetooth LE to scan.'}</text>`; return; }
+    const plotW = W - padL - padR, plotH = H - padT - padB, LO = -100, HI = -30;
+    const yOf = r => { const v = Math.max(LO, Math.min(HI, r)); return padT + plotH - (v - LO) / (HI - LO) * plotH; };
+    const slot = plotW / devs.length, bw = Math.min(22, Math.max(3, slot - 2)), out = [];
+    out.push('<g class="grid">' + [-90, -70, -50, -30].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${yOf(v)}" y2="${yOf(v)}"/>`).join('') + '</g>');
+    out.push('<g class="axis">' + [-90, -70, -50, -30].map(v => `<text x="${padL - 6}" y="${yOf(v) + 4}" text-anchor="end">${v}</text>`).join('') + `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text></g>`);
+    devs.forEach((d, i) => {
+      const cx = padL + slot * i + slot / 2, bx = cx - bw / 2, top = yOf(d.rssi), h = Math.max(1, yOf(LO) - top);
+      out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
+      out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="2" style="fill:${rssiBarColor(d.rssi)}"/>`);
+    });
+    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">${devs.length} nearest advertisers — RSSI (dBm)</text>`);
+    svg.innerHTML = out.join('');
+    const tip = $('#bleBarTip'), wrap = svg.parentElement;
+    svg.querySelectorAll('.hit').forEach(h => {
+      h.addEventListener('mousemove', (e) => {
+        const d = devs[+h.dataset.i], r = wrap.getBoundingClientRect();
+        tip.style.display = 'block'; tip.style.left = (e.clientX - r.left) + 'px'; tip.style.top = (e.clientY - r.top) + 'px';
+        tip.innerHTML = `<b>${esc(d.name) || d.mac}</b><br>${d.rssi} dBm · ${fmt(d.adv)} adv<br><span style="opacity:.6">${esc(d.vendor || d.kind || '')}</span>`;
+      });
+      h.addEventListener('mouseleave', () => tip.style.display = 'none');
+    });
+  }
+
   function renderBle(s) {
+    renderBleBars(s);
     const f = $('#bleFilter').value.trim().toLowerCase(), active = $('#bleActive').checked;
     let rows = s.ble_devs.filter(d => (!active || d.age < 60) && (!f || [d.name, d.mac, d.vendor, d.kind, d.company_name].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'ble');
@@ -737,6 +826,121 @@
     for (const tr of $('#zigTbl tbody').children) { const d = rows.find(x => x.key === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.key ? 'hunted' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
+  // Combined "wide" view: 2.4 GHz is real RF energy (dBm, auto-ranged); 5 GHz is traffic activity (0–100).
+  // The single radio scans one band at a time, so each chart draws from the host's last-seen cache (s.wide).
+  function energyBins(s) {
+    const by = {}; ((s.wide && s.wide.energy24) || []).forEach(e => { by[e.ch] = e; });
+    return Array.from({ length: 16 }, (_, i) => ({ ch: 11 + i, freq: 2405 + 5 * i, d: by[11 + i] || null }));
+  }
+
+  function renderSpecStatus(s) {
+    const w = s.wide || {};
+    const txt = a => a == null ? 'never' : a < 1.5 ? 'live' : `${Math.round(a)}s ago`;
+    const e = s.band === 'spec' ? 'live' : txt(w.energy24_age);
+    const a = (s.band === '5g' || s.band === 'both') ? 'live' : txt(w.activity5_age);
+    const pill = v => v === 'live' ? 'pill on' : 'pill';
+    $('#specStatus').innerHTML =
+      `<span class="${pill(e)}"><span class="dot"></span>2.4 GHz energy: ${e}</span>` +
+      (s.band === 'spec' ? '' : `<button class="small" data-startspec>Scan 2.4 GHz</button>`) +
+      `<span class="${pill(a)}"><span class="dot"></span>5 GHz activity: ${a}</span>` +
+      ((s.band === '5g' || s.band === 'both') ? '' : `<button class="small" data-start5g>Scan 5 GHz</button>`) +
+      `<span style="opacity:.7">single radio — one band at a time; the other is last-seen</span>`;
+  }
+
+  function renderEnergy24(s) {
+    const svg = $('#spec'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 46, padR = 12, padT = 18, padB = 42;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const bins = energyBins(s), plotW = W - padL - padR, plotH = H - padT - padB;
+    // Auto-range the dBm window to the live data (min 30 dB span) so differences show even when the whole band
+    // is hot — a fixed -95..-20 scale squashes a band sitting at, say, -35 dBm flat into identical tall bars.
+    const vals = []; bins.forEach(b => { if (b.d) vals.push(b.d.ed_min, b.d.ed_max); });
+    let lo = vals.length ? Math.min(...vals) - 3 : -100, hi = vals.length ? Math.max(...vals) + 3 : -30;
+    if (hi - lo < 30) { const m = (hi + lo) / 2; lo = m - 15; hi = m + 15; }
+    lo = Math.max(-115, lo); hi = Math.min(0, hi);
+    const yOf = d => { const v = Math.max(lo, Math.min(hi, d)); return padT + plotH - (v - lo) / (hi - lo) * plotH; };
+    const slot = plotW / 16, bw = Math.min(34, Math.max(4, slot - 3)), out = [];
+    out.push('<g class="grid">' + [0, 1, 2, 3].map(k => `<line x1="${padL}" x2="${W - padR}" y1="${yOf(lo + (hi - lo) * k / 3)}" y2="${yOf(lo + (hi - lo) * k / 3)}"/>`).join('') + '</g>');
+    out.push('<g class="axis">' + [0, 1, 2, 3].map(k => `<text x="${padL - 6}" y="${yOf(lo + (hi - lo) * k / 3) + 4}" text-anchor="end">${Math.round(lo + (hi - lo) * k / 3)}</text>`).join('') + `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text></g>`);
+    bins.forEach((b, i) => {
+      const cx = padL + slot * i + slot / 2, bx = cx - bw / 2;
+      out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
+      if (b.d) {
+        const top = yOf(b.d.ed_mean), h = Math.max(1, yOf(lo) - top);
+        out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="2" style="fill:${edColor(b.d.ed_mean)}"/>`);
+        out.push(`<line x1="${bx - 1}" x2="${bx + bw + 1}" y1="${yOf(b.d.ed_max)}" y2="${yOf(b.d.ed_max)}" style="stroke:var(--ink);stroke-width:1.5;opacity:.65"/>`);
+        if (s.band === 'spec' && b.ch === s.current) out.push(`<path class="marker" d="M${cx - 5},${yOf(lo) + 28} l5,-6 l5,6 z"/>`);
+      } else {
+        out.push(`<rect x="${bx}" y="${yOf(lo) - 2}" width="${bw}" height="2" style="fill:var(--grid)"/>`);
+      }
+      if (i % 4 === 0 || i === 15) out.push(`<text class="axis" x="${cx}" y="${yOf(lo) + 18}" text-anchor="middle">${b.freq}</text>`);
+    });
+    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">2.4 GHz · frequency (MHz)</text>`);
+    svg.innerHTML = out.join('');
+    const tip = $('#specTip'), wrap = svg.parentElement;
+    svg.querySelectorAll('.hit').forEach(h => {
+      h.addEventListener('mousemove', (ev) => {
+        const b = bins[+h.dataset.i], r = wrap.getBoundingClientRect();
+        tip.style.display = 'block'; tip.style.left = (ev.clientX - r.left) + 'px'; tip.style.top = (ev.clientY - r.top) + 'px';
+        tip.innerHTML = b.d ? `<b>${b.freq} MHz</b> <span style="opacity:.55">15.4 ch ${b.ch}</span><br>avg ${b.d.ed_mean} dBm · peak ${b.d.ed_max} dBm<br>min ${b.d.ed_min} dBm${b.d.ed_samples != null ? ` · ${b.d.ed_samples} samp` : ''}` : `<b>${b.freq} MHz</b><br>no data yet`;
+      });
+      h.addEventListener('mouseleave', () => tip.style.display = 'none');
+    });
+    // Waterfall (peak energy, 16 fixed columns) — only while actively scanning 2.4 GHz.
+    const cv = $('#waterfall');
+    if (s.band === 'spec' && s.sweep !== wfSweep) {
+      wfSweep = s.sweep;
+      const ctx = cv.getContext('2d'), w = cv.width, hg = cv.height, cw = w / 16;
+      ctx.drawImage(cv, 0, -1);
+      bins.forEach((b, i) => { ctx.fillStyle = b.d ? edColor(b.d.ed_max) : '#0b0f14'; ctx.fillRect(Math.floor(i * cw), hg - 1, Math.ceil(cw), 1); });
+    }
+  }
+
+  function renderActivity5(s) {
+    const svg = $('#spec5'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 36, padR = 12, padT = 18, padB = 42;
+    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+    const act = (s.wide && s.wide.activity5) || [];
+    if (!act.length) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">No 5 GHz scan yet — click “Scan 5 GHz” above.</text>'; return; }
+    const plotW = W - padL - padR, plotH = H - padT - padB, yOf = v => padT + plotH - Math.max(0, Math.min(100, v)) / 100 * plotH;
+    const groupOf = ch => ch <= 48 ? 0 : ch <= 64 ? 1 : ch <= 144 ? 2 : 3;
+    let ng = 0; for (let i = 1; i < act.length; i++) if (groupOf(act[i].ch) !== groupOf(act[i - 1].ch)) ng++;
+    const gap = 14, slot = (plotW - ng * gap) / act.length, bw = Math.min(22, Math.max(3, slot - 2)), out = [];
+    out.push('<g class="grid">' + [0, 25, 50, 75, 100].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${yOf(v)}" y2="${yOf(v)}"/>`).join('') + '</g>');
+    out.push('<g class="axis">' + [0, 50, 100].map(v => `<text x="${padL - 6}" y="${yOf(v) + 4}" text-anchor="end">${v}</text>`).join('') + '</g>');
+    let x = padL;
+    act.forEach((a, i) => {
+      if (i > 0 && groupOf(a.ch) !== groupOf(act[i - 1].ch)) x += gap;
+      const cx = x + slot / 2, bx = cx - bw / 2, top = yOf(a.s), h = Math.max(1, yOf(0) - top);
+      out.push(`<rect class="hit" data-i="${i}" x="${x}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
+      out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="2" style="fill:var(--series)"/>`);
+      if ((s.band === '5g' || s.band === 'both') && a.ch === s.current) out.push(`<path class="marker" d="M${cx - 5},${yOf(0) + 28} l5,-6 l5,6 z"/>`);
+      if (i === 0 || i === act.length - 1 || groupOf(a.ch) !== groupOf(act[i - 1].ch)) out.push(`<text class="axis" x="${cx}" y="${yOf(0) + 16}" text-anchor="middle">${a.freq}</text>`);
+      x += slot;
+    });
+    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">5 GHz · frequency (MHz) · activity, not energy</text>`);
+    svg.innerHTML = out.join('');
+    const tip = $('#spec5Tip'), wrap = svg.parentElement;
+    svg.querySelectorAll('.hit').forEach(h => {
+      h.addEventListener('mousemove', (ev) => {
+        const a = act[+h.dataset.i], r = wrap.getBoundingClientRect();
+        tip.style.display = 'block'; tip.style.left = (ev.clientX - r.left) + 'px'; tip.style.top = (ev.clientY - r.top) + 'px';
+        tip.innerHTML = `<b>${a.freq} MHz</b> <span style="opacity:.55">ch ${a.ch}</span><br>activity ${Math.round(a.s)}/100<br>${rate(a.f / dwellS)} pkt/s · ${a.u} talkers`;
+      });
+      h.addEventListener('mouseleave', () => tip.style.display = 'none');
+    });
+  }
+
+  function renderSpectrum(s) {
+    renderSpecStatus(s);
+    renderEnergy24(s);
+    renderActivity5(s);
+    const list = s.unidentified || [];
+    $('#unid').innerHTML = list.length
+      ? '<table><thead><tr><th class="l">Frequency</th><th>Peak</th><th>Floor</th><th>Duty</th></tr></thead><tbody>'
+        + list.map(e => `<tr><td class="l">${e.freq_mhz} MHz <span style="opacity:.55">ch ${e.ch}</span></td><td>${e.peak_dbm} dBm</td><td>${e.floor_dbm} dBm</td><td>${Math.round(e.duty * 100)}%</td></tr>`).join('')
+        + '</tbody></table>'
+      : '<p class="note">Nothing unexplained — every 2.4 GHz bin with sustained energy lines up with a Wi‑Fi, BLE or Zigbee device seen recently, or the band is quiet. Scan those bands first so the comparison has something to match against.</p>';
+  }
+
   function render(s) {
     state = s;
     if (s.hello && s.hello.dwell_ms) dwellS = s.hello.dwell_ms / 1000;
@@ -748,14 +952,16 @@
     $('#nZig').textContent = s.z_devs.filter(d => d.age < 60).length;
     $('#app').classList.toggle('stale', !s.connected);
     if (paused) return;
+    $('#nUnid').textContent = (s.unidentified || []).length;
     if (tab === 'overview') { renderTiles(s); renderBars(s); renderTrend(s); renderTable(s); $('#log').textContent = (s.log || []).join('\n'); }
-    else if (tab === 'wifi') renderWifi(s); else if (tab === 'ble') renderBle(s); else renderZig(s);
+    else if (tab === 'wifi') renderWifi(s); else if (tab === 'ble') renderBle(s);
+    else if (tab === 'zig') renderZig(s); else renderSpectrum(s);
   }
 
   async function tick() {
     try { const r = await fetch('/api/state', { cache: 'no-store' }); render(await r.json()); lastGood = Date.now(); }
     catch (e) { if (Date.now() - lastGood > 3000) $('#app').classList.add('stale'); }
-    setTimeout(tick, 1000);
+    setTimeout(tick, tab === 'spectrum' ? 300 : 1000);   // spectrum walks live, so poll it faster
   }
   tick();
 })();

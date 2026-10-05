@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.6";
+constexpr const char* kVersion = "1.7";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -37,16 +37,28 @@ constexpr uint32_t kDeauthMaxMs = 5UL * 60UL * 1000UL;  // Dead-man's switch: au
                                                           // even if the host/serial link drops mid-attack.
 constexpr uint32_t kSdBudgetUs = 8000;       // max time per loop spent writing SD, so channel hopping keeps time
 
+// Spectrum mode (BAND_SPEC): the 802.15.4 radio's energy-detect primitive measures raw RF energy per
+// channel with no packet decode, across the 2.4 GHz 15.4 channels 11-26 (~2402-2480 MHz, 5 MHz bins). It
+// is the only true noise-floor/energy reading this board exposes; Wi-Fi/5 GHz have no such API (RSSI is
+// only ever attached to a decoded frame). See docs/DEVELOPER.md.
+constexpr uint32_t kEdDurationSym = 8;       // energy-detect window per sample, in 16 us symbols (~128 us)
+constexpr uint32_t kEdDwellMs = 60;          // spec dwell: much shorter than kDwellMs (~25 samples is plenty),
+                                             // so a full 16-channel sweep is ~1 s instead of ~3.5 s
+constexpr int kEdFloorDbm = -95;             // bottom of the on-screen/scored energy range
+constexpr int kEdCeilDbm  = -20;             // top of that range
+
 // Channels to sweep. The C5 has ONE radio, so bands are time-shared: a "both" sweep simply
 // interleaves 2.4 GHz channels 1-13 with the 5 GHz list below (38 dwells, ~8.4 s per sweep).
 // 5 GHz: UNII-1 (36–48), UNII-2A (52–64, DFS), UNII-2C (100–144, DFS), UNII-3 (149–165).
 // Receiving on DFS channels is passive; the radio never transmits in promiscuous mode.
 // Channels the driver refuses (ESP_ERR_INVALID_ARG) are skipped automatically.
-// Modes: three Wi-Fi sweeps, Bluetooth LE scanning, and IEEE 802.15.4 (Zigbee / Thread) sniffing on
-// channels 11-26. All share the single 2.4/5 GHz radio, so only one runs at once.
-enum BandMode : uint8_t { BAND_5G = 0, BAND_24G = 1, BAND_BOTH = 2, BAND_BLE = 3, BAND_154 = 4 };
-constexpr int kBandModes = 5;
-constexpr const char* kBandName[] = {"5g", "2.4g", "both", "ble", "154"};
+// Modes: three Wi-Fi sweeps, Bluetooth LE scanning, IEEE 802.15.4 (Zigbee / Thread) sniffing on
+// channels 11-26, and a 2.4 GHz energy-detect spectrum sweep (BAND_SPEC, reuses the 15.4 radio and its
+// 11-26 channel set but measures raw energy instead of decoding). All share the single 2.4/5 GHz radio,
+// so only one runs at once.
+enum BandMode : uint8_t { BAND_5G = 0, BAND_24G = 1, BAND_BOTH = 2, BAND_BLE = 3, BAND_154 = 4, BAND_SPEC = 5 };
+constexpr int kBandModes = 6;
+constexpr const char* kBandName[] = {"5g", "2.4g", "both", "ble", "154", "spec"};
 enum ChanBand : uint8_t { CB_24G = 0, CB_5G = 1, CB_154 = 2 };
 constexpr uint8_t kChannels[] = {
     1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
@@ -66,6 +78,15 @@ static_assert(sizeof(kChanBand) == kChannelCount, "channel tables out of sync");
 inline bool is5g(int idx) { return kChanBand[idx] == CB_5G; }
 inline bool is154(int idx) { return kChanBand[idx] == CB_154; }
 constexpr int kGroupStart[] = {0, 13, 21, 33, 38};
+
+// 802.15.4 channel number (11-26) -> center frequency in MHz (channel 11 = 2405 MHz, 5 MHz spacing).
+inline int ch154Freq(int ch) { return 2405 + 5 * (ch - 11); }
+// Map a raw energy reading (dBm) onto the shared 0-100 bar/score range used by the LCD and dashboard.
+inline float edDbmToScore(int dbm) {
+    if (dbm <= kEdFloorDbm) return 0.0f;
+    if (dbm >= kEdCeilDbm) return 100.0f;
+    return static_cast<float>(dbm - kEdFloorDbm) * 100.0f / static_cast<float>(kEdCeilDbm - kEdFloorDbm);
+}
 
 // Advertising-channel access address (BT Core Spec Vol 6 Part B): shared by the BLE pcap frame builder
 // and the SD writer's pseudo-header.
@@ -91,7 +112,7 @@ inline void IRAM_ATTR sanitizeText(char* s, size_t n) {
 }
 
 // LCD pages (only the visible one exists as LVGL objects — see showPage()).
-enum Page : int { PAGE_OVERVIEW = 0, PAGE_CHANNELS, PAGE_DEVICES, PAGE_HUNT, PAGE_SYSTEM, PAGE_COUNT };
+enum Page : int { PAGE_OVERVIEW = 0, PAGE_CHANNELS, PAGE_SPECTRUM, PAGE_DEVICES, PAGE_HUNT, PAGE_SYSTEM, PAGE_COUNT };
 
 struct RgbColor { uint8_t r; uint8_t g; uint8_t b; };
 inline void setLedColor(const RgbColor& c, uint8_t brightness = 60) {
@@ -131,6 +152,10 @@ struct ChannelState {
     ChannelMetrics metrics;
     float busyCurrent = 0.0f;  // Last dwell busy score (0–100)
     float busyEma = 0.0f;      // Smoothed busy score (0–100)
+    int8_t edMin = 0;          // Spectrum mode (BAND_SPEC): raw energy over the dwell, in dBm
+    int8_t edMax = -128;
+    int8_t edMean = 0;
+    uint16_t edSamples = 0;    // energy-detect samples folded in this dwell (0 = none)
     bool hasData = false;
     bool unavailable = false;  // Driver rejected esp_wifi_set_channel for this channel
 };
@@ -216,16 +241,19 @@ struct SdSink {
 extern BandMode bandMode;
 inline bool wifiMode() { return bandMode <= BAND_BOTH; }
 inline bool mode154() { return bandMode == BAND_154; }
-inline bool hopMode() { return wifiMode() || mode154(); }   // modes that sweep channels
+inline bool modeSpec() { return bandMode == BAND_SPEC; }   // 2.4 GHz energy-detect spectrum sweep
+inline bool hopMode() { return wifiMode() || mode154() || modeSpec(); }   // modes that sweep channels
 inline bool chanEnabled(int idx) {
     switch (bandMode) {
         case BAND_5G:   return is5g(idx);
         case BAND_24G:  return kChanBand[idx] == CB_24G;
         case BAND_BOTH: return !is154(idx);
         case BAND_154:  return is154(idx);
+        case BAND_SPEC: return is154(idx);   // energy-detect sweeps the 2.4 GHz 15.4 channels 11-26
         default:        return false;
     }
 }
+inline uint32_t dwellMs() { return modeSpec() ? kEdDwellMs : kDwellMs; }   // spec scans faster
 int enabledCount();
 
 // Device table snapshots (bandwatch.cpp): copy under g_devMux into devSnap, sort and read outside. One shared
@@ -256,6 +284,7 @@ extern uint32_t sweepCount;
 extern bool monitorReady;             // the radio is sitting on a usable channel
 extern bool wifiRunning;              // Wi-Fi driver up (also true in 15.4 mode? no — one radio, see setBandMode)
 extern bool r154Running;              // 802.15.4 driver up (instance in ieee154.cpp)
+extern bool specRunning;              // energy-detect spectrum sweep up (15.4 radio, no RX armed; ieee154.cpp)
 
 // esp_wifi_* setup results, reported by hello / the system page (set while starting Wi-Fi).
 extern esp_err_t errCountry, errBand, errProto, errPromisc;
@@ -305,6 +334,13 @@ void applyProtocols();                       // esp_wifi_set_protocols, result i
 void resetChannelStats();                    // clear per-channel history + sweep counter (bandwatch.cpp)
 void startBle();  void stopBle();  void serviceBle();
 void start154();  void stop154();
+// Spectrum (energy-detect) path (ieee154.cpp). start/stop power the 15.4 radio with no RX armed;
+// edReset/edKick/edSnapshot manage the per-channel energy accumulator (filled in driver context).
+void startSpectrum();  void stopSpectrum();
+void edReset();
+void edKick();                                              // arm one energy-detect window on the current channel
+void serviceSpectrum();                                    // re-arm the next ED window from the loop task
+void edSnapshot(int8_t& mn, int8_t& mx, int8_t& mean, uint16_t& n);
 bool advanceChannel();
 int indexOfChannel(int ch);           // in the current mode's channel set
 int indexOfChannel154(int ch);

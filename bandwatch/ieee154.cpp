@@ -5,6 +5,16 @@
 #include <esp_ieee802154.h>
 
 bool r154Running = false;   // instance lives with its module; core reads it via bandwatch_core.h
+bool specRunning = false;   // energy-detect spectrum sweep up (15.4 radio powered, no RX armed)
+
+// Energy-detect accumulator (BAND_SPEC): esp_ieee802154_energy_detect_done() folds raw dBm samples in here
+// in driver context; finishDwell() snapshots it at dwell end. Guarded by its own spinlock.
+static portMUX_TYPE g_edMux = portMUX_INITIALIZER_UNLOCKED;
+static volatile int32_t s_edSum = 0;
+static volatile int16_t s_edMin = 127;
+static volatile int16_t s_edMax = -128;
+static volatile uint16_t s_edN = 0;
+static volatile bool s_edReady = false;   // one ED finished; re-arm from the loop task, not the ISR
 
 namespace {   // locals; closed before the driver callback because it needs C linkage
 // No globals needed here — all counting goes through g_accum in capture.cpp
@@ -161,4 +171,71 @@ void stop154() {
     esp_ieee802154_disable();
     r154Running = false;
     currentChannelNum = 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Spectrum (energy-detect) mode. Powers the 15.4 radio but never arms RX: instead each dwell runs a
+// stream of energy-detect windows on the current channel, giving a raw dBm reading with no packet decode.
+// ---------------------------------------------------------------------------------------------
+void edReset() {
+    portENTER_CRITICAL(&g_edMux);
+    s_edSum = 0; s_edMin = 127; s_edMax = -128; s_edN = 0;
+    portEXIT_CRITICAL(&g_edMux);
+    s_edReady = false;
+}
+
+void edKick() { esp_ieee802154_energy_detect(kEdDurationSym); }
+
+// Re-arm the next energy-detect window from the loop task. Arming is not safe from the done callback (ISR)
+// — doing it there yields exactly one sample per dwell — so the callback only flags completion and the loop
+// kicks the next one. Bandwatch_Loop() runs every ~2 ms, giving ~100 samples per 220 ms dwell.
+void serviceSpectrum() {
+    if (specRunning && s_edReady) {
+        s_edReady = false;
+        esp_ieee802154_energy_detect(kEdDurationSym);
+    }
+}
+
+void edSnapshot(int8_t& mn, int8_t& mx, int8_t& mean, uint16_t& n) {
+    portENTER_CRITICAL(&g_edMux);
+    n = s_edN;
+    if (s_edN) {
+        mn = static_cast<int8_t>(s_edMin);
+        mx = static_cast<int8_t>(s_edMax);
+        mean = static_cast<int8_t>(s_edSum / static_cast<int32_t>(s_edN));
+    } else {
+        mn = 0; mx = -128; mean = 0;
+    }
+    portEXIT_CRITICAL(&g_edMux);
+}
+
+void startSpectrum() {
+    if (specRunning) return;
+    esp_ieee802154_enable();
+    // No set_promiscuous / receive(): the done callback never fires. applyChannelIdx() arms the first
+    // energy-detect window once a channel is set.
+    edReset();
+    specRunning = true;
+}
+
+void stopSpectrum() {
+    if (!specRunning) return;
+    specRunning = false;            // stop the done callback re-arming before we power the radio down
+    esp_ieee802154_sleep();
+    esp_ieee802154_disable();
+    currentChannelNum = 0;
+}
+
+// Energy-detect result: raw channel energy in dBm. Fold it in and flag that the loop may re-arm the next
+// window (arming here, in driver/ISR context, does not work — see serviceSpectrum). applyChannelIdx() resets
+// the accumulator on each new channel. IRAM_ATTR and spinlock-guarded like the RX callback.
+extern "C" void IRAM_ATTR esp_ieee802154_energy_detect_done(int8_t power) {
+    if (!specRunning) return;
+    portENTER_CRITICAL_ISR(&g_edMux);
+    s_edSum += power;
+    if (power < s_edMin) s_edMin = power;
+    if (power > s_edMax) s_edMax = power;
+    if (s_edN < 65535) s_edN += 1;
+    portEXIT_CRITICAL_ISR(&g_edMux);
+    s_edReady = true;
 }

@@ -90,6 +90,12 @@ lv_obj_t* huntHint = nullptr;
 // system
 constexpr int kSysLines = 14;
 lv_obj_t* sysLines[kSysLines] = {nullptr};
+// spectrum (energy-detect): one bar per 15.4 channel; non-15.4 entries stay nullptr
+lv_obj_t* spChanLabel = nullptr;   // header right: current bin
+lv_obj_t* spPeakLabel = nullptr;
+lv_obj_t* spStatsLabel = nullptr;
+lv_obj_t* spBars[kChannelCount] = {nullptr};
+lv_obj_t* spFoot = nullptr;
 
 uint16_t apMaxWindow = 0;
 uint32_t apWindowStartedMs = 0;
@@ -349,10 +355,51 @@ void buildSystemPage(lv_obj_t* page) {
     }
 }
 
+void buildSpectrumPage(lv_obj_t* page) {
+    make_header(page, "Spectrum", &spChanLabel);
+
+    lv_obj_t* info = make_panel(page, 46, PANEL_565, 6);
+    spPeakLabel = make_label(info, "-- dBm", c565(WHITE_565), &lv_font_montserrat_20);
+    lv_obj_align(spPeakLabel, LV_ALIGN_TOP_LEFT, 0, -2);
+    lv_obj_t* il = make_label(info, "peak", c565(GREY_565), &lv_font_montserrat_12);
+    lv_obj_align(il, LV_ALIGN_TOP_RIGHT, 0, 3);
+    spStatsLabel = make_label(info, "scanning...", c565(GREY_565), &lv_font_montserrat_12);
+    lv_obj_align(spStatsLabel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+
+    lv_obj_t* spec = make_panel(page, 150, PANEL_565, 4);
+    lv_obj_t* barsRow = lv_obj_create(spec);
+    lv_obj_set_size(barsRow, LV_PCT(100), 124);
+    lv_obj_align(barsRow, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(barsRow, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(barsRow, 0, 0);
+    lv_obj_set_style_pad_all(barsRow, 0, 0);
+    lv_obj_set_style_pad_column(barsRow, 2, 0);
+    lv_obj_set_flex_flow(barsRow, LV_FLEX_FLOW_ROW);
+    lv_obj_set_flex_align(barsRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
+    lv_obj_remove_flag(barsRow, LV_OBJ_FLAG_SCROLLABLE);
+    for (int i = 0; i < kChannelCount; i++) {
+        if (!is154(i)) { spBars[i] = nullptr; continue; }   // energy-detect covers only the 2.4 GHz 15.4 channels
+        lv_obj_t* b = lv_obj_create(barsRow);
+        lv_obj_set_size(b, 8, 2);
+        lv_obj_set_style_bg_color(b, c565(DIM_565), 0);
+        lv_obj_set_style_border_width(b, 0, 0);
+        lv_obj_set_style_radius(b, 1, 0);
+        lv_obj_set_style_pad_all(b, 0, 0);
+        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+        spBars[i] = b;
+    }
+    spFoot = make_label(spec, "2405    2440    2480 MHz", c565(GREY_565), &lv_font_montserrat_12);
+    lv_obj_set_width(spFoot, LV_PCT(100));
+    lv_obj_set_style_text_align(spFoot, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(spFoot, LV_ALIGN_BOTTOM_MID, 0, 2);
+}
+
 bool pageAvailable(int n) {
-    if (n == PAGE_OVERVIEW || n == PAGE_CHANNELS) return hopMode();
+    if (n == PAGE_SPECTRUM) return modeSpec();
+    if (n == PAGE_OVERVIEW || n == PAGE_CHANNELS) return hopMode() && !modeSpec();
+    if (n == PAGE_DEVICES) return !modeSpec();   // no decoded devices in energy-detect mode
     if (n == PAGE_HUNT) return hunt.active;
-    return true;
+    return true;   // system page
 }
 
 } // namespace
@@ -372,6 +419,7 @@ void showPage(int n) {
     switch (n) {
         case PAGE_OVERVIEW: buildOverviewPage(pg); break;
         case PAGE_CHANNELS: buildChannelsPage(pg); break;
+        case PAGE_SPECTRUM: buildSpectrumPage(pg); break;
         case PAGE_DEVICES:  buildDevicesPage(pg); break;
         case PAGE_HUNT:     buildHuntPage(pg); break;
         default:            buildSystemPage(pg); break;
@@ -714,8 +762,47 @@ void refreshSystem(float global) {
     snprintf(buf, sizeof(buf), "heap %u kB free", static_cast<unsigned>(ESP.getFreeHeap() / 1024));
     lv_label_set_text(sysLines[n++], buf);
     lv_label_set_text(sysLines[n++], "BOOT: tap=page  hold=mode");
-    lv_label_set_text(sysLines[n++], "(5g > 2.4g > both > ble > 15.4)");
+    lv_label_set_text(sysLines[n++], "(5g>2.4g>both>ble>15.4>spec)");
     for (; n < kSysLines; n++) lv_label_set_text(sysLines[n], "");
+}
+
+// Spectrum page: per-bin energy bars (dBm) for the 2.4 GHz 15.4 channels, plus the current peak.
+void refreshSpectrum() {
+    char buf[64];
+    const int curIdx = (currentIdx >= 0 && is154(currentIdx)) ? currentIdx : -1;
+
+    int peakDbm = -128, peakIdx = -1;
+    for (int i = 0; i < kChannelCount; i++) {
+        if (!is154(i) || !channels[i].hasData || channels[i].edSamples == 0) continue;
+        if (channels[i].edMax > peakDbm) { peakDbm = channels[i].edMax; peakIdx = i; }
+    }
+    if (peakIdx >= 0) {
+        snprintf(buf, sizeof(buf), "%d dBm", peakDbm);
+        lv_label_set_text(spPeakLabel, buf);
+        snprintf(buf, sizeof(buf), "peak %d MHz", ch154Freq(kChannels[peakIdx]));
+        lv_label_set_text(spStatsLabel, buf);
+    } else {
+        lv_label_set_text(spPeakLabel, "-- dBm");
+        lv_label_set_text(spStatsLabel, "scanning...");
+    }
+    if (curIdx >= 0 && monitorReady) snprintf(buf, sizeof(buf), "%d MHz%s", ch154Freq(kChannels[curIdx]), recTag());
+    else snprintf(buf, sizeof(buf), "scan%s", recTag());
+    lv_label_set_text(spChanLabel, buf);
+    applyRecColor(spChanLabel);
+
+    for (int i = 0; i < kChannelCount; i++) {
+        if (!is154(i) || !spBars[i]) continue;
+        int h = 2;
+        lv_color_t col = c565(DIM_565);
+        if (channels[i].hasData && channels[i].edSamples > 0) {
+            const float sc = edDbmToScore(channels[i].edMax);
+            h = 2 + static_cast<int>(sc * 120.0f / 100.0f);
+            col = (sc < 3.0f) ? c565(GREY_565) : scoreColor(sc);
+        }
+        if (i == curIdx && monitorReady) col = c565(CYAN_565);
+        lv_obj_set_height(spBars[i], h);
+        lv_obj_set_style_bg_color(spBars[i], col, 0);
+    }
 }
 
 void driveLed(float global) {
@@ -772,6 +859,7 @@ void refreshUi() {
     switch (currentPage) {
         case PAGE_OVERVIEW: refreshOverview(global); break;
         case PAGE_CHANNELS: refreshChannels(global); break;
+        case PAGE_SPECTRUM: refreshSpectrum(); break;
         case PAGE_DEVICES:  refreshDevices(); break;
         case PAGE_HUNT:     refreshHunt(); break;
         default:            refreshSystem(global); break;
@@ -780,7 +868,8 @@ void refreshUi() {
 
 void uiTimerCb(lv_timer_t* t) {
     (void)t;
-    hopIfNeeded();
+    // Channel hopping is driven from Bandwatch_Loop() (~2 ms) instead of here (120 ms) so short dwells —
+    // notably the spectrum mode's kEdDwellMs — are honored precisely rather than rounded up to this cadence.
     serviceDeauth();
     refreshUi();
 }

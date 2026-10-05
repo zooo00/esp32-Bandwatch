@@ -1,9 +1,26 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.6**.
+Planned work, open questions and known gaps. Current release: **v1.7**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
+
+---
+
+## 1.7 — spectrum analyzer (shipped)
+
+A `spec` mode runs the 15.4 radio's `esp_ieee802154_energy_detect()` across channels 11–26 for a true
+2.4 GHz RF-power reading (dBm, no decode), and the host flags per-bin energy that no recently-decoded
+Wi-Fi/BLE/Zigbee emitter explains — evidence of an emitter whose protocol this radio can't demodulate, not
+an identification. See [DEVELOPER.md §18](DEVELOPER.md). Known limits, not yet addressed:
+
+- **2.4 GHz only.** The energy-detect primitive is a 15.4 feature; Wi-Fi/5 GHz expose no raw-energy API, so
+  there is no swept analyzer above 2.4 GHz without moving off the prebuilt core.
+- **Coarse resolution.** 16 fixed 5 MHz bins (the 15.4 channel grid). Sub-channel or swept-centre-frequency
+  resolution would need driver work and is unverified.
+- **Correlation is time-separated.** One radio can't decode and energy-scan at once, so "unexplained" is
+  relative to the last Wi-Fi/BLE/15.4 sweep. An automatic round-robin (dwell in `spec`, periodically dip into
+  the decode modes to refresh the "known" picture) is a possible future improvement.
 
 ---
 

@@ -83,6 +83,15 @@ void resetAccum() {
 // Channel control (the radio lifecycle halves live in wifi_sniff.cpp and ieee154.cpp)
 // ---------------------------------------------------------------------------------------------
 bool applyChannelIdx(int idx) {
+    if (modeSpec()) {   // energy-detect sweep: same 15.4 channels, but sample raw energy instead of decoding
+        if (!specRunning) return false;
+        esp_ieee802154_set_channel(kChannels[idx]);
+        edReset();
+        edKick();
+        currentChannelNum = kChannels[idx];
+        dwellStartedMs = millis();
+        return true;
+    }
     if (is154(idx)) {
         if (!r154Running) return false;
         esp_ieee802154_set_channel(kChannels[idx]);
@@ -105,7 +114,7 @@ bool applyChannelIdx(int idx) {
 }
 
 bool advanceChannel() {
-    if (!(wifiMode() && wifiRunning) && !(mode154() && r154Running)) return false;
+    if (!(wifiMode() && wifiRunning) && !(mode154() && r154Running) && !(modeSpec() && specRunning)) return false;
     if (parkedIdx >= 0 && chanEnabled(parkedIdx) && !channels[parkedIdx].unavailable) {
         currentIdx = parkedIdx;
         return applyChannelIdx(currentIdx);
@@ -133,6 +142,7 @@ void resetChannelStats() {
         channels[i].hasData = false;
         channels[i].busyEma = channels[i].busyCurrent = 0.0f;
         channels[i].metrics = ChannelMetrics{};
+        channels[i].edMin = 0; channels[i].edMax = -128; channels[i].edMean = 0; channels[i].edSamples = 0;
     }
     sweepCount = 0;
     resetAccum();
@@ -147,14 +157,17 @@ void setBandMode(BandMode m) {
                               // the ring must go back to the heap or BLE mode starts ~32 KB short
     stopDeauth();             // the attack is pinned to a channel: unpark, and the host can re-send it
     if (parkedIdx >= 0 && !chanEnabled(parkedIdx)) parkedIdx = -1;
-    const bool radioChange = (prev == BAND_BLE) || (prev == BAND_154) || (m == BAND_BLE) || (m == BAND_154);
-    if (radioChange) {
+    const bool prevRadio = (prev == BAND_BLE) || (prev == BAND_154) || (prev == BAND_SPEC);
+    const bool newRadio = (m == BAND_BLE) || (m == BAND_154) || (m == BAND_SPEC);
+    if (prevRadio || newRadio) {
         if (prev == BAND_BLE) stopBle();
         else if (prev == BAND_154) stop154();
+        else if (prev == BAND_SPEC) stopSpectrum();
         else stopWifi();
         if (m == BAND_BLE) { startBle(); return; }
-        if (m == BAND_154) {
-            start154();
+        if (m == BAND_154 || m == BAND_SPEC) {
+            if (m == BAND_154) start154();
+            else startSpectrum();
             resetChannelStats();
             currentIdx = -1;
             monitorReady = advanceChannel();
@@ -329,7 +342,14 @@ void finishDwell() {
 
     ChannelState& ch = channels[currentIdx];
     ch.metrics = snap;
-    ch.busyCurrent = computeBusyScore(snap);
+    if (modeSpec()) {
+        int8_t mn, mx, mean; uint16_t n;
+        edSnapshot(mn, mx, mean, n);
+        ch.edMin = mn; ch.edMax = mx; ch.edMean = mean; ch.edSamples = n;
+        ch.busyCurrent = edDbmToScore(mx);   // map peak energy onto the shared 0-100 bar/LED range
+    } else {
+        ch.busyCurrent = computeBusyScore(snap);
+    }
     if (!ch.hasData) {
         ch.busyEma = ch.busyCurrent;
         ch.hasData = true;
@@ -340,15 +360,16 @@ void finishDwell() {
 }
 
 void hopIfNeeded() {
-    if (!((wifiMode() && wifiRunning) || (mode154() && r154Running))) return;
+    if (!((wifiMode() && wifiRunning) || (mode154() && r154Running) || (modeSpec() && specRunning))) return;
     const uint32_t now = millis();
+    const uint32_t dwell = dwellMs();
     if (!monitorReady) {
-        if ((now - dwellStartedMs) < kDwellMs) return;
+        if ((now - dwellStartedMs) < dwell) return;
         dwellStartedMs = now;
         monitorReady = advanceChannel();
         return;
     }
-    if ((now - dwellStartedMs) < kDwellMs) return;
+    if ((now - dwellStartedMs) < dwell) return;
 
     finishDwell();
     resetAccum();
@@ -391,9 +412,11 @@ void Bandwatch_Loop(void) {
     static uint32_t lastDevMs = 0, bleStatusMs = 0;
     pollSerial();
     pollButton();
+    hopIfNeeded();       // dwell/hop here (~2 ms cadence) so short spec dwells aren't rounded to the UI timer
     serviceSdRead();
     drainCapture();
     serviceBle();
+    serviceSpectrum();   // re-arm energy detection (spec mode only; no-op otherwise)
     const uint32_t now = millis();
     if (now - lastDevMs >= kDevListMs) {
         lastDevMs = now;

@@ -114,7 +114,7 @@ void sendHello() {
 }
 
 void sendDwell(int idx) {
-    if (!serialRoom(340)) return;
+    if (!serialRoom(380)) return;
     const ChannelState& ch = channels[idx];
     Serial.printf("{\"t\":\"d\",\"c\":%u,\"s\":%.1f,\"r\":%.1f,\"f\":%lu,\"b\":%lu,\"st\":%u,\"u\":%u,"
                   "\"g\":%.1f,\"n\":%lu,\"park\":%d,\"cap\":%d,\"drop\":%lu,\"da\":%lu,\"df\":%lu,"
@@ -126,6 +126,9 @@ void sendDwell(int idx) {
                   captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped), static_cast<unsigned long>(deauth.sent),
                   static_cast<unsigned long>(deauth.txFail),
                   sd.capEnabled ? 1 : 0, static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes));
+    // Spectrum: stream this bin's energy per dwell so the dashboard fills in bars and walks the current
+    // frequency live, like the LCD, instead of only updating once per full sweep.
+    if (modeSpec()) Serial.printf("\"e\":[%d,%d,%d,%u],", ch.edMin, ch.edMean, ch.edMax, ch.edSamples);
     printHunt();
     Serial.print("}\n");
 }
@@ -138,9 +141,19 @@ void sendSweep() {
     for (int i = 0; i < kChannelCount; i++) {
         if (!chanEnabled(i)) continue;
         const ChannelState& ch = channels[i];
-        Serial.printf("%s[%u,%.1f,%lu,%lu,%u,%u,%d]", first ? "" : ",", kChannels[i], ch.busyEma,
-                      static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
-                      ch.metrics.strong, ch.metrics.unique, ch.unavailable ? 2 : (ch.hasData ? 0 : 1));
+        const int state = ch.unavailable ? 2 : (ch.hasData ? 0 : 1);
+        if (modeSpec()) {
+            // Spectrum mode appends raw energy (dBm) + sample count:
+            // [ch, score, frames, bytes, strong, unique, state, edMin, edMean, edMax, edSamples].
+            // Only 16 channels sweep here, so the extra fields stay well inside the serialRoom() budget.
+            Serial.printf("%s[%u,%.1f,%lu,%lu,%u,%u,%d,%d,%d,%d,%u]", first ? "" : ",", kChannels[i], ch.busyEma,
+                          static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
+                          ch.metrics.strong, ch.metrics.unique, state, ch.edMin, ch.edMean, ch.edMax, ch.edSamples);
+        } else {
+            Serial.printf("%s[%u,%.1f,%lu,%lu,%u,%u,%d]", first ? "" : ",", kChannels[i], ch.busyEma,
+                          static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
+                          ch.metrics.strong, ch.metrics.unique, state);
+        }
         first = false;
     }
     Serial.printf("],\"aps\":%u,\"drop\":%lu,\"heap\":%u}\n", lastApSeen, static_cast<unsigned long>(capDropped),
@@ -320,7 +333,9 @@ void handleCommand(char* line) {
         else if (!strcmp(arg, "both")) setBandMode(BAND_BOTH);
         else if (!strcmp(arg, "ble")) setBandMode(BAND_BLE);
         else if (!strcmp(arg, "154") || !strcmp(arg, "zigbee") || !strcmp(arg, "thread")) setBandMode(BAND_154);
-        if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
+        else if (!strcmp(arg, "spec") || !strcmp(arg, "spectrum")) setBandMode(BAND_SPEC);
+        if (modeSpec()) showPage(PAGE_SPECTRUM);
+        else if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
         sendHello();
     } else if (!strcmp(line, "hunt")) {

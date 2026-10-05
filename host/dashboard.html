@@ -110,6 +110,7 @@
   .grid2 { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; }
   .wfaxis { display: flex; justify-content: space-between; font-size: 11px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
   .specstatus { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12px; color: var(--ink-2); margin-bottom: 8px; min-height: 28px; }
+  .specwarn { background: var(--warning); color: #1a1a19; padding: 8px 12px; border-radius: 8px; font-size: 12px; margin-bottom: 12px; font-weight: 500; }
   #unid { overflow-x: auto; }
   #spec { min-height: 150px; }
   @media (max-width: 760px) {
@@ -324,6 +325,7 @@
 
   <div id="tab-spectrum" hidden>
     <div id="specStatus" class="specstatus" style="margin-bottom:12px"></div>
+    <div id="specWarn" class="specwarn" hidden></div>
     <section class="card" style="margin-bottom:14px">
       <h2>2.4 GHz — RF energy <small>true dBm per 5 MHz bin · auto-ranged · bar = average, cap ▔ = peak</small></h2>
       <div class="chart-wrap"><svg id="spec" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="specTip"></div></div>
@@ -851,6 +853,18 @@
     const svg = $('#spec'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 46, padR = 12, padT = 18, padB = 42;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
     const bins = energyBins(s), plotW = W - padL - padR, plotH = H - padT - padB;
+    // Receiver-blocked / stuck-radio warning: a healthy floor sits near -110 dBm. If *every* bin's minimum is
+    // elevated (even channels with no emitter), a strong signal is desensitizing the receiver (or the radio is
+    // in a stuck state) and per-channel energy can't be trusted.
+    const withData = bins.filter(b => b.d);
+    const floor = withData.length ? Math.min(...withData.map(b => b.d.ed_min)) : null;
+    const warn = $('#specWarn');
+    if (floor != null && floor > -85) {
+      warn.hidden = false;
+      warn.textContent = `⚠ Strong signal / receiver blocked — every channel's noise floor is ≥ ${floor} dBm, so per-channel energy is unreliable right now. If the band is actually quiet, power-cycle or reboot the device to clear a stuck radio state.`;
+    } else {
+      warn.hidden = true;
+    }
     // Auto-range the dBm window to the live data (min 30 dB span) so differences show even when the whole band
     // is hot — a fixed -95..-20 scale squashes a band sitting at, say, -35 dBm flat into identical tall bars.
     const vals = []; bins.forEach(b => { if (b.d) vals.push(b.d.ed_min, b.d.ed_max); });

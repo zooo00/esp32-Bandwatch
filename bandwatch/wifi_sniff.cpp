@@ -167,7 +167,8 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
         if (!(d.flags & 2) || (d.beacons & 0x0F) == 0) parseBeaconIes(d, payload, sigLen);
         d.beacons++;
     }
-    noteHuntHit(macEq(hunt.mac, mac), rssi, now);
+    // kind == 0: a 15.4 key hunt (kind 1) must not match on a stale hunt.mac left by an earlier MAC hunt.
+    noteHuntHit(hunt.kind == 0 && macEq(hunt.mac, mac), rssi, now);
     portEXIT_CRITICAL_ISR(&g_devMux);
 }
 

@@ -217,8 +217,8 @@ void edSnapshot(int8_t& mn, int8_t& mx, int8_t& mean, uint16_t& n) {
 void startSpectrum() {
     if (specRunning) return;
     esp_ieee802154_enable();
-    // No set_promiscuous / receive(): the done callback never fires. applyChannelIdx() arms the first
-    // energy-detect window once a channel is set.
+    // No set_promiscuous / receive(): the RX done callback never fires. advanceChannel()'s spec branch arms
+    // the first energy-detect window (edReset + edKick) once a frequency is parked.
     edReset();
     specRunning = true;
 }

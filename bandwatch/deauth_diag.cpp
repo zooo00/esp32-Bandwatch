@@ -301,13 +301,15 @@ void sendInternalKick() {
         D[off] = kickFc;  D[1 + off] = 0x00;   // DIAGNOSTIC: subtype overridable, see kickFc above
         D[2 + off] = 0x32;  D[3 + off] = 0x00;   // duration 50 us, as real APs emit
         
-        // CRITICAL FIX: Set unique sequence number per frame - without this all frames appear as duplicates
-        // Match the pattern from sendKickFrame: seq occupies bits 7-4 of byte 23 (high nibble)
+        // Unique sequence per frame, same encoding as sendKickFrame(): s = seq<<4 with the fragment nibble
+        // clear, and bytes 22/23 are its low/high bytes. (An earlier draft wrote s>>4 / s&0xF0 here instead:
+        // that put the sequence's low nibble into the *fragment* field — nonzero on most frames — and made
+        // the pair repeat every 256 frames rather than 4096.)
         static uint32_t frameSeq = 0;
-        const uint32_t s = ((frameSeq & 0x0FFFu) << 4);   // shift left 4 bits
-        D[off + 22] = static_cast<uint8_t>(s >> 4);       // byte 22 gets low 8 bits of shifted value
-        D[off + 23] = static_cast<uint8_t>(s & 0xF0);     // byte 23 gets high nibble
-        ++frameSeq;                                       // increment for next frame (sequence wraps at 4095)
+        const uint32_t s = ((frameSeq & 0x0FFFu) << 4);   // seq occupies bits [15:4], fragment nibble reserved
+        D[off + 22] = static_cast<uint8_t>(s);             // low byte of the sequence control field
+        D[off + 23] = static_cast<uint8_t>(s >> 8);        // high byte
+        ++frameSeq;                                        // wraps at 4095, like every other 12-bit seq counter
 
                 // DIAGNOSTIC: Log sequence number periodically (every 4th frame uses less buffer space than full dump)
         static uint32_t seqLogCount = 0;

@@ -275,13 +275,18 @@ void handleCommand(char* line) {
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
     if (!strcmp(line, "cap")) {
-        const bool on = atoi(arg) != 0 && ensureCapRing();   // Wi-Fi, 802.15.4 and BLE all have a link type
+        // Wi-Fi / 802.15.4 / BLE all have a link type; spec arms no RX, so refuse rather than record silence.
+        const bool want = atoi(arg) != 0;
+        const bool on = want && !modeSpec() && ensureCapRing();
         captureEnabled = on;
         syncCapActive();
+        if (want && modeSpec()) Serial.printf("{\"t\":\"log\",\"msg\":\"cap: no RX armed in spec mode\"}\n");
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"cap\",\"cap\":%d}\n", captureEnabled ? 1 : 0);
     } else if (!strcmp(line, "sdcap")) {
         const bool want = atoi(arg) != 0;
-        if (want && !sd.capEnabled) {
+        if (want && modeSpec() && !sd.capEnabled) {   // no RX armed in spec: the file would never grow
+            Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: no RX armed in spec mode\"}\n");
+        } else if (want && !sd.capEnabled) {
             // Open the file first: mounting FATFS costs ~30 KB, and the ring must be sized against what is
             // left afterwards or kCapHeapReserve is not actually reserved.
             if (!sdOpenCapture()) {

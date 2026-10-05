@@ -139,7 +139,8 @@ void trackBleDevice(const uint8_t* mac, int8_t rssi, uint8_t addrType, const AdI
     if (ad.svc) d.svc = ad.svc;
     if (ad.svcData) d.svcData = ad.svcData;
     d.flags |= bflags;
-    noteHuntHit(macEq(hunt.mac, mac), rssi, now);
+    // kind == 0: a 15.4 key hunt (kind 1) must not match on a stale hunt.mac left by an earlier MAC hunt.
+    noteHuntHit(hunt.kind == 0 && macEq(hunt.mac, mac), rssi, now);
     const bool named = d.name[0] != 0;
     portEXIT_CRITICAL(&g_devMux);
     // Only a scannable advertiser can answer a SCAN_REQ, so asking for an active window for anything else

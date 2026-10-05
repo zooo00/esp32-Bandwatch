@@ -353,16 +353,9 @@ void finishDwell() {
     snap.unique = g_accum.unique;
     portEXIT_CRITICAL(&g_accumMux);
 
-    ChannelState& ch = channels[currentIdx];
+    ChannelState& ch = channels[currentIdx];   // spec mode returned above; here currentIdx indexes channels[]
     ch.metrics = snap;
-    if (modeSpec()) {
-        int8_t mn, mx, mean; uint16_t n;
-        edSnapshot(mn, mx, mean, n);
-        ch.edMin = mn; ch.edMax = mx; ch.edMean = mean; ch.edSamples = n;
-        ch.busyCurrent = edDbmToScore(mx);   // map peak energy onto the shared 0-100 bar/LED range
-    } else {
-        ch.busyCurrent = computeBusyScore(snap);
-    }
+    ch.busyCurrent = computeBusyScore(snap);
     if (!ch.hasData) {
         ch.busyEma = ch.busyCurrent;
         ch.hasData = true;

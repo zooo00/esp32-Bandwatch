@@ -729,8 +729,12 @@ never fires. Per channel, `applyChannelIdx()` calls `edReset()` then `edKick()` 
 **Re-arming the next window must happen from the loop task, not the done callback** — arming from inside the
 ISR callback silently fails and yields exactly one sample per dwell (measured). So the callback only sets a
 `s_edReady` flag and `serviceSpectrum()` (called from `Bandwatch_Loop()`, ~every 2 ms) kicks the next ED.
-That gives **~50 samples per ~120 ms dwell** (see Speed below), which is what lets `edMax` catch bursty emitters (a BLE advert
-or Wi-Fi burst between windows) rather than a single lucky/unlucky snapshot. `finishDwell()` snapshots
+That gives **~30 samples per ~120 ms dwell** (each a `kEdDurationSym` = 2 ms window; see Speed below), which is
+what lets `edMax` catch bursty emitters rather than a single lucky/unlucky snapshot. **The 2 ms window is
+load-bearing:** the original 128 µs window listened only ~5 % of the dwell and missed bursty Wi-Fi almost
+entirely — a strong but idle AP (beacons ≈ 1 % airtime) produced *no* energy peak, so the spectrum did not
+track the Wi-Fi band. At 2 ms (~50 % coverage) a window usually overlaps a beacon/burst, and the energy peaks
+line up with the actual APs (verified: ch12 AP at −71 dBm → energy peak at 2465 MHz; ch6 AP → peak at 2437). `finishDwell()` snapshots
 min/mean/max dBm and the sample count into `ChannelState.edMin/edMean/edMax/edSamples` and maps the peak onto
 the shared 0–100 bar/LED range via `edDbmToScore()` (clamped to `kEdFloorDbm`/`kEdCeilDbm`, −95…−20). The
 accumulator lives in `ieee154.cpp` behind `edReset/edKick/serviceSpectrum/edSnapshot`; `specRunning` gates the

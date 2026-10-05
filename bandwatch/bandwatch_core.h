@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.7.2";
+constexpr const char* kVersion = "1.7.3";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -41,7 +41,9 @@ constexpr uint32_t kSdBudgetUs = 8000;       // max time per loop spent writing 
 // channel with no packet decode, across the 2.4 GHz 15.4 channels 11-26 (~2402-2480 MHz, 5 MHz bins). It
 // is the only true noise-floor/energy reading this board exposes; Wi-Fi/5 GHz have no such API (RSSI is
 // only ever attached to a decoded frame). See docs/DEVELOPER.md.
-constexpr uint32_t kEdDurationSym = 8;       // energy-detect window per sample, in 16 us symbols (~128 us)
+constexpr uint32_t kEdDurationSym = 128;     // energy-detect window per sample, in 16 us symbols (~2 ms) -
+                                             // long enough that a window usually overlaps a Wi-Fi burst/beacon,
+                                             // so bursty traffic shows up (a 128 us window misses ~99% of it)
 constexpr uint32_t kEdDwellMs = 60;          // spec dwell: much shorter than kDwellMs (~25 samples is plenty),
                                              // so a full 16-channel sweep is ~1 s instead of ~3.5 s
 constexpr int kEdFloorDbm = -95;             // bottom of the on-screen/scored energy range

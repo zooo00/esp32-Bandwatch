@@ -732,7 +732,7 @@ void refreshSystem(float global) {
     lv_label_set_text(sysLines[n++], buf);
     int skipped = 0;
     for (int i = 0; i < kChannelCount; i++) if (chanEnabled(i) && channels[i].unavailable) skipped++;
-    snprintf(buf, sizeof(buf), "sweeps %lu  dwell %u ms", static_cast<unsigned long>(sweepCount), static_cast<unsigned>(kDwellMs));
+    snprintf(buf, sizeof(buf), "sweeps %lu  dwell %u ms", static_cast<unsigned long>(sweepCount), static_cast<unsigned>(dwellMs()));
     lv_label_set_text(sysLines[n++], buf);
     snprintf(buf, sizeof(buf), "band %s  channels %d  skip %d", kBandName[bandMode], enabledCount(), skipped);
     lv_label_set_text(sysLines[n++], buf);

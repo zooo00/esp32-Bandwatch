@@ -285,6 +285,8 @@ extern bool monitorReady;             // the radio is sitting on a usable channe
 extern bool wifiRunning;              // Wi-Fi driver up (also true in 15.4 mode? no — one radio, see setBandMode)
 extern bool r154Running;              // 802.15.4 driver up (instance in ieee154.cpp)
 extern bool specRunning;              // energy-detect spectrum sweep up (15.4 radio, no RX armed; ieee154.cpp)
+// A sweep mode is actually running on its radio (gates channel advance / dwell hopping).
+inline bool hopActive() { return (wifiMode() && wifiRunning) || (mode154() && r154Running) || (modeSpec() && specRunning); }
 
 // esp_wifi_* setup results, reported by hello / the system page (set while starting Wi-Fi).
 extern esp_err_t errCountry, errBand, errProto, errPromisc;

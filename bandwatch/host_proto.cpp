@@ -84,7 +84,7 @@ void sendHello() {
     if (!serialRoom(900)) return;
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
-                  kVersion, static_cast<unsigned>(kDwellMs), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
+                  kVersion, static_cast<unsigned>(dwellMs()), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
                   esp_err_to_name(errProto), esp_err_to_name(errPromisc));
     bool first = true;
     for (int i = 0; i < kChannelCount; i++) {

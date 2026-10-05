@@ -761,29 +761,33 @@ class Bandwatch:
         """Keep each band's last-seen data for the combined 2.4-energy + 5-GHz-activity view, since the single
         radio only scans one band at a time. 2.4 GHz is real energy (spec); 5 GHz is packet activity (Wi-Fi)."""
         now = time.time()
-        if band == "spec" and "ed_max" in entry:
-            self.energy24[c] = {k: entry.get(k) for k in ("ed_min", "ed_mean", "ed_max", "ed_samples")}
-            self.energy24_ts = now
-        elif band in ("5g", "both") and c > 14 and "s" in entry:   # 5 GHz Wi-Fi channels only
-            self.activity5[c] = {"s": entry["s"], "f": entry.get("f", 0), "b": entry.get("b", 0),
-                                 "u": entry.get("u", 0), "st": entry.get("st", 0)}
-            self.activity5_ts = now
+        # dlock: these dicts are read by _wide()/_unidentified() on HTTP threads while this runs on the reader.
+        with self.dlock:
+            if band == "spec" and "ed_max" in entry:
+                self.energy24[c] = {k: entry.get(k) for k in ("ed_min", "ed_mean", "ed_max", "ed_samples")}
+                self.energy24_ts = now
+            elif band in ("5g", "both") and c > 14 and "s" in entry:   # 5 GHz Wi-Fi channels only
+                self.activity5[c] = {"s": entry["s"], "f": entry.get("f", 0), "b": entry.get("b", 0),
+                                     "u": entry.get("u", 0), "st": entry.get("st", 0)}
+                self.activity5_ts = now
 
     def _wide(self):
         now = time.time()
-        return {
-            "energy24": [dict(ch=c, freq=2405 + 5 * (c - 11), **self.energy24[c]) for c in sorted(self.energy24)],
-            "energy24_age": round(now - self.energy24_ts, 1) if self.energy24_ts else None,
-            "activity5": [dict(ch=c, freq=5000 + 5 * c, **self.activity5[c]) for c in sorted(self.activity5)],
-            "activity5_age": round(now - self.activity5_ts, 1) if self.activity5_ts else None,
-        }
+        with self.dlock:
+            return {
+                "energy24": [dict(ch=c, freq=2405 + 5 * (c - 11), **self.energy24[c]) for c in sorted(self.energy24)],
+                "energy24_age": round(now - self.energy24_ts, 1) if self.energy24_ts else None,
+                "activity5": [dict(ch=c, freq=5000 + 5 * c, **self.activity5[c]) for c in sorted(self.activity5)],
+                "activity5_age": round(now - self.activity5_ts, 1) if self.activity5_ts else None,
+            }
 
     def _spec_track(self, ch, ed_max):
-        h = self.spec_hist.get(ch)
-        if h is None:
-            h = deque(maxlen=SPEC_HIST_LEN)
-            self.spec_hist[ch] = h
-        h.append(ed_max)
+        with self.dlock:   # read by _unidentified() on HTTP threads
+            h = self.spec_hist.get(ch)
+            if h is None:
+                h = deque(maxlen=SPEC_HIST_LEN)
+                self.spec_hist[ch] = h
+            h.append(ed_max)
 
     def _unidentified(self):
         """Flag 2.4 GHz energy bins carrying sustained power that no recently-decoded Wi-Fi/BLE/Zigbee
@@ -808,15 +812,18 @@ class Bandwatch:
             # BLE recently, treat at least the advertising frequencies as explained.
             for f in (2402, 2426, 2480):
                 known.append((f - 1, f + 1))
-        # Noise floor = the band-wide quiet level (a low percentile across all bins and recent sweeps), so a
-        # continuously-on emitter is still measured against ambient quiet rather than its own flat history.
-        all_samples = sorted(v for h in self.spec_hist.values() for v in h)
+        # Snapshot the per-bin history under the lock (the reader thread appends to these deques), then work
+        # off the copy. Noise floor = the band-wide quiet level (a low percentile across all bins and recent
+        # sweeps), so a continuously-on emitter is still measured against ambient quiet, not its own history.
+        with self.dlock:
+            hist = {ch: list(h) for ch, h in self.spec_hist.items()}
+        all_samples = sorted(v for h in hist.values() for v in h)
         if len(all_samples) < 8:
             return []
         floor = all_samples[max(0, int(len(all_samples) * 0.15) - 1)]
         gate = floor + SPEC_FLOOR_MARGIN
         out = []
-        for ch, h in self.spec_hist.items():
+        for ch, h in hist.items():
             if not (11 <= ch <= 26) or not h:
                 continue
             peak = max(h)

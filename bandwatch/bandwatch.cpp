@@ -114,7 +114,7 @@ bool applyChannelIdx(int idx) {
 }
 
 bool advanceChannel() {
-    if (!(wifiMode() && wifiRunning) && !(mode154() && r154Running) && !(modeSpec() && specRunning)) return false;
+    if (!hopActive()) return false;
     if (parkedIdx >= 0 && chanEnabled(parkedIdx) && !channels[parkedIdx].unavailable) {
         currentIdx = parkedIdx;
         return applyChannelIdx(currentIdx);
@@ -360,7 +360,7 @@ void finishDwell() {
 }
 
 void hopIfNeeded() {
-    if (!((wifiMode() && wifiRunning) || (mode154() && r154Running) || (modeSpec() && specRunning))) return;
+    if (!hopActive()) return;
     const uint32_t now = millis();
     const uint32_t dwell = dwellMs();
     if (!monitorReady) {

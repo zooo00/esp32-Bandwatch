@@ -49,7 +49,7 @@ import time
 import urllib.request
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse
+from urllib.parse import urlparse, parse_qs
 
 try:
     import serial
@@ -345,6 +345,7 @@ class Bandwatch:
             "deauth": None,          # {"mac", "ch", "sent"} while a deauth attack runs
             "ble": {"devs": 0, "cycles": 0},
             "sd": None,              # {"mounted","mb","cap","file","frames","bytes","err","clock"}
+            "sd_read": None,         # a card file being pulled off: {name,total,received,done,path}
             # completed captures this session, per sink, for the dashboard counters
             "saved": {"usb": {"count": 0, "last": None, "frames": 0, "bytes": 0},
                       "sd":  {"count": 0, "last": None, "frames": 0, "bytes": 0}},
@@ -493,6 +494,9 @@ class Bandwatch:
         self.state["last_rx"] = time.time()
         if raw.startswith(b"P "):
             self.handle_frame(raw)
+            return
+        if raw.startswith(b"S "):
+            self.handle_sd_chunk(raw)   # sdread file chunks are not JSON; without this they flood the log pane
             return
         try:
             msg = json.loads(raw.decode("utf-8", "replace"))
@@ -646,6 +650,10 @@ class Bandwatch:
                         sd[dest] = msg[k]
                 st["sd"] = sd
                 self._sd_track(sd)
+            if msg.get("cmd") == "sdread":
+                self._sd_read_start(msg.get("file"), msg.get("bytes"))   # the ack precedes the S chunks
+            elif msg.get("cmd") == "sdread_done":
+                self._sd_read_finish(True)
         elif t == "sdls":
             # One-shot listing. hello replaces st["sd"] wholesale (no files field), so the dashboard re-asks
             # whenever the card is present and the list is missing; sent<total means it was truncated.
@@ -657,6 +665,8 @@ class Bandwatch:
             st["sd"] = sd
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
+            if str(msg.get("msg", "")).startswith("sdread"):
+                self._sd_read_finish(False)   # the file will not be coming; close out the half-built buffer
 
     def merge_wifi(self, rows):
         now = time.time()
@@ -859,6 +869,47 @@ class Bandwatch:
             cap["frames"] = pcap.frames
             cap["bytes"] = pcap.bytes
 
+    # ---------------- sdread reassembly ----------------
+    def _sd_read_start(self, name, total):
+        """The 'sdread' ack precedes the chunks and carries the file's size."""
+        self._sd_read = {"name": name or "bandwatch.pcap", "total": total or 0, "buf": bytearray()}
+        self.state["sd_read"] = {"name": os.path.basename(self._sd_read["name"]), "total": self._sd_read["total"],
+                                 "received": 0, "done": False}
+
+    def _sd_read_finish(self, done):
+        r = getattr(self, "_sd_read", None)
+        if not r:
+            return
+        self._sd_read = None
+        st = dict(self.state.get("sd_read") or {})
+        st["received"] = len(r["buf"])
+        st["done"] = done
+        if done and r["buf"]:   # write it next to the USB captures; same name as on the card, overwritten on re-pull
+            path = os.path.join(self.captures_dir, os.path.basename(r["name"]))
+            try:
+                with open(path, "wb") as f:
+                    f.write(bytes(r["buf"]))
+                st["path"] = path
+                self.state["log"].append(f"sd file pulled: {os.path.basename(r['name'])} ({len(r['buf'])} bytes)")
+            except Exception as e:
+                st.pop("path", None)
+                self.state["log"].append(f"sd pull could not write the file: {e}")
+        self.state["sd_read"] = st
+
+    def handle_sd_chunk(self, raw):
+        """One 'S <n> <base64>' chunk of an sdread file streaming off the card (device: serviceSdRead)."""
+        r = getattr(self, "_sd_read", None)
+        if not r:
+            return   # chunks without a start ack have nowhere to land
+        try:
+            data = base64.b64decode(raw.split(b" ", 2)[2])
+        except Exception:
+            return
+        with self.dlock:   # snapshot() reads the summary on HTTP threads; keep the counter honest
+            r["buf"] += data
+            if self.state.get("sd_read") is not None:
+                self.state["sd_read"]["received"] = len(r["buf"])
+
     # ---------------- control ----------------
     def start_capture(self, snaplen=None):
         if self.pcap:
@@ -934,7 +985,8 @@ class Bandwatch:
                                "min": r[0], "mean": r[1], "max": r[2], "n": r[3]}
                               for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"], "saved": st["saved"],
+            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
+             "sd_read": st["sd_read"], "saved": st["saved"],
             "oui_source": self.oui.source,
         }
 
@@ -957,6 +1009,25 @@ def make_handler(bw, html_path):
             path = urlparse(self.path).path
             if path == "/api/state":
                 return self._json(bw.snapshot())
+            if path == "/file":   # capture pulled off the card (or over USB) for download
+                name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                fpath = os.path.join(bw.captures_dir, name)
+                ok = bool(name) and len(name) <= 128 and "/" not in name and ".." not in name \
+                    and os.path.isfile(fpath)   # a plain basename: it cannot escape the captures dir
+                if not ok:
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                with open(fpath, "rb") as f:
+                    body = f.read()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path in ("/", "/index.html"):
                 with open(html_path, "rb") as f:
                     body = f.read()
@@ -1012,6 +1083,14 @@ def make_handler(bw, html_path):
                     bw.send(f"dca {mac} {ap_bssid}" if mac and ap_bssid else "dca 0")
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
+                elif cmd == "sdread":
+                    name = req.get("path") or ""
+                    # Device names: /bandwatch-{wifi,ble,802154}-{stamp|seq}.pcap; the whole command must fit the
+                    # device's 47-char line buffer ("sdread " + path <= 47).
+                    if re.match(r"^/bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name) and len(name) <= 40:
+                        bw.send(f"sdread {name}")
+                    else:
+                        return self._json({"error": "bad card file path"}, 400)
                 elif cmd == "addr1":
                     bw.send(f"addr1 {1 if req.get('value') else 0}")
                 elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):

@@ -412,7 +412,6 @@ void Bandwatch_Loop(void) {
     static uint32_t lastDevMs = 0, bleStatusMs = 0;
     pollSerial();
     pollButton();
-    hopIfNeeded();       // dwell/hop here (~2 ms cadence) so short spec dwells aren't rounded to the UI timer
     serviceSdRead();
     drainCapture();
     serviceBle();

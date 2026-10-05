@@ -868,8 +868,7 @@ void refreshUi() {
 
 void uiTimerCb(lv_timer_t* t) {
     (void)t;
-    // Channel hopping is driven from Bandwatch_Loop() (~2 ms) instead of here (120 ms) so short dwells —
-    // notably the spectrum mode's kEdDwellMs — are honored precisely rather than rounded up to this cadence.
+    hopIfNeeded();
     serviceDeauth();
     refreshUi();
 }

@@ -729,7 +729,7 @@ never fires. Per channel, `applyChannelIdx()` calls `edReset()` then `edKick()` 
 **Re-arming the next window must happen from the loop task, not the done callback** — arming from inside the
 ISR callback silently fails and yields exactly one sample per dwell (measured). So the callback only sets a
 `s_edReady` flag and `serviceSpectrum()` (called from `Bandwatch_Loop()`, ~every 2 ms) kicks the next ED.
-That gives **~25–30 samples per `kEdDwellMs` (60 ms) dwell**, which is what lets `edMax` catch bursty emitters (a BLE advert
+That gives **~50 samples per ~120 ms dwell** (see Speed below), which is what lets `edMax` catch bursty emitters (a BLE advert
 or Wi-Fi burst between windows) rather than a single lucky/unlucky snapshot. `finishDwell()` snapshots
 min/mean/max dBm and the sample count into `ChannelState.edMin/edMean/edMax/edSamples` and maps the peak onto
 the shared 0–100 bar/LED range via `edDbmToScore()` (clamped to `kEdFloorDbm`/`kEdCeilDbm`, −95…−20). The
@@ -747,12 +747,17 @@ Wi-Fi/154 rows are byte-for-byte unchanged. `edSamples` doubles as a confidence 
 dashboard fills bars in and walks the current-frequency marker live (like the LCD) between the full-sweep `s`
 messages rather than refreshing the whole chart once per sweep.
 
-**Speed and resolution.** The spec dwell is `kEdDwellMs` (60 ms, vs `kDwellMs` 220 ms) — energy detection needs
-only ~25 samples, so a full 16-channel sweep is ~1 s. To honor a dwell that short, channel hopping
-(`hopIfNeeded`) runs from `Bandwatch_Loop()` (~2 ms cadence) instead of the 120 ms LVGL UI timer. **Resolution
-is fixed at 5 MHz / 16 bins:** `esp_ieee802154_set_channel()` takes a channel number (11–26) only — there is no
-frequency API — and Wi-Fi's 2.4 GHz channels are also 5 MHz-spaced with no energy primitive, so sub-5 MHz
-would require poking undocumented RF registers (same fragility class as the §9 deauth offsets) and is not done.
+**Speed and resolution.** The spec dwell (`kEdDwellMs`, 60 ms vs `kDwellMs` 220 ms) shortens the sweep, but
+hopping stays on the 120 ms LVGL UI timer (`hopIfNeeded` in `uiTimerCb`), so the effective dwell is ~120 ms
+and a full 16-channel sweep is ~2 s. **Do not drive the hop faster than this.** An attempt to hop every 60 ms
+from `Bandwatch_Loop()` (~2 ms cadence) was reverted: the radio needs ~>100 ms to settle after
+`esp_ieee802154_set_channel()`, and hopping sooner made energy detection return a stuck ~−40 dBm on *every*
+channel — a flat reading that did not track real occupancy (verified against the Wi-Fi busy map: channels the
+Wi-Fi radio showed empty still read −40). At the ~120 ms dwell the floor sits near −110 dBm with 40+ dB of
+real structure that lines up with actual traffic. **Resolution is fixed at 5 MHz / 16 bins:**
+`esp_ieee802154_set_channel()` takes a channel number (11–26) only — there is no frequency API — and Wi-Fi's
+2.4 GHz channels are also 5 MHz-spaced with no energy primitive, so sub-5 MHz would require poking
+undocumented RF registers (same fragility class as the §9 deauth offsets) and is not done.
 
 ### Host: flagging unexplained energy (not identifying protocols)
 The radio **cannot demodulate an unknown protocol** — it only knows 802.11/BLE/802.15.4. What the host does

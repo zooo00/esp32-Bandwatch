@@ -611,6 +611,24 @@
     $('#tAps').textContent = wifi ? fmt(s.aps) : fmt(s.ble.devs);
   }
 
+  // Shared bar-chart scaffolding: horizontal gridlines + left-axis labels, and hover tooltips on the .hit rects.
+  // `lines` = [{y, label}] (label null → gridline only); `extra` = optional trailing SVG inside the axis group.
+  function gridAxis(W, padL, padR, lines, extra) {
+    return '<g class="grid">' + lines.map(l => `<line x1="${padL}" x2="${W - padR}" y1="${l.y}" y2="${l.y}"/>`).join('') + '</g>'
+      + '<g class="axis">' + lines.filter(l => l.label != null).map(l => `<text x="${padL - 6}" y="${l.y + 4}" text-anchor="end">${l.label}</text>`).join('') + (extra || '') + '</g>';
+  }
+  function chartTips(svg, tipSel, items, htmlOf) {
+    const tip = $(tipSel), wrap = svg.parentElement;
+    svg.querySelectorAll('.hit').forEach(h => {
+      h.addEventListener('mousemove', (e) => {
+        const r = wrap.getBoundingClientRect();
+        tip.style.display = 'block'; tip.style.left = (e.clientX - r.left) + 'px'; tip.style.top = (e.clientY - r.top) + 'px';
+        tip.innerHTML = htmlOf(items[+h.dataset.i]);
+      });
+      h.addEventListener('mouseleave', () => tip.style.display = 'none');
+    });
+  }
+
   function renderBars(s, svgSel, tipSel) {
     const svg = $(svgSel || '#bars'), W = 1000, H = 300, padL = 36, padR = 10, padT = 24, padB = 44;
     const chs = s.channels; if (!chs.length) { svg.innerHTML = s.band === 'ble' ? '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">Bluetooth LE mode — switch to a Wi‑Fi band to see channel scores</text>' : ''; return; }
@@ -622,8 +640,7 @@
     const y = (v) => padT + plotH - (v / 100) * plotH;
     let x = padL, out = [], xs = [];
     const maxCh = [...chs].filter(c => c.state === 0).sort((a, b) => b.s - a.s)[0];
-    out.push('<g class="grid">' + [0, 25, 50, 75, 100].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('') + '</g>');
-    out.push('<g class="axis">' + [0, 25, 50, 75, 100].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('') + '</g>');
+    out.push(gridAxis(W, padL, padR, [0, 25, 50, 75, 100].map(v => ({ y: y(v), label: v }))));
     const labels = [];
     chs.forEach((c, i) => {
       if (i > 0 && groupOf(c.ch) !== groupOf(chs[i - 1].ch)) x += gapW;
@@ -644,16 +661,8 @@
     for (const g in groups) { const a = groups[g]; out.push(`<text x="${(a[0] + a[a.length - 1]) / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">${names[g]}</text>`); }
     out.push(labels.join(''));
     svg.innerHTML = out.join('');
-    const tip = $(tipSel || '#barTip'), wrap = svg.parentElement;
-    svg.querySelectorAll('.hit').forEach(h => {
-      h.addEventListener('mousemove', (e) => {
-        const c = chs[+h.dataset.i]; const r = wrap.getBoundingClientRect();
-        tip.style.display = 'block'; tip.style.left = (e.clientX - r.left) + 'px'; tip.style.top = (e.clientY - r.top) + 'px';
-        tip.innerHTML = c.state === 2 ? `<b>ch ${c.ch}</b> rejected by driver` : c.state === 1 ? `<b>ch ${c.ch}</b> no data yet`
-          : `<b>ch ${c.ch}</b> · ${band(c.ch)}<br>score ${fmt(c.s)} (raw ${fmt(c.r)})<br>${rate(c.f / dwellS)} pkt/s · ${rate(c.b / dwellS)} B/s<br>${c.u} talkers · ${c.st} strong of ${c.f}`;
-      });
-      h.addEventListener('mouseleave', () => tip.style.display = 'none');
-    });
+    chartTips(svg, tipSel || '#barTip', chs, c => c.state === 2 ? `<b>ch ${c.ch}</b> rejected by driver` : c.state === 1 ? `<b>ch ${c.ch}</b> no data yet`
+      : `<b>ch ${c.ch}</b> · ${band(c.ch)}<br>score ${fmt(c.s)} (raw ${fmt(c.r)})<br>${rate(c.f / dwellS)} pkt/s · ${rate(c.b / dwellS)} B/s<br>${c.u} talkers · ${c.st} strong of ${c.f}`);
   }
 
   function renderTrend(s) {
@@ -779,8 +788,7 @@
     const plotW = W - padL - padR, plotH = H - padT - padB, LO = -100, HI = -30;
     const yOf = r => { const v = Math.max(LO, Math.min(HI, r)); return padT + plotH - (v - LO) / (HI - LO) * plotH; };
     const slot = plotW / devs.length, bw = Math.min(22, Math.max(3, slot - 2)), out = [];
-    out.push('<g class="grid">' + [-90, -70, -50, -30].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${yOf(v)}" y2="${yOf(v)}"/>`).join('') + '</g>');
-    out.push('<g class="axis">' + [-90, -70, -50, -30].map(v => `<text x="${padL - 6}" y="${yOf(v) + 4}" text-anchor="end">${v}</text>`).join('') + `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text></g>`);
+    out.push(gridAxis(W, padL, padR, [-90, -70, -50, -30].map(v => ({ y: yOf(v), label: v })), `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text>`));
     devs.forEach((d, i) => {
       const cx = padL + slot * i + slot / 2, bx = cx - bw / 2, top = yOf(d.rssi), h = Math.max(1, yOf(LO) - top);
       out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
@@ -788,15 +796,7 @@
     });
     out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">${devs.length} nearest advertisers — RSSI (dBm)</text>`);
     svg.innerHTML = out.join('');
-    const tip = $('#bleBarTip'), wrap = svg.parentElement;
-    svg.querySelectorAll('.hit').forEach(h => {
-      h.addEventListener('mousemove', (e) => {
-        const d = devs[+h.dataset.i], r = wrap.getBoundingClientRect();
-        tip.style.display = 'block'; tip.style.left = (e.clientX - r.left) + 'px'; tip.style.top = (e.clientY - r.top) + 'px';
-        tip.innerHTML = `<b>${esc(d.name) || d.mac}</b><br>${d.rssi} dBm · ${fmt(d.adv)} adv<br><span style="opacity:.6">${esc(d.vendor || d.kind || '')}</span>`;
-      });
-      h.addEventListener('mouseleave', () => tip.style.display = 'none');
-    });
+    chartTips(svg, '#bleBarTip', devs, d => `<b>${esc(d.name) || d.mac}</b><br>${d.rssi} dBm · ${fmt(d.adv)} adv<br><span style="opacity:.6">${esc(d.vendor || d.kind || '')}</span>`);
   }
 
   function renderBle(s) {
@@ -873,8 +873,7 @@
     lo = Math.max(-115, lo); hi = Math.min(0, hi);
     const yOf = d => { const v = Math.max(lo, Math.min(hi, d)); return padT + plotH - (v - lo) / (hi - lo) * plotH; };
     const slot = plotW / 16, bw = Math.min(34, Math.max(4, slot - 3)), out = [];
-    out.push('<g class="grid">' + [0, 1, 2, 3].map(k => `<line x1="${padL}" x2="${W - padR}" y1="${yOf(lo + (hi - lo) * k / 3)}" y2="${yOf(lo + (hi - lo) * k / 3)}"/>`).join('') + '</g>');
-    out.push('<g class="axis">' + [0, 1, 2, 3].map(k => `<text x="${padL - 6}" y="${yOf(lo + (hi - lo) * k / 3) + 4}" text-anchor="end">${Math.round(lo + (hi - lo) * k / 3)}</text>`).join('') + `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text></g>`);
+    out.push(gridAxis(W, padL, padR, [0, 1, 2, 3].map(k => { const v = lo + (hi - lo) * k / 3; return { y: yOf(v), label: Math.round(v) }; }), `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text>`));
     bins.forEach((b, i) => {
       const cx = padL + slot * i + slot / 2, bx = cx - bw / 2;
       out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
@@ -890,15 +889,7 @@
     });
     out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">2.4 GHz · frequency (MHz)</text>`);
     svg.innerHTML = out.join('');
-    const tip = $('#specTip'), wrap = svg.parentElement;
-    svg.querySelectorAll('.hit').forEach(h => {
-      h.addEventListener('mousemove', (ev) => {
-        const b = bins[+h.dataset.i], r = wrap.getBoundingClientRect();
-        tip.style.display = 'block'; tip.style.left = (ev.clientX - r.left) + 'px'; tip.style.top = (ev.clientY - r.top) + 'px';
-        tip.innerHTML = b.d ? `<b>${b.freq} MHz</b> <span style="opacity:.55">15.4 ch ${b.ch}</span><br>avg ${b.d.ed_mean} dBm · peak ${b.d.ed_max} dBm<br>min ${b.d.ed_min} dBm${b.d.ed_samples != null ? ` · ${b.d.ed_samples} samp` : ''}` : `<b>${b.freq} MHz</b><br>no data yet`;
-      });
-      h.addEventListener('mouseleave', () => tip.style.display = 'none');
-    });
+    chartTips(svg, '#specTip', bins, b => b.d ? `<b>${b.freq} MHz</b> <span style="opacity:.55">15.4 ch ${b.ch}</span><br>avg ${b.d.ed_mean} dBm · peak ${b.d.ed_max} dBm<br>min ${b.d.ed_min} dBm${b.d.ed_samples != null ? ` · ${b.d.ed_samples} samp` : ''}` : `<b>${b.freq} MHz</b><br>no data yet`);
     // Waterfall (peak energy, 16 fixed columns) — only while actively scanning 2.4 GHz.
     const cv = $('#waterfall');
     if (s.band === 'spec' && s.sweep !== wfSweep) {
@@ -918,8 +909,7 @@
     const groupOf = ch => ch <= 48 ? 0 : ch <= 64 ? 1 : ch <= 144 ? 2 : 3;
     let ng = 0; for (let i = 1; i < act.length; i++) if (groupOf(act[i].ch) !== groupOf(act[i - 1].ch)) ng++;
     const gap = 14, slot = (plotW - ng * gap) / act.length, bw = Math.min(22, Math.max(3, slot - 2)), out = [];
-    out.push('<g class="grid">' + [0, 25, 50, 75, 100].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${yOf(v)}" y2="${yOf(v)}"/>`).join('') + '</g>');
-    out.push('<g class="axis">' + [0, 50, 100].map(v => `<text x="${padL - 6}" y="${yOf(v) + 4}" text-anchor="end">${v}</text>`).join('') + '</g>');
+    out.push(gridAxis(W, padL, padR, [0, 25, 50, 75, 100].map(v => ({ y: yOf(v), label: [0, 50, 100].includes(v) ? v : null }))));
     let x = padL;
     act.forEach((a, i) => {
       if (i > 0 && groupOf(a.ch) !== groupOf(act[i - 1].ch)) x += gap;
@@ -932,15 +922,7 @@
     });
     out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">5 GHz · frequency (MHz) · activity, not energy</text>`);
     svg.innerHTML = out.join('');
-    const tip = $('#spec5Tip'), wrap = svg.parentElement;
-    svg.querySelectorAll('.hit').forEach(h => {
-      h.addEventListener('mousemove', (ev) => {
-        const a = act[+h.dataset.i], r = wrap.getBoundingClientRect();
-        tip.style.display = 'block'; tip.style.left = (ev.clientX - r.left) + 'px'; tip.style.top = (ev.clientY - r.top) + 'px';
-        tip.innerHTML = `<b>${a.freq} MHz</b> <span style="opacity:.55">ch ${a.ch}</span><br>activity ${Math.round(a.s)}/100<br>${rate(a.f / dwellS)} pkt/s · ${a.u} talkers`;
-      });
-      h.addEventListener('mouseleave', () => tip.style.display = 'none');
-    });
+    chartTips(svg, '#spec5Tip', act, a => `<b>${a.freq} MHz</b> <span style="opacity:.55">ch ${a.ch}</span><br>activity ${Math.round(a.s)}/100<br>${rate(a.f / dwellS)} pkt/s · ${a.u} talkers`);
   }
 
   function renderSpectrum(s) {

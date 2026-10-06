@@ -1095,8 +1095,9 @@ def make_handler(bw, classic_path, v2_path=None, ui="classic"):
                 elif cmd == "sdread":
                     name = (req.get("path") or "").lstrip("/")
                     # The card lists bare names ("bandwatch-wifi-..."), but SD.open wants an absolute path, so we
-                    # accept either and normalize to "/name". The whole command must fit the device's 47-char line.
-                    if re.match(r"^bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name) and len(name) <= 40:
+                    # accept either and normalize to "/name". "sdread /" is 8 chars and the device's line buffer
+                    # holds 47, so the name must be <= 39 or its last char is silently dropped on the way in.
+                    if re.match(r"^bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name) and len(name) <= 39:
                         bw.send(f"sdread /{name}")
                     else:
                         return self._json({"error": "bad card file path"}, 400)

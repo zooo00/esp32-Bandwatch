@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.12.1";
+constexpr const char* kVersion = "1.12.2";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -30,7 +30,7 @@ constexpr uint32_t kSplashShowMs = 900;     // Mode splash duration for host- or
 constexpr uint32_t kSplashStepMs = 700;     // BOOT held: cadence of stepping through the splashes (== kLongPressMs, so it's even from button-down)
 constexpr uint32_t kSplashTailMs = 700;     // After release, linger on the chosen mode's splash
 constexpr uint32_t kBootLogoMs = 2000;      // Boot picture (bootlogo/) shown before the boot mode card
-constexpr uint32_t kWrapLogoMs = 5000;      // How long a flashed picture stays up (page wrap, or stopped on the walk's photo slot)
+constexpr uint32_t kWrapLogoMs = 5000;      // How long a picture stays up when stopped on the walk's photo slot (and its tap-step)
 constexpr uint32_t kApUpdateMs = 3000;      // AP count refresh cadence
 constexpr uint32_t kDevListMs = 2000;       // Device table -> host cadence
 constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not reported

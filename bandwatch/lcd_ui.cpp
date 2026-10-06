@@ -1044,8 +1044,6 @@ void pollButton() {
             } else {
                 showPage(prev + 1);               // tap: next page
                 splashDurMs = 0;                  // ... without a lingering mode splash shadowing it
-                if (prev != 0 && currentPage == 0)   // wrapped past the last page on the way around: flash one
-                    showLogoSplash(kWrapLogoMs, false);
             }
             refreshUi();
         } else if (stepped) {                     // release commits the mode on screen: linger on its splash

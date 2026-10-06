@@ -251,6 +251,10 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.12.2** — Boot-photo UX: removed the page-wrap picture flash. Tapping BOOT to cycle pages no longer
+  flashes a random boot picture when it wraps from the last page back to the first (and so no longer briefly
+  captures taps into picture-stepping). Pictures now appear only at boot and when the BOOT hold-walk is
+  released on the photo slot after Spectrum.
 - **1.12.1** — Public-release housekeeping and a boot-splash fix. The project is now **MIT-licensed**
   ([`LICENSE`](LICENSE) + [`NOTICE`](NOTICE)) with the carve-out that the upstream
   [PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD) base it derives from

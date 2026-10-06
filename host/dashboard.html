@@ -245,6 +245,7 @@
       <div class="tile hero"><div class="label">Max busy score</div><div class="value" id="tGlobal">–</div><div class="sub" id="tGlobalSub">maximum of smoothed channel scores</div></div>
       <div class="tile"><div class="label">Listening on</div><div class="value" id="tCur">–</div><div class="sub" id="tCurSub"></div></div>
       <div class="tile"><div class="label">Busiest channel</div><div class="value" id="tTop">–</div><div class="sub" id="tTopSub"></div></div>
+      <div class="tile"><div class="label">Quietest channel</div><div class="value" id="tQuiet">–</div><div class="sub" id="tQuietSub"></div></div>
       <div class="tile"><div class="label">Sweeps</div><div class="value" id="tSweep">–</div><div class="sub" id="tSweepSub"></div></div>
       <div class="tile"><div class="label">Transmitters (est.)</div><div class="value" id="tAps">–</div><div class="sub">peak unique senders per 3 s</div></div>
     </section>
@@ -262,7 +263,7 @@
     <section class="card">
       <h2>Channels <small>last completed dwell per channel</small></h2>
       <div style="overflow-x:auto"><table id="tbl"><thead><tr>
-        <th class="l">Channel</th><th>Band</th><th>Score</th><th>Raw</th><th>Frames</th><th>pkt/s</th><th>B/s</th><th>Talkers</th><th>Strong</th><th>Updated</th>
+        <th class="l">Channel</th><th>Band</th><th>Score</th><th>Raw</th><th>Frames</th><th>pkt/s</th><th>B/s</th><th>Talkers</th><th>Strong</th><th class="l">Top talker</th><th>Updated</th>
       </tr></thead><tbody></tbody></table></div>
     </section>
   </div>
@@ -607,9 +608,13 @@
     const cur = s.channels.find(c => c.ch === s.current);
     $('#tCur').textContent = wifi ? (s.current ? 'ch ' + s.current : '–') : 'BLE';
     $('#tCurSub').textContent = wifi ? (cur ? `${band(s.current)} · score ${fmt(cur.s)} · ${rate(cur.f / dwellS)} pkt/s${s.park ? ' · parked' : ''}` : (s.park ? 'parked' : 'hopping')) : `${s.ble.devs} devices · scan cycle ${s.ble.cycles}`;
-    const top = [...s.channels].filter(c => c.state === 0).sort((a, b) => b.s - a.s)[0];
+    const withData = [...s.channels].filter(c => c.state === 0);
+    const top = [...withData].sort((a, b) => b.s - a.s)[0];
     $('#tTop').textContent = wifi && top ? 'ch ' + top.ch : '–';
     $('#tTopSub').textContent = wifi && top ? `score ${fmt(top.s)} · ${rate(top.b / dwellS)} B/s · ${top.u} talkers` : '';
+    const quiet = [...withData].sort((a, b) => a.s - b.s)[0];   // C8: least-busy channel with data
+    $('#tQuiet').textContent = wifi && quiet ? 'ch ' + quiet.ch : '–';
+    $('#tQuietSub').textContent = wifi && quiet ? (quiet.s >= 50 ? `score ${fmt(quiet.s)} · nothing is quiet right now` : `score ${fmt(quiet.s)} · ${band(quiet.ch)}`) : '';
     $('#tSweep').textContent = wifi ? fmt(s.sweep) : '–';
     $('#tSweepSub').textContent = wifi ? `${s.channels.length} channels · ${(s.channels.length * dwellS).toFixed(1)} s per sweep` : '';
     $('#tAps').textContent = wifi ? fmt(s.aps) : fmt(s.ble.devs);
@@ -695,8 +700,15 @@
   function renderTable(s) {
     const tb = $('#tbl tbody'), now = Date.now() / 1000;
     tb.innerHTML = s.channels.map(c => `<tr class="${c.ch === s.current ? 'current' : ''}"><td class="l">ch ${c.ch}</td><td>${band(c.ch)}</td>
-      ${c.state === 2 ? '<td colspan="8" class="l" style="color:var(--muted)">rejected by driver</td>' : c.state === 1 ? '<td colspan="8" class="l" style="color:var(--muted)">no data yet</td>'
-        : `<td>${fmt(c.s)}</td><td>${fmt(c.r)}</td><td>${fmt(c.f)}</td><td>${rate(c.f / dwellS)}</td><td>${rate(c.b / dwellS)}</td><td>${c.u}</td><td>${c.st}</td><td>${c.t ? fmt(now - c.t) + ' s ago' : '–'}</td>`}</tr>`).join('');
+      ${c.state === 2 ? '<td colspan="9" class="l" style="color:var(--muted)">rejected by driver</td>' : c.state === 1 ? '<td colspan="9" class="l" style="color:var(--muted)">no data yet</td>'
+        : `<td>${fmt(c.s)}</td><td>${fmt(c.r)}</td><td>${fmt(c.f)}</td><td>${rate(c.f / dwellS)}</td><td>${rate(c.b / dwellS)}</td><td>${c.u}</td><td>${c.st}</td><td class="l">${topTalker(c, s)}</td><td>${c.t ? fmt(now - c.t) + ' s ago' : '–'}</td>`}</tr>`).join('');
+  }
+  // C6: name the loudest transmitter of a dwell, joined against the known device table for a vendor/SSID.
+  function topTalker(c, s) {
+    if (!c.top) return '<span class="sub">–</span>';
+    const d = (s.wifi_devs || []).find(x => x.mac === c.top);
+    const name = d ? (d.ssid || d.vendor || '') : '';
+    return `<span class="mono">${c.top}</span>${name ? ' <span class="sub">' + esc(name) + '</span>' : ''}${c.trssi != null ? ` <span class="sub">${c.trssi} dBm</span>` : ''}`;
   }
 
   function sortRows(rows, t) {

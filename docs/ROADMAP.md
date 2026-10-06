@@ -1,6 +1,7 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.10**.
+Planned work, open questions and known gaps. Current release: **v1.11** (batch one: C3 + C6 + C8 shipped;
+C1/C2/C4/C5/C7/C9/C10/C11 still candidates, C12 the exit ramp).
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
@@ -26,9 +27,9 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   (`bandwatch.cpp`) is the only swap point and calls `releaseCapture()` on every change (pcap link type
   differs per radio). New mode = extend `BandMode`, `kBandName[]`, `chanEnabled()`, `setBandMode()`,
   LCD pages, `sendHello`'s `chs`, dashboard buttons (checklist in DEVELOPER §6).
-- **RAM is the constraint.** No PSRAM; statics and heap share ~320 kB DRAM. Static usage measured on a
-  clean v1.10 build: **80,544 B** — *over* the round "well under ~80 kB" line (CLAUDE.md rule 4), up from
-  79,592 B at v1.5.5. Free heap at runtime: Wi‑Fi idle ≈83 kB, BLE ≈95 kB, SD capture (tightest) **31.9 kB**;
+- **RAM is the constraint.** No PSRAM; statics and heap share ~320 kB DRAM. Static usage: v1.10 was
+  **80,544 B** (over the round "well under ~80 kB" line, CLAUDE.md rule 4); the v1.11 reclaim pass (smaller
+  LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to **74,480 B**. Free heap at runtime: Wi‑Fi idle ≈83 kB, BLE ≈95 kB, SD capture (tightest) **31.9 kB**;
   `ensureCapRing()` refuses a ring that leaves < `kMinFreeHeapB` = 24 kB total free. `WifiDev` is packed to
   exactly 64 B behind a `static_assert` (`devices.h`) and lives in two 64-slot arrays, so +1 byte of *padding*
   can cost 512 B static. For reference: `BleDev` ≈56 B × 48 slots (hand-computed — add a static_assert before
@@ -136,7 +137,14 @@ means WPA2 clients retry auth a few times and give up — enough EAPOL M1s, argu
 probing (stage-1 counters move). Stage 2: capture running + one WPA2 sleeper → EAPOL frames from its MAC in the pcap.
 `txstat`-style sent/responded/failed counters so it never rests on a counter alone (§11's lesson).
 
-### C3 — NVS persistence (boot where you left off)
+### C3 — NVS persistence (boot where you left off)  ✅ SHIPPED v1.11
+
+**Status (shipped, verified on-device).** Implemented in `settings.cpp` (`loadSettings`/`saveSettings`), wired into
+`Bandwatch_Init()` and the `band`/`addr1`/`blescan`/`snap`/`specstep` handlers + the button-walk commit. Persists
+band mode + the four scalar policies; park and hunt/deauth deliberately not persisted (open question 1 resolved:
+mode only, park hops). Save is on user-commit, not per walk-step. **Static-RAM cost measured: +8 B** (the
+`Preferences` handle; NVS code is flash, not RAM). Boot log line `settings restored: band X`. **Verified:**
+`band 2.4g` → `reboot` → `info` reported `band 2.4g` (default would be 5g).
 
 **What.** Power-cycling today resets everything: band back to `5g`, park cleared, `blescan auto`, `specstep 2`,
 `snaplen 1600`, `addr1 on`. Persist settings so a walk-around device boots ready.
@@ -213,7 +221,13 @@ header next to the mode name.
 **Verify.** Watch the mode walk in hello lines across a full cycle; per-leg sweep counters reset as today; free-heap
 delta before/after each hand-off stays within a few hundred bytes (the capture-ring-release check from testing checklist 7).
 
-### C6 — Top talker per dwell
+### C6 — Top talker per dwell  ✅ SHIPPED v1.11
+
+**Status (shipped, verified on-device).** `Accum` gained `bestMac[6]`/`bestRssi` (+8 B, one instance). `promiscuousCb`
+tracks the loudest frame's transmitter; `sendDwell` reads it from `g_accum` (still live — `resetAccum` runs after)
+into `"top"`/`"trssi"` on the `d` line, so no per-channel storage (would have been ~430 B across 54 channels). Serial
+budget bumped 380→420. Host merges `top`/`trssi` (and keeps them across `s` sweep rows); both dashboards show a "Top
+talker" column joined to the device table. **Verified:** parked on ch6, `top` was a stable MAC at −46 dBm each dwell.
 
 **What.** The dwell already counts *how many* transmitters; name the loudest one. The `d` line gains `"top"`
 (MAC of the strongest frame this dwell) + its RSSI → dashboard: "ch 6 is busy, and it's *this* Apple TV."
@@ -250,7 +264,12 @@ the strongest matching beacon was last seen, re-derived per sweep if it moves (M
 **Verify.** Two APs with one SSID on different channels: walk between them, RSSI and park follow the stronger.
 A name that matches nothing → zero hits but no crash (the empty state).
 
-### C8 — Least-busy readout
+### C8 — Least-busy readout  ✅ SHIPPED v1.11
+
+**Status (shipped).** `quietestChannel()` (firmware, 0 static) picks the lowest `busyEma` among enabled/swept/non-rejected
+channels; LCD Overview footer shows `quiet chNN N` (capture-off, where the line has width). Both dashboards gained a
+"Quietest channel" tile/slot, with an "nothing is quiet right now" caveat when even the minimum ≥ 50 (open question 1).
+UI-only, no protocol change.
 
 **What.** Overview shows the top‑3 *busiest*; add the quietest available channel ("quiet: ch149 · 3") for the
 pick-a-channel use case. **UI-only**: every number is already in today's `s` rows (EMA per channel + state flag) —

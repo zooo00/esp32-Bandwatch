@@ -540,6 +540,9 @@ class Bandwatch:
             c = msg["c"]
             entry = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
                      "u": msg["u"], "state": 0, "t": time.time()}
+            if msg.get("top"):   # C6 top talker: strongest transmitter this dwell (null when no frame seen)
+                entry["top"] = msg["top"]
+                entry["trssi"] = msg.get("trssi")
             e = msg.get("e")   # spectrum: [edMin, edMean, edMax, edSamples] for this dwell
             if e and len(e) >= 4:
                 entry.update({"ed_min": e[0], "ed_mean": e[1], "ed_max": e[2], "ed_samples": e[3]})
@@ -579,6 +582,9 @@ class Bandwatch:
                 prev = st["channels"].get(c, {})
                 entry = {"s": s, "r": prev.get("r", s), "f": f, "b": b, "st": strong, "u": u,
                          "state": state, "t": prev.get("t", 0)}
+                if prev.get("top"):   # keep C6 top talker across sweep rows (they carry no per-dwell detail)
+                    entry["top"] = prev["top"]
+                    entry["trssi"] = prev.get("trssi")
                 st["channels"][c] = entry
                 self._cache_wide(st["band"], c, entry)   # caches 5 GHz activity for the combined view
             st["chs"] = chs

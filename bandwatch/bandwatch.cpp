@@ -79,6 +79,8 @@ void resetAccum() {
     g_accum.unique = 0;
     g_accum.macFill = 0;
     for (int i = 0; i < kUniqueSlots; i++) g_accum.macHashes[i] = 0;
+    g_accum.bestRssi = -128;
+    for (int i = 0; i < 6; i++) g_accum.bestMac[i] = 0;
     portEXIT_CRITICAL(&g_accumMux);
 }
 
@@ -233,40 +235,102 @@ void sortTop3(int outIdx[3]) {
     }
 }
 
-// Snapshot helpers for device tables (copy under lock, then sort outside). One shared scratch buffer,
-// used from the loop task only (UI timer and host output both run there). The DevSnap union itself is in
-// bandwatch_core.h.
-DevSnap devSnap;
+// C8: the quietest channel with real data (lowest busyEma among enabled, swept, non-rejected channels).
+// Returns -1 if nothing has been measured yet. The caller decides whether to caveat an all-busy set.
+int quietestChannel() {
+    int best = -1;
+    for (int i = 0; i < kChannelCount; i++) {
+        if (!chanEnabled(i) || !channels[i].hasData || channels[i].unavailable) continue;
+        if (best < 0 || channels[i].busyEma < channels[best].busyEma) best = i;
+    }
+    return best;
+}
 
-int snapshotWifi(WifiDev* out, int maxN, uint32_t freshMs) {
+// Device-table listing helpers (loop task only - UI timer and host output both run there). collect*Refs()
+// copies a compact {rssi, slot, identity} per fresh device under the lock and sorts those; fetch*Dev() then
+// re-validates each slot and copies out one full record. See the DevRef note in bandwatch_core.h.
+DevRef g_devRefs[kWifiDevSlots];
+
+// Collect compact refs to fresh devices under the lock, then sort by RSSI outside it. The full record is
+// re-fetched later with fetch*Dev(); only {rssi, slot, identity} is copied here, so the lock is held briefly
+// and no large scratch is needed.
+int collectWifiRefs(DevRef* refs, int maxN, uint32_t freshMs) {
     const uint32_t now = millis();
     int n = 0;
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kWifiDevSlots && n < maxN; i++) {
-        if (wifiDevs[i].lastMs && (now - wifiDevs[i].lastMs) <= freshMs) out[n++] = wifiDevs[i];
+        if (wifiDevs[i].lastMs && (now - wifiDevs[i].lastMs) <= freshMs) {
+            refs[n].rssi = wifiDevs[i].rssi;
+            refs[n].idx = static_cast<uint8_t>(i);
+            memcpy(refs[n].key, wifiDevs[i].mac, 6);
+            n++;
+        }
     }
     portEXIT_CRITICAL(&g_devMux);
+    sortByRssi(refs, n);
     return n;
 }
-int snapshotBle(BleDev* out, int maxN, uint32_t freshMs) {
+int collectBleRefs(DevRef* refs, int maxN, uint32_t freshMs) {
     const uint32_t now = millis();
     int n = 0;
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kBleDevSlots && n < maxN; i++) {
-        if (bleDevs[i].lastMs && (now - bleDevs[i].lastMs) <= freshMs) out[n++] = bleDevs[i];
+        if (bleDevs[i].lastMs && (now - bleDevs[i].lastMs) <= freshMs) {
+            refs[n].rssi = bleDevs[i].rssi;
+            refs[n].idx = static_cast<uint8_t>(i);
+            memcpy(refs[n].key, bleDevs[i].mac, 6);
+            n++;
+        }
     }
     portEXIT_CRITICAL(&g_devMux);
+    sortByRssi(refs, n);
     return n;
 }
-int snapshot154(Dev154* out, int maxN, uint32_t freshMs) {
+int collect154Refs(DevRef* refs, int maxN, uint32_t freshMs) {
     const uint32_t now = millis();
     int n = 0;
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kDev154Slots && n < maxN; i++) {
-        if (devs154[i].lastMs && (now - devs154[i].lastMs) <= freshMs) out[n++] = devs154[i];
+        if (devs154[i].lastMs && (now - devs154[i].lastMs) <= freshMs) {
+            refs[n].rssi = devs154[i].rssi;
+            refs[n].idx = static_cast<uint8_t>(i);
+            memcpy(refs[n].key, devs154[i].key, 8);
+            n++;
+        }
     }
     portEXIT_CRITICAL(&g_devMux);
+    sortByRssi(refs, n);
     return n;
+}
+
+// Re-fetch one full record for a ref, under a brief lock. Returns false (skip the row) if the slot is no
+// longer fresh or now holds a different device than the ref named — i.e. it was evicted/reused since collect.
+bool fetchWifiDev(const DevRef& r, WifiDev& out, uint32_t freshMs) {
+    const uint32_t now = millis();
+    bool ok = false;
+    portENTER_CRITICAL(&g_devMux);
+    const WifiDev& d = wifiDevs[r.idx];
+    if (d.lastMs && (now - d.lastMs) <= freshMs && macEq(d.mac, r.key)) { out = d; ok = true; }
+    portEXIT_CRITICAL(&g_devMux);
+    return ok;
+}
+bool fetchBleDev(const DevRef& r, BleDev& out, uint32_t freshMs) {
+    const uint32_t now = millis();
+    bool ok = false;
+    portENTER_CRITICAL(&g_devMux);
+    const BleDev& d = bleDevs[r.idx];
+    if (d.lastMs && (now - d.lastMs) <= freshMs && macEq(d.mac, r.key)) { out = d; ok = true; }
+    portEXIT_CRITICAL(&g_devMux);
+    return ok;
+}
+bool fetch154Dev(const DevRef& r, Dev154& out, uint32_t freshMs) {
+    const uint32_t now = millis();
+    bool ok = false;
+    portENTER_CRITICAL(&g_devMux);
+    const Dev154& d = devs154[r.idx];
+    if (d.lastMs && (now - d.lastMs) <= freshMs && key8Eq(d.key, r.key)) { out = d; ok = true; }
+    portEXIT_CRITICAL(&g_devMux);
+    return ok;
 }
 
 void setPark(int idx) {
@@ -395,6 +459,7 @@ void Bandwatch_Init(void) {
     // Probe the card at boot so "hello" can tell the dashboard whether SD recording is available.
     // SPI is already up: LCD_Init() runs before this, and both share the bus from the loop task.
     sdProbeAtBoot();
+    loadSettings();   // restore band mode + scalar policies before the radios come up (C3)
 
     setLedColor({255, 0, 0}, 100);
     delay(120);
@@ -408,7 +473,10 @@ void Bandwatch_Init(void) {
     buildUi();
     Serial.printf("{\"t\":\"log\",\"msg\":\"boot: heap after UI %u\"}\n", static_cast<unsigned>(ESP.getFreeHeap()));
     lv_timer_create(uiTimerCb, kUiIntervalMs, nullptr);
-    startWifi();
+    startWifi();   // brings up BAND_5G (the compile default); a restored non-5G mode transitions below
+    if (g_restoredMode != BAND_5G) setBandMode(g_restoredMode);   // reuse the tested teardown/bringup path
+    if (g_settingsRestored)
+        Serial.printf("{\"t\":\"log\",\"msg\":\"settings restored: band %s\"}\n", kBandName[bandMode]);
     Serial.printf("{\"t\":\"log\",\"msg\":\"boot: heap after wifi %u\"}\n", static_cast<unsigned>(ESP.getFreeHeap()));
     sendHello();
     refreshUi();

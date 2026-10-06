@@ -586,7 +586,11 @@ void refreshOverview(float global) {
         snprintf(buf, sizeof(buf), "APs %u  " LV_SYMBOL_DOWNLOAD " %lu  drop %lu", lastApSeen,
                  static_cast<unsigned long>(capSent), static_cast<unsigned long>(capDropped));
     } else {
-        snprintf(buf, sizeof(buf), "APs %u", lastApSeen);
+        const int q = quietestChannel();   // C8: name the quietest channel when the line has room (capture off)
+        if (q >= 0)
+            snprintf(buf, sizeof(buf), "APs %u   quiet ch%u %.0f", lastApSeen, kChannels[q], channels[q].busyEma);
+        else
+            snprintf(buf, sizeof(buf), "APs %u", lastApSeen);
     }
     lv_label_set_text(footLabel, buf);
 }
@@ -638,46 +642,57 @@ void refreshDevices() {
     const uint32_t now = millis();
     if (now - lastSortMs >= 500) {
         lastSortMs = now;
+        // Collect RSSI-sorted refs, then fetch the top kDevRows full records one at a time (the page shows only
+        // the loudest 12). A ref whose slot changed since collect fails fetch and is skipped, so `r` indexes refs
+        // while `out` counts rows actually filled.
         if (mode154()) {
             static const char* const kProto[] = {"15.4", "ZigB", "ZGP", "Thrd", "sec"};
-            const int zn = snapshot154(devSnap.z, kDev154Slots, kDevLcdFreshMs);
-            sortByRssi(devSnap.z, zn);
-            devRowCount = zn < kDevRows ? zn : kDevRows;
-            for (int i = 0; i < devRowCount; i++) {
-                const Dev154& d = devSnap.z[i];
-                memcpy(devRows[i].mac, d.key, 6);
-                devRows[i].rssi = d.rssi;
-                devRows[i].ap = d.flags & 2;
-                devRows[i].surv = 0;
-                devRows[i].destOnly = false;
-                if (d.flags & 1) snprintf(devRows[i].label, 33, "%s %02x%02x%02x", kProto[d.proto < 5 ? d.proto : 0], d.key[5], d.key[6], d.key[7]);
-                else snprintf(devRows[i].label, 33, "%s %04x", kProto[d.proto < 5 ? d.proto : 0], d.shortAddr);
-                if (d.flags & 4) strncat(devRows[i].label, " join", 32 - strlen(devRows[i].label));
+            const int zn = collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs);
+            int out = 0;
+            for (int r = 0; r < zn && out < kDevRows; r++) {
+                Dev154 d;
+                if (!fetch154Dev(g_devRefs[r], d, kDevLcdFreshMs)) continue;
+                memcpy(devRows[out].mac, d.key, 6);
+                devRows[out].rssi = d.rssi;
+                devRows[out].ap = d.flags & 2;
+                devRows[out].surv = 0;
+                devRows[out].destOnly = false;
+                if (d.flags & 1) snprintf(devRows[out].label, 33, "%s %02x%02x%02x", kProto[d.proto < 5 ? d.proto : 0], d.key[5], d.key[6], d.key[7]);
+                else snprintf(devRows[out].label, 33, "%s %04x", kProto[d.proto < 5 ? d.proto : 0], d.shortAddr);
+                if (d.flags & 4) strncat(devRows[out].label, " join", 32 - strlen(devRows[out].label));
+                out++;
             }
+            devRowCount = out;
         } else if (wifiMode()) {
-            const int wn = snapshotWifi(devSnap.w, kWifiDevSlots, kDevLcdFreshMs);
-            sortByRssi(devSnap.w, wn);
-            devRowCount = wn < kDevRows ? wn : kDevRows;
-            for (int i = 0; i < devRowCount; i++) {
-                memcpy(devRows[i].mac, devSnap.w[i].mac, 6);
-                devRows[i].rssi = devSnap.w[i].rssi;
-                devRows[i].ap = devSnap.w[i].flags & 1;
-                devRows[i].surv = devSnap.w[i].surv;
-                devRows[i].destOnly = devSnap.w[i].flags & 4;
-                strncpy(devRows[i].label, devSnap.w[i].ssid, 32); devRows[i].label[32] = 0;
+            const int wn = collectWifiRefs(g_devRefs, kWifiDevSlots, kDevLcdFreshMs);
+            int out = 0;
+            for (int r = 0; r < wn && out < kDevRows; r++) {
+                WifiDev d;
+                if (!fetchWifiDev(g_devRefs[r], d, kDevLcdFreshMs)) continue;
+                memcpy(devRows[out].mac, d.mac, 6);
+                devRows[out].rssi = d.rssi;
+                devRows[out].ap = d.flags & 1;
+                devRows[out].surv = d.surv;
+                devRows[out].destOnly = d.flags & 4;
+                strncpy(devRows[out].label, d.ssid, 32); devRows[out].label[32] = 0;
+                out++;
             }
+            devRowCount = out;
         } else {
-            const int bn = snapshotBle(devSnap.b, kBleDevSlots, kDevLcdFreshMs);
-            sortByRssi(devSnap.b, bn);
-            devRowCount = bn < kDevRows ? bn : kDevRows;
-            for (int i = 0; i < devRowCount; i++) {
-                memcpy(devRows[i].mac, devSnap.b[i].mac, 6);
-                devRows[i].rssi = devSnap.b[i].rssi;
-                devRows[i].ap = false;
-                devRows[i].surv = devSnap.b[i].surv;
-                devRows[i].destOnly = false;
-                strncpy(devRows[i].label, devSnap.b[i].name, 32); devRows[i].label[32] = 0;
+            const int bn = collectBleRefs(g_devRefs, kBleDevSlots, kDevLcdFreshMs);
+            int out = 0;
+            for (int r = 0; r < bn && out < kDevRows; r++) {
+                BleDev d;
+                if (!fetchBleDev(g_devRefs[r], d, kDevLcdFreshMs)) continue;
+                memcpy(devRows[out].mac, d.mac, 6);
+                devRows[out].rssi = d.rssi;
+                devRows[out].ap = false;
+                devRows[out].surv = d.surv;
+                devRows[out].destOnly = false;
+                strncpy(devRows[out].label, d.name, 32); devRows[out].label[32] = 0;
+                out++;
             }
+            devRowCount = out;
         }
     }
     char buf[48];
@@ -961,6 +976,7 @@ void pollButton() {
             refreshUi();
         } else if (stepped) {                     // release commits the mode on screen: linger on its splash
             showBandSplash(bandMode, kSplashTailMs);
+            saveSettings();                        // persist the committed mode once, not per walk-step (C3)
         }
         return;
     }

@@ -11,7 +11,11 @@
 
 #define LVGL_WIDTH    (LCD_WIDTH )
 #define LVGL_HEIGHT   LCD_HEIGHT
-#define LVGL_BUF_LEN  (LVGL_WIDTH * LVGL_HEIGHT / 14)   /* pixels in the draw buffer (~7.9 KB) */
+/* Partial-render draw buffer. /21 (~5.2 KB) instead of /14 (~7.9 KB) reclaims ~2.6 KB of static RAM; in
+   PARTIAL mode LVGL just paints each dirty region in more chunks over the synchronous SPI flush, which is
+   invisible for this bars+labels UI at ~1-2 Hz. ~2620 px = ~15 full rows per chunk (well above the 1-row
+   minimum). If full-page redraws (the mode splash) ever flicker, raise the divisor back toward /14. */
+#define LVGL_BUF_LEN  (LVGL_WIDTH * LVGL_HEIGHT / 21)
 
 #define EXAMPLE_LVGL_TICK_PERIOD_MS  5
 

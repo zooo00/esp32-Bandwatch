@@ -352,7 +352,7 @@
       <section class="card" id="chCard">
         <h2>Channels <small>last completed dwell per channel</small></h2>
         <div style="overflow-x:auto"><table id="tbl"><thead><tr>
-          <th class="l">Channel</th><th>Band</th><th>Score</th><th>Raw</th><th>Frames</th><th>pkt/s</th><th>B/s</th><th>Talkers</th><th>Strong</th><th>Updated</th>
+          <th class="l">Channel</th><th>Band</th><th>Score</th><th>Raw</th><th>Frames</th><th>pkt/s</th><th>B/s</th><th>Talkers</th><th>Strong</th><th class="l">Top talker</th><th>Updated</th>
         </tr></thead><tbody></tbody></table></div>
       </section>
 
@@ -596,11 +596,14 @@
     let slots;
     if (hop) {
       const cur = s.channels.find(c => c.ch === s.current);
-      const top = [...s.channels].filter(c => c.state === 0).sort((a, b) => b.s - a.s)[0];
+      const withData = [...s.channels].filter(c => c.state === 0);
+      const top = [...withData].sort((a, b) => b.s - a.s)[0];
+      const quiet = [...withData].sort((a, b) => a.s - b.s)[0];   // C8: least-busy channel with data
       slots = [
         ['max busy score', fmt(s.global), s.band === '154' ? 'maximum of smoothed 802.15.4 channel scores' : 'maximum of smoothed channel scores', true],
         ['listening on', s.current ? 'ch ' + s.current : '–', cur ? `${band(s.current)} · score ${fmt(cur.s)} · ${rate(cur.f / dwellS)} pkt/s${s.park ? ' · parked' : ''}` : (s.park ? 'parked' : 'hopping')],
         ['busiest channel', top && top.s > 0 ? 'ch ' + top.ch : '–', top ? `score ${fmt(top.s)} · ${rate(top.b / dwellS)} B/s · ${top.u} talkers` : ''],
+        ['quietest channel', quiet ? 'ch ' + quiet.ch : '–', quiet ? (quiet.s >= 50 ? `score ${fmt(quiet.s)} · nothing is quiet right now` : `score ${fmt(quiet.s)} · ${band(quiet.ch)}`) : ''],
         ['sweeps', fmt(s.sweep), `${s.channels.length} channels · ${(s.channels.length * dwellS).toFixed(1)} s each`],
         ['transmitters (est.)', fmt(s.aps), 'peak unique senders per 3 s'],
       ];
@@ -986,8 +989,15 @@
   function renderChannels(s) {
     const now = Date.now() / 1000;
     $('#tbl tbody').innerHTML = s.channels.map(c => `<tr class="${c.ch === s.current ? 'current' : ''}"><td class="l">ch ${c.ch}</td><td>${band(c.ch)}</td>
-      ${c.state === 2 ? '<td colspan="8" class="l" style="color:var(--muted)">rejected by driver</td>' : c.state === 1 ? '<td colspan="8" class="l" style="color:var(--muted)">no data yet</td>'
-        : `<td>${fmt(c.s)}</td><td>${fmt(c.r)}</td><td>${fmt(c.f)}</td><td>${rate(c.f / dwellS)}</td><td>${rate(c.b / dwellS)}</td><td>${c.u}</td><td>${c.st}</td><td>${c.t ? fmt(now - c.t) + ' s ago' : '–'}</td>`}</tr>`).join('');
+      ${c.state === 2 ? '<td colspan="9" class="l" style="color:var(--muted)">rejected by driver</td>' : c.state === 1 ? '<td colspan="9" class="l" style="color:var(--muted)">no data yet</td>'
+        : `<td>${fmt(c.s)}</td><td>${fmt(c.r)}</td><td>${fmt(c.f)}</td><td>${rate(c.f / dwellS)}</td><td>${rate(c.b / dwellS)}</td><td>${c.u}</td><td>${c.st}</td><td class="l">${topTalker(c, s)}</td><td>${c.t ? fmt(now - c.t) + ' s ago' : '–'}</td>`}</tr>`).join('');
+  }
+  // C6: name the loudest transmitter of a dwell, joined against the known device table for a vendor/SSID.
+  function topTalker(c, s) {
+    if (!c.top) return '<span class="sub">–</span>';
+    const d = (s.wifi_devs || []).find(x => x.mac === c.top);
+    const name = d ? (d.ssid || d.vendor || '') : '';
+    return `<span class="mono">${c.top}</span>${name ? ' <span class="sub">' + esc(name) + '</span>' : ''}${c.trssi != null ? ` <span class="sub">${c.trssi} dBm</span>` : ''}`;
   }
 
   function render(s) {

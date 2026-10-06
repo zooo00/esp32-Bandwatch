@@ -190,6 +190,10 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     }
     if (hasAddr2) {
         const uint8_t* src = ipkt->hdr.addr2;  // Best-effort transmitter
+        if (pkt->rx_ctrl.rssi > g_accum.bestRssi) {   // C6: loudest frame this dwell names its transmitter
+            g_accum.bestRssi = pkt->rx_ctrl.rssi;
+            for (int i = 0; i < 6; i++) g_accum.bestMac[i] = src[i];
+        }
         const uint16_t h = macHash(src);
         bool known = false;
         for (uint8_t i = 0; i < g_accum.macFill; i++) {

@@ -123,18 +123,33 @@ void sendDwell(int idx) {
                       static_cast<unsigned long>(sweepCount));
         return;
     }
-    if (!serialRoom(380)) return;
+    if (!serialRoom(420)) return;   // +~36 B vs 380 for C6's "top"/"trssi" fields (see preamble serial budget)
     const ChannelState& ch = channels[idx];
+    // C6 top talker: g_accum still holds this dwell's loudest transmitter (resetAccum() runs after sendDwell).
+    uint8_t topMac[6]; int8_t topRssi;
+    portENTER_CRITICAL(&g_accumMux);
+    topRssi = g_accum.bestRssi;
+    for (int i = 0; i < 6; i++) topMac[i] = g_accum.bestMac[i];
+    portEXIT_CRITICAL(&g_accumMux);
+    char topField[48];
+    if (topRssi > -128) {
+        char tm[26];
+        fmtMac(tm, sizeof(tm), topMac);
+        snprintf(topField, sizeof(topField), "\"top\":\"%s\",\"trssi\":%d", tm, topRssi);
+    } else {
+        snprintf(topField, sizeof(topField), "\"top\":null,\"trssi\":null");   // no attributable frame this dwell
+    }
     Serial.printf("{\"t\":\"d\",\"c\":%u,\"s\":%.1f,\"r\":%.1f,\"f\":%lu,\"b\":%lu,\"st\":%u,\"u\":%u,"
                   "\"g\":%.1f,\"n\":%lu,\"park\":%d,\"cap\":%d,\"drop\":%lu,\"da\":%lu,\"df\":%lu,"
-                  "\"sdc\":%d,\"sdf\":%lu,\"sdb\":%lu,",
+                  "\"sdc\":%d,\"sdf\":%lu,\"sdb\":%lu,%s,",
                   kChannels[idx], ch.busyEma, ch.busyCurrent,
                   static_cast<unsigned long>(ch.metrics.frames), static_cast<unsigned long>(ch.metrics.bytes),
                   ch.metrics.strong, ch.metrics.unique, globalActivityMax(),
                   static_cast<unsigned long>(sweepCount), parkedIdx >= 0 ? kChannels[parkedIdx] : 0,
                   captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped), static_cast<unsigned long>(deauth.sent),
                   static_cast<unsigned long>(deauth.txFail),
-                  sd.capEnabled ? 1 : 0, static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes));
+                  sd.capEnabled ? 1 : 0, static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
+                  topField);
     printHunt();
     Serial.print("}\n");
 }
@@ -195,30 +210,33 @@ void sendBleStatus() {
 void sendDevices() {
     const uint32_t now = millis();
     char mac[24];
+    DevRef* refs = g_devRefs;
     if (mode154()) {
-        Dev154* snap = devSnap.z;
-        const int n = snapshot154(snap, kDev154Slots, kDevFreshMs);
+        const int n = collect154Refs(refs, kDev154Slots, kDevFreshMs);
         if (!serialRoom(40 + n * 80)) return;
         // [id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]
         Serial.print("{\"t\":\"z\",\"dev\":[");
+        int emitted = 0;
         for (int i = 0; i < n; i++) {
-            const Dev154& d = snap[i];
+            Dev154 d;
+            if (!fetch154Dev(refs[i], d, kDevFreshMs)) continue;   // slot reused/evicted since collect: skip
             fmtKey154(mac, sizeof(mac), d);
-            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,%u,%u,%u,%u]", i ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
+            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,%u,%u,%u,%u]", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
                           static_cast<unsigned long>(now - d.lastMs), d.ch, d.pan, d.shortAddr, d.proto, d.flags, d.lqi);
         }
         Serial.print("]}\n");
         return;
     }
     if (wifiMode()) {
-        WifiDev* snap = devSnap.w;
-        const int n = snapshotWifi(snap, kWifiDevSlots, kDevFreshMs);
+        const int n = collectWifiRefs(refs, kWifiDevSlots, kDevFreshMs);
         if (!serialRoom(40 + n * 126)) return;   // +8: the association suffix field added in 1.5.5
         Serial.print("{\"t\":\"w\",\"dev\":[");
+        int emitted = 0;
         for (int i = 0; i < n; i++) {
-            fmtMac(mac, sizeof(mac), snap[i].mac);
-            const WifiDev& d = snap[i];
-            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", i ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
+            WifiDev d;
+            if (!fetchWifiDev(refs[i], d, kDevFreshMs)) continue;
+            fmtMac(mac, sizeof(mac), d.mac);
+            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
                           static_cast<unsigned long>(now - d.lastMs), d.ch, d.flags);
             printJsonStr(d.ssid);
             Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
@@ -232,14 +250,15 @@ void sendDevices() {
         }
         Serial.print("]}\n");
     } else {
-        BleDev* snap = devSnap.b;
-        const int n = snapshotBle(snap, kBleDevSlots, kDevFreshMs);
+        const int n = collectBleRefs(refs, kBleDevSlots, kDevFreshMs);
         if (!serialRoom(40 + n * 102)) return;
         Serial.print("{\"t\":\"b\",\"dev\":[");
+        int emitted = 0;
         for (int i = 0; i < n; i++) {
-            fmtMac(mac, sizeof(mac), snap[i].mac);
-            const BleDev& d = snap[i];
-            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", i ? "," : "", mac, d.rssi, d.maxRssi, d.adv,
+            BleDev d;
+            if (!fetchBleDev(refs[i], d, kDevFreshMs)) continue;
+            fmtMac(mac, sizeof(mac), d.mac);
+            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.adv,
                           static_cast<unsigned long>(now - d.lastMs), d.addrType, d.company);
             printJsonStr(d.name);
             Serial.printf(",%u,%d,%u,%u,%u,%u,%u]", d.appearance, d.txPower, d.svc, d.svcData, d.appleType,
@@ -319,12 +338,14 @@ void handleCommand(char* line) {
         sdReadFile(arg);
     } else if (!strcmp(line, "addr1")) {
         trackAddr1 = atoi(arg) != 0;
+        saveSettings();
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"addr1\",\"addr1\":%d}\n", trackAddr1 ? 1 : 0);
     } else if (!strcmp(line, "blescan")) {
         if (!strcmp(arg, "active"))       bleScan.mode = BLE_SCAN_ACTIVE;
         else if (!strcmp(arg, "passive")) bleScan.mode = BLE_SCAN_PASSIVE;
         else if (!strcmp(arg, "auto"))    bleScan.mode = BLE_SCAN_AUTO;
         bleScan.lastSwitchMs = 0;   // apply the new policy on the next serviceBle() without waiting out the limit
+        saveSettings();
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"blescan\",\"mode\":\"%s\",\"running\":\"%s\"}\n",
                       bleScanModeName(), bleScan.active ? "active" : "passive");
     } else if (!strcmp(line, "time")) {
@@ -337,6 +358,7 @@ void handleCommand(char* line) {
         if (n < 32) n = 32;
         if (n > kCapMaxLen) n = kCapMaxLen;
         capSnapLen = n;
+        saveSettings();
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"snap\",\"snap\":%d}\n", n);
     } else if (!strcmp(line, "park")) {
         const int ch = atoi(arg);
@@ -354,6 +376,7 @@ void handleCommand(char* line) {
         if (modeSpec()) showPage(PAGE_SPECTRUM);
         else if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
         if (bandMode != prev) showBandSplash(bandMode, kSplashShowMs);   // name the new mode before its scan page
+        if (bandMode != prev) saveSettings();   // persist the new mode (C3); park is intentionally not saved
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
         sendHello();
     } else if (!strcmp(line, "hunt")) {
@@ -446,6 +469,7 @@ void handleCommand(char* line) {
         if (st == 1 || st == 2 || st == 5) {
             specStepMhz = static_cast<uint8_t>(st);
             if (modeSpec()) { resetChannelStats(); currentIdx = -1; monitorReady = advanceChannel(); }
+            saveSettings();
         }
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"specstep\",\"step\":%u}\n", specStepMhz);
     } else if (!strcmp(line, "reboot")) {

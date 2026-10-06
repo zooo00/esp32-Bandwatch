@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.10";
+constexpr const char* kVersion = "1.11";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -150,6 +150,10 @@ struct Accum {
     uint16_t unique = 0;
     uint16_t macHashes[kUniqueSlots] = {0};
     uint8_t macFill = 0;
+    // C6 top talker: strongest frame's transmitter this dwell. One instance (g_accum), read by sendDwell
+    // before resetAccum() wipes it, so no per-channel storage. bestRssi == -128 means "no attributable frame".
+    uint8_t bestMac[6] = {0};
+    int8_t  bestRssi = -128;
 };
 
 struct ChannelMetrics {
@@ -280,13 +284,19 @@ inline bool chanEnabled(int idx) {
 inline uint32_t dwellMs() { return modeSpec() ? kEdDwellMs : kDwellMs; }   // spec scans faster
 int enabledCount();
 
-// Device table snapshots (bandwatch.cpp): copy under g_devMux into devSnap, sort and read outside. One shared
-// scratch buffer — loop task only (UI timer and host output both run there).
-union DevSnap { WifiDev w[kWifiDevSlots]; BleDev b[kBleDevSlots]; Dev154 z[kDev154Slots]; };
-extern DevSnap devSnap;
-int snapshotWifi(WifiDev* out, int maxN, uint32_t freshMs);
-int snapshotBle(BleDev* out, int maxN, uint32_t freshMs);
-int snapshot154(Dev154* out, int maxN, uint32_t freshMs);
+// Device table listing (bandwatch.cpp), loop task only (UI timer and host output both run there). Instead of
+// copying whole tables into a 4 KB scratch (the old DevSnap union), collect*Refs() copies only a compact
+// {rssi, slot, identity} per fresh device under g_devMux and sorts those; the caller then re-fetches each full
+// record with fetch*Dev(), which re-validates the slot under a brief lock (saves ~3.3 KB static). A row whose
+// slot was evicted/reused between the two steps fails the identity check and is simply skipped that cycle.
+struct DevRef { int8_t rssi; uint8_t idx; uint8_t key[8]; };   // one array, sized to the largest table
+extern DevRef g_devRefs[kWifiDevSlots];
+int collectWifiRefs(DevRef* refs, int maxN, uint32_t freshMs);
+int collectBleRefs(DevRef* refs, int maxN, uint32_t freshMs);
+int collect154Refs(DevRef* refs, int maxN, uint32_t freshMs);
+bool fetchWifiDev(const DevRef& r, WifiDev& out, uint32_t freshMs);
+bool fetchBleDev(const DevRef& r, BleDev& out, uint32_t freshMs);
+bool fetch154Dev(const DevRef& r, Dev154& out, uint32_t freshMs);
 template <typename T>
 inline void sortByRssi(T* a, int n) {   // insertion sort, n <= 96
     for (int i = 1; i < n; i++) {
@@ -327,6 +337,7 @@ extern uint32_t capSent;             // frames streamed to the USB sink since th
 // Scoring / dwell (bandwatch.cpp).
 float globalActivityMax();
 void sortTop3(int outIdx[3]);
+int quietestChannel();   // C8: idx of the least-busy channel with data, or -1 if none measured yet
 void hopIfNeeded();                  // called from uiTimerCb: finish a dwell and advance when due
 
 // Device tables (bandwatch.cpp): fixed-size open-addressing hashes, updated under g_devMux.
@@ -417,6 +428,14 @@ void sendBleStatus();
 void sendDevices();
 void pollSerial();
 const char* bleScanModeName();
+
+// Settings persistence (settings.cpp). NVS-backed so a walk-around device boots where it was left: band
+// mode + the scalar policies (addr1 / blescan / specstep / snap). Park and hunt/deauth are deliberately
+// NOT persisted - a reboot must stop transmitting and must not come up silently parked (see settings.cpp).
+void loadSettings();    // restore into g_restoredMode + the scalar globals; call before the radios start
+void saveSettings();    // write current settings to NVS; call on user-commit, not per walk-step
+extern BandMode g_restoredMode;   // mode read from NVS at boot (BAND_5G if none/corrupt); applied by Init
+extern bool g_settingsRestored;   // true once a stored blob was loaded (for the boot log line)
 
 // LCD UI (lcd_ui.cpp); currentPage + lastApSeen are read by host_proto.cpp as well.
 extern int currentPage;

@@ -224,6 +224,20 @@
         </div>
         <div class="note capinfo" id="bleCapNote"></div>
       </section>
+
+      <section class="card railcard" id="mirrorCard">
+        <h3>LCD mirror</h3>
+        <button id="mirrorBtn" style="width:100%">Start mirror</button>
+        <div id="mirrorWrap" hidden style="margin-top:10px">
+          <canvas id="mirrorCanvas" width="172" height="320"
+                  style="width:100%; height:auto; aspect-ratio:172/320; image-rendering:pixelated; display:block; border-radius:8px; background:#000; border:1px solid var(--border)"></canvas>
+        </div>
+        <div style="display:flex; gap:6px; margin-top:8px">
+          <button id="pagePrev" style="flex:1" title="Step the LCD to the previous page (like a BOOT tap)">‹ Page</button>
+          <button id="pageNext" style="flex:1" title="Step the LCD to the next page (like a BOOT tap)">Page ›</button>
+        </div>
+        <div class="note" style="margin-top:6px; font-size:11px; color:var(--muted)">Off by default. Fast-updating screens (spectrum) tear over serial — step pages to view them cleanly.</div>
+      </section>
     </aside>
 
     <main class="col">
@@ -243,17 +257,6 @@
       </section>
 
       <div class="hero" id="hero"></div>
-
-      <section class="card" id="mirrorCard">
-        <div style="display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap">
-          <h2>LCD mirror <small>live 172×320 device screen over USB serial · off by default</small></h2>
-          <button id="mirrorBtn">Start mirror</button>
-        </div>
-        <div id="mirrorWrap" hidden style="display:flex; justify-content:center; margin-top:12px">
-          <canvas id="mirrorCanvas" width="172" height="320"
-                  style="width:206px; height:384px; image-rendering:pixelated; border-radius:10px; background:#000; border:1px solid var(--border)"></canvas>
-        </div>
-      </section>
 
       <section class="card" id="zoneHopBars">
         <h2>Busy score by channel <small>0–100, smoothed · hover for details</small></h2>
@@ -1116,6 +1119,8 @@
     $('#mirrorWrap').hidden = !mirrorOn;
   }
   $('#mirrorBtn').addEventListener('click', () => { mirrorOn = !mirrorOn; mirrorSetBtn(); post({ cmd: 'mirror', value: mirrorOn }); });
+  $('#pagePrev').addEventListener('click', () => post({ cmd: 'page', value: 'prev' }));
+  $('#pageNext').addEventListener('click', () => post({ cmd: 'page', value: 'next' }));
   async function drawScreen() {
     const cv = $('#mirrorCanvas');
     if (!mirrorCtx) mirrorCtx = cv.getContext('2d');

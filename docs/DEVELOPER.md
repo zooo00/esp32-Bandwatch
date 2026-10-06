@@ -849,3 +849,13 @@ framebuffer under `screen_lock`, bumping `screen_seq`. `GET /screen.bin` serves 
 watches `seq`, and on a change it fetches `/screen.bin` and paints it onto a `<canvas>` (RGB565 LE → RGBA,
 `image-rendering: pixelated`). `sendHello` carries `"mir"` so the button reflects the device state on load.
 The classic dashboard does not have the mirror card.
+
+The mirror panel lives in the v2 **left control rail** (the 172×320 canvas fits its width). Alongside it are
+**Page ‹ ›** buttons that POST `page prev|next`, which the device handles with `stepPage()` (`lcd_ui.cpp`) —
+the same action as a BOOT tap (`showPage(currentPage ± 1)`, skipping pages that don't apply to the mode, and
+clearing any mode splash). This lets you drive the LCD from the browser and hold on a page. It matters because
+the serial link can't keep up with a continuously-repainting page: in `spec` mode the bars redraw several
+times a second, so more pixels change per second than fit through the TX buffer and the mirror tears / re-scans
+continuously. Stepping to a mostly-static page (Devices, System, a parked channel) lets it settle to a clean
+frame. This is a bandwidth limit, not a bug — a full 172×320 frame is ~147 KB of base64 and USB-CDC is the
+cap.

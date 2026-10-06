@@ -503,6 +503,14 @@ void showPage(int n) {
 // after this one. Without that, a strip dropped during the single initial scan would leave a permanent
 // black/stale band - and we can't just restart the scan on every drop, or a busy screen would never finish
 // a pass. Passes repeat until one completes with no drop, then stop (steady-state only sends dirty regions).
+// Step the LCD page like a BOOT tap, driven from the host (dashboard interface-stepping buttons). Runs on the
+// loop task via handleCommand, same task as LVGL, so touching the UI here is safe. showPage() skips pages that
+// don't apply to the current mode; clearing splashDurMs stops a lingering mode card from shadowing the new page.
+void stepPage(int dir) {
+    showPage(currentPage + (dir < 0 ? -1 : 1));
+    splashDurMs = 0;
+}
+
 static int mirrorScanY = -1;
 static bool mirrorDirty = false;
 void mirrorRequestFull() { mirrorScanY = 0; mirrorDirty = false; }   // enable / explicit full frame

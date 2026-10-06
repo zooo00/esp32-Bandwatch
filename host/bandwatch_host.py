@@ -1281,6 +1281,8 @@ def make_handler(bw, classic_path, v2_path=None, ui="classic"):
                         return self._json({"error": "bad card file path"}, 400)
                 elif cmd == "mirror":
                     bw.send(f"mirror {1 if req.get('value') else 0}")
+                elif cmd == "page" and req.get("value") in ("next", "prev"):
+                    bw.send(f"page {req['value']}")   # step the LCD like a BOOT tap
                 elif cmd == "addr1":
                     bw.send(f"addr1 {1 if req.get('value') else 0}")
                 elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):

@@ -251,6 +251,11 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.14** — Mirror UI: moved the LCD-mirror panel into the dashboard's left control rail (the 172×320 canvas
+  fits its width), and added **Page ‹ ›** buttons that step the LCD like a BOOT tap — a new `page next|prev`
+  command (`stepPage()`) lets you drive the interface from the browser and hold on a page. (Fast-updating
+  screens like the live spectrum still tear over the serial link's bandwidth; stepping to and holding on a
+  page is the way to see those cleanly.)
 - **1.13.1** — Mirror fix: a strip dropped during the initial full scan (when it collided with a data-refresh
   flush and overran the serial TX buffer) left a permanent black/stale horizontal band, because mid-scan drops
   were ignored. Drops now flag a re-scan that repeats until a pass completes cleanly, so the mirror self-heals.

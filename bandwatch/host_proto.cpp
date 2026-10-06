@@ -496,6 +496,9 @@ void handleCommand(char* line) {
         if (g_mirror) mirrorRequestFull();   // push a full frame now (paced across the next loops)
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"mirror\",\"mirror\":%d,\"w\":%d,\"h\":%d}\n",
                       g_mirror ? 1 : 0, LCD_WIDTH, LCD_HEIGHT);
+    } else if (!strcmp(line, "page")) {
+        stepPage(!strcmp(arg, "prev") ? -1 : 1);   // "next"/empty = forward, like a BOOT tap
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"page\",\"page\":%d}\n", currentPage);
     } else if (!strcmp(line, "reboot")) {
         Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);

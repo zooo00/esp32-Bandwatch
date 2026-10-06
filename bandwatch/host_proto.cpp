@@ -24,7 +24,7 @@ void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px) {
     // base64 is 4/3 the raw size. Keep whole lines - a region is sent intact or not at all (the drop-whole-
     // lines rule, section 6): if the TX buffer can't hold it, skip it and schedule a full re-send so the host
     // still converges once the buffer drains.
-    if (!serialRoom(nbytes * 4 / 3 + 48)) { mirrorRequestFull(); return; }
+    if (!serialRoom(nbytes * 4 / 3 + 48)) { mirrorNoteDrop(); return; }   // re-sent on the next full pass
     Serial.printf("M %d %d %d %d ", x1, y1, w, h);
     writeBase64(px, static_cast<size_t>(nbytes));
     Serial.write('\n');

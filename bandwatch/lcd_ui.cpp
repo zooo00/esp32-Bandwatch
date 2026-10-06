@@ -498,11 +498,23 @@ void showPage(int n) {
 // re-sends the screen one ~10-row strip per loop, each well under the TX buffer, so the buffer drains
 // between strips and a full frame streams over ~32 loops (<1 s) without dropping. A dropped steady-state
 // region (mirrorOnFlush) schedules a fresh scan here. Only runs while a full refresh is pending.
-static int mirrorScanY = -1;   // next strip's top row, or -1 when idle
-void mirrorRequestFull() { if (mirrorScanY < 0) mirrorScanY = 0; }   // ignore while a scan is already running
+// mirrorScanY = next strip's top row during a full re-send, or -1 between passes. A strip dropped mid-pass
+// (TX buffer full when it collides with a data-refresh flush) sets mirrorDirty, so another full pass runs
+// after this one. Without that, a strip dropped during the single initial scan would leave a permanent
+// black/stale band - and we can't just restart the scan on every drop, or a busy screen would never finish
+// a pass. Passes repeat until one completes with no drop, then stop (steady-state only sends dirty regions).
+static int mirrorScanY = -1;
+static bool mirrorDirty = false;
+void mirrorRequestFull() { mirrorScanY = 0; mirrorDirty = false; }   // enable / explicit full frame
+void mirrorNoteDrop() { mirrorDirty = true; }                        // a region didn't fit; re-scan after this pass
 void serviceMirror() {
-    if (!g_mirror || mirrorScanY < 0) return;
-    constexpr int kStripH = 10;   // 172*10*2 = 3440 B raw (~4.6 KB base64), comfortably under the 8 KB TX buffer
+    if (!g_mirror) return;
+    if (mirrorScanY < 0) {                 // between passes: start another only if a region was dropped
+        if (!mirrorDirty) return;
+        mirrorScanY = 0;
+        mirrorDirty = false;
+    }
+    constexpr int kStripH = 8;   // 172*8*2 = 2752 B raw (~3.7 KB base64): headroom for a concurrent data flush
     if (!serialRoom(LCD_WIDTH * kStripH * 2 * 4 / 3 + 64)) return;   // wait for the TX buffer to drain
     int y2 = mirrorScanY + kStripH - 1;
     if (y2 > LCD_HEIGHT - 1) y2 = LCD_HEIGHT - 1;

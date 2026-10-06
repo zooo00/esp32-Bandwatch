@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.13";
+constexpr const char* kVersion = "1.13.1";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -405,7 +405,8 @@ void writeBase64(const uint8_t* d, size_t n);
 extern bool g_mirror;                                                   // host_proto.cpp owns the command flag
 void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px);  // emit one flushed region (host_proto.cpp)
 void serviceMirror();        // strip-paced full-screen refresh, called from the loop (lcd_ui.cpp)
-void mirrorRequestFull();    // schedule a complete re-send (on enable, or after a dropped region)
+void mirrorRequestFull();    // schedule a complete re-send (on enable, or an explicit full frame)
+void mirrorNoteDrop();       // a region didn't fit the TX buffer; re-scan the screen after the current pass
 
 // SD sink (sd_sink.cpp).
 bool sdMount();                     // also queried by the "sdinfo" command

@@ -832,10 +832,14 @@ and livelock.
 
 So `serviceMirror()` (`lcd_ui.cpp`, called once per `Bandwatch_Loop`) re-sends the screen **one ~10-row strip
 per loop** via `lv_obj_invalidate_area()` — each strip is ~4.6 KB base64, well under the TX buffer, and the
-buffer drains between loops, so a full frame converges over ~32 loops (<1 s) without dropping. Steady-state
-label updates are tiny and flush immediately. A dropped region (TX full in `mirrorOnFlush`) calls
-`mirrorRequestFull()`, which schedules a fresh strip scan (ignored if one is already running, so drops don't
-thrash). Enabling the mirror (`mirror 1`) also calls `mirrorRequestFull()` to push a first full frame.
+buffer drains between loops, so a full frame converges over ~40 loops (<1 s). Steady-state label updates are
+tiny and flush immediately. A strip can still be dropped when it collides with a data-refresh flush in the
+same `lv_timer_handler` (their combined bytes exceed the TX buffer); `mirrorOnFlush` then calls
+`mirrorNoteDrop()`, which sets a flag so `serviceMirror()` runs **another full pass after the current one**,
+repeating until a pass completes with no drop. Restarting the scan on every drop instead would livelock on a
+busy screen, and ignoring mid-pass drops (the 1.13 bug) left permanent black/stale bands where a strip was
+lost in the single initial scan. Enabling the mirror (`mirror 1`) calls `mirrorRequestFull()` for the first
+frame.
 
 ### Host + dashboard
 `handle_mirror()` (`bandwatch_host.py`) parses the `M` line and blits the region into a 172×320 RGB565

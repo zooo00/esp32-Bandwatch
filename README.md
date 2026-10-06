@@ -251,6 +251,9 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.13.1** — Mirror fix: a strip dropped during the initial full scan (when it collided with a data-refresh
+  flush and overran the serial TX buffer) left a permanent black/stale horizontal band, because mid-scan drops
+  were ignored. Drops now flag a re-scan that repeats until a pass completes cleanly, so the mirror self-heals.
 - **1.13** — **Live LCD mirror.** A `mirror 1|0` command streams the device's 172×320 screen to the host over
   the USB serial link (default off, not persisted). The LVGL flush callback emits each repainted region as an
   `M x y w h <base64 RGB565>` line; the host reassembles a framebuffer, serves it at `/screen.bin` (status at

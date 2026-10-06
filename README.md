@@ -251,6 +251,11 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.15.1** — Dashboard: the Wi‑Fi trend card was an unreadable solid blob — because it plots the *busiest*
+  channel's score (which sits high in busy air), the flat 55%-opacity area fill covered most of the chart.
+  Switched to a fade-out gradient fill so the line and its dips/spikes read clearly, renamed it "Busiest
+  channel over time", and added a plain-language explainer in the header. Dashboard-only (kVersion bumped for
+  parity).
 - **1.15** — Review pass (dashboard + LCD). **Spectrum energy updates per probe** now, not once per full
   sweep: the host writes each per-dwell `fd` bin live, so the 2.4 GHz bars track the walking cursor (the other
   modes already updated per-dwell via the `d` line). **BLE chart replaced**: the per-device RSSI bars just

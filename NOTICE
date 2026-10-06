@@ -1,0 +1,40 @@
+Bandwatch — NOTICE
+==================
+
+Scope of the MIT license
+------------------------
+The MIT License in the LICENSE file applies to this project's own work: the
+Waveshare ESP32-C5 port and everything built on top of the upstream base —
+5 GHz sweeping, Bluetooth LE scanning, IEEE 802.15.4 (Zigbee / Thread)
+sniffing, the 2.4 GHz energy-detect spectrum mode, per-radio device tables,
+the signal-strength "hunt" locator, microSD pcap recording, surveillance-OUI
+flagging, the deauth investigation, the Python host tool and web dashboards,
+the developer docs, and the build/tooling scripts.
+
+Upstream code (NOT covered by the MIT license above)
+----------------------------------------------------
+This project is a derivative of:
+
+    PierreGode/WaveshareESP32C6LCD
+    https://github.com/PierreGode/WaveshareESP32C6LCD
+    Copyright (c) Pierre Gode
+
+As of this writing the upstream project publishes no license of its own, so
+those original portions are "all rights reserved" by their author. They are
+included here in good faith, with attribution, for continuity with the base
+project — they are NOT relicensed under MIT, and no MIT grant is claimed over
+them. Upstream-derived code includes, in particular, the LCD / LVGL display
+glue (bandwatch/Display_ST7789.*, bandwatch/LVGL_Driver.*, bandwatch/lv_conf.h,
+with pins changed for the C5) and the original sweep + dashboard concept.
+
+If you want to reuse, copy, or redistribute the upstream-derived portions,
+seek permission from the original author (Pierre Gode). The MIT grant in
+LICENSE applies only to this project's own contributions.
+
+Other third-party material
+--------------------------
+- The direct-NimBLE BLE discovery approach was studied from
+  shermanatoor/ouispy-blesniff (https://github.com/shermanatoor/ouispy-blesniff).
+- The boot images under bootlogo/ (and their embedded form in
+  bandwatch/boot_logos.h) are third-party artwork and are NOT covered by this
+  project's license.

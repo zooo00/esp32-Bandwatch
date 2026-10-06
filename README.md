@@ -238,6 +238,17 @@ investigation, and a rebuilt host dashboard. See [Versions](#versions) for the f
 The BLE direct‑NimBLE approach was studied from
 [shermanatoor/ouispy‑blesniff](https://github.com/shermanatoor/ouispy-blesniff).
 
+## License
+
+This project's own work is released under the **[MIT License](LICENSE)**.
+
+That MIT grant covers **only this project's contributions** — the ESP32‑C5 port and everything built on top of
+the upstream base. Bandwatch is a derivative of
+[PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD), which publishes **no license
+of its own**; those upstream‑derived portions remain © Pierre Gode, all rights reserved, and are **not** relicensed
+here. If you want to reuse the upstream‑derived parts, ask the original author. See [`NOTICE`](NOTICE) for the full
+breakdown. The `bootlogo/` boot images are third‑party artwork and are likewise not covered.
+
 ## Versions
 
 - **1.12** — **Boot photos.** Eight pictures from `bootlogo/` are embedded in the firmware as RGB565 (~860 KB of flash,

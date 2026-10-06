@@ -251,6 +251,17 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.12.1** — Public-release housekeeping and a boot-splash fix. The project is now **MIT-licensed**
+  ([`LICENSE`](LICENSE) + [`NOTICE`](NOTICE)) with the carve-out that the upstream
+  [PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD) base it derives from
+  ships no license of its own, so the MIT grant covers only this project's own work; a README **Credits**
+  section records the C6→C5 port lineage. `build.sh` now auto-regenerates `bandwatch/boot_logos.h` from
+  `bootlogo/boot_*.png` whenever the pictures change (header missing, a PNG newer than it, or a count that no
+  longer matches `K_BOOT_LOGO_COUNT`; `LOGOS=always`/`never` override). **Fix:** committing a mode card now
+  hides the boot-photo overlay, so tapping BOOT during a committed-mode splash — e.g. after releasing the
+  hold-walk on Spectrum, before the splash hands off to the scan page — no longer falls through into the
+  picture loop. `showBandSplash()` drew the card over the logo but never hid it, and `logoActive()` only
+  tested the hidden flag, so a photo shown earlier in the walk stayed "active" underneath.
 - **1.12** — **Boot photos.** Eight pictures from `bootlogo/` are embedded in the firmware as RGB565 (~860 KB of flash,
   no RAM cost - LVGL draws the const arrays straight from flash). A random one shows full-screen for two seconds at boot
   before the mode card; the BOOT hold-walk gains a photo stop after Spectrum - release there and it lingers five seconds

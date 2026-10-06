@@ -3,6 +3,7 @@
 
     python3 host/bandwatch_host.py                # auto-detects /dev/cu.usbmodem*, serves http://127.0.0.1:8080
     python3 host/bandwatch_host.py --port /dev/cu.usbmodem21101 --http 8080 --captures ./captures
+    python3 host/bandwatch_host.py --ui v2        # the new dashboard at "/" (classic stays at /classic); see run-v2.sh
 
 Only needs Python 3 and pyserial (pip install pyserial). The port is opened with DTR/RTS held asserted
 (no edges), which is what keeps the ESP32-C5 from resetting when the host connects.
@@ -991,7 +992,7 @@ class Bandwatch:
         }
 
 
-def make_handler(bw, html_path):
+def make_handler(bw, classic_path, v2_path=None, ui="classic"):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -1028,8 +1029,16 @@ def make_handler(bw, html_path):
                 self.end_headers()
                 self.wfile.write(body)
                 return
+            # Both dashboards are always served; --ui only decides which one sits at "/".
+            page = None
             if path in ("/", "/index.html"):
-                with open(html_path, "rb") as f:
+                page = v2_path if ui == "v2" and v2_path else classic_path   # falls back to classic if v2 is missing
+            elif path in ("/classic", "/classic/"):
+                page = classic_path
+            elif path in ("/v2", "/v2/", "/v2.html") and v2_path:
+                page = v2_path
+            if page and os.path.isfile(page):
+                with open(page, "rb") as f:
                     body = f.read()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
@@ -1084,11 +1093,11 @@ def make_handler(bw, html_path):
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
                 elif cmd == "sdread":
-                    name = req.get("path") or ""
-                    # Device names: /bandwatch-{wifi,ble,802154}-{stamp|seq}.pcap; the whole command must fit the
-                    # device's 47-char line buffer ("sdread " + path <= 47).
-                    if re.match(r"^/bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name) and len(name) <= 40:
-                        bw.send(f"sdread {name}")
+                    name = (req.get("path") or "").lstrip("/")
+                    # The card lists bare names ("bandwatch-wifi-..."), but SD.open wants an absolute path, so we
+                    # accept either and normalize to "/name". The whole command must fit the device's 47-char line.
+                    if re.match(r"^bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name) and len(name) <= 40:
+                        bw.send(f"sdread /{name}")
                     else:
                         return self._json({"error": "bad card file path"}, 400)
                 elif cmd == "addr1":
@@ -1114,6 +1123,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="serial port (default: first /dev/cu.usbmodem*)")
     ap.add_argument("--http", type=int, default=8080, help="HTTP port (default 8080)")
+    ap.add_argument("--ui", choices=("classic", "v2"), default="classic",
+                    help="which dashboard sits at '/' — the other stays reachable at /classic or /v2 (default: classic)")
     ap.add_argument("--bind", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     ap.add_argument("--captures", default=os.path.join(os.getcwd(), "captures"), help="pcap output directory")
     ap.add_argument("--no-fcs", action="store_true", help="do not mark frames as carrying an FCS in radiotap")
@@ -1126,10 +1137,13 @@ def main():
 
     bw = Bandwatch(args.port, args.captures, oui, fcs_present=not args.no_fcs)
     threading.Thread(target=bw.reader, daemon=True).start()
-    html_path = os.path.join(HERE, "dashboard.html")
-    srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, html_path))
-    print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/  (serial: {args.port or 'auto'}, "
-          f"captures: {os.path.abspath(args.captures)}, vendors: {oui.source})")
+    html_classic = os.path.join(HERE, "dashboard.html")
+    v2_candidate = os.path.join(HERE, "dashboard2.html")
+    html_v2 = v2_candidate if os.path.isfile(v2_candidate) else None   # the new UI is optional until promoted
+    srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, html_classic, html_v2, args.ui))
+    other = "/classic" if args.ui == "v2" else "/v2"
+    print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/ ({'new UI' if args.ui == 'v2' else 'classic UI'}, "
+          f"{other} has the other)  (serial: {args.port or 'auto'}, captures: {os.path.abspath(args.captures)}, vendors: {oui.source})")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

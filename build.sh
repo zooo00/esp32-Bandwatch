@@ -4,6 +4,9 @@
 #        ./build.sh --upload             (compile + patch + flash; PORT=/dev/cu.usbmodemXXXX to pick the port)
 #        ./build.sh --upload --no-patch  (compile + flash the stock image, deauth will not transmit)
 #
+# bandwatch/boot_logos.h is auto-regenerated from bootlogo/boot_*.png when the pictures change
+# (LOGOS=always to force, LOGOS=never to skip).
+#
 # The raw-TX patch (tools/deauth/patch_raw_tx.py, docs/DEVELOPER.md section 11) is applied by default: without
 # it esp_wifi_80211_tx refuses deauth/disassoc subtypes and the attack transmits nothing. It edits the linked
 # image, not the toolchain, so only this firmware is affected and every build must be patched again.
@@ -30,6 +33,42 @@ EXTRA="-DLV_CONF_PATH=\"$LV_CONF\""
 
 # Arduino's bundled ctags is x86_64-only; tools/ctags wraps native universal-ctags instead (no Rosetta needed).
 CTAGS_DIR="$PWD/tools/ctags"
+
+# Boot logos: bandwatch/boot_logos.h is generated from bootlogo/boot_*.png by tools/img2c.py, and the
+# firmware ships whatever is in the header (not the PNGs), so a stale header would silently flash the old
+# pictures. Regenerate it when the images change: header missing, any PNG newer than it, or a different
+# number of PNGs than K_BOOT_LOGO_COUNT records (catches an added/removed picture whose mtime is old).
+# LOGOS=always forces a regen every build; LOGOS=never skips the check.
+LOGO_HDR="$SKETCH/boot_logos.h"
+regen_logos() {
+  shopt -s nullglob
+  local pngs=("$PWD"/bootlogo/boot_*.png)
+  shopt -u nullglob
+  local mode="${LOGOS:-auto}"
+  [[ "$mode" == "never" ]] && return 0
+  if (( ${#pngs[@]} == 0 )); then
+    echo "Note: no bootlogo/boot_*.png found; leaving $LOGO_HDR unchanged." >&2
+    return 0
+  fi
+  local need=0 p
+  if [[ "$mode" == "always" || ! -f "$LOGO_HDR" ]]; then
+    need=1
+  else
+    for p in "${pngs[@]}"; do
+      if [[ "$p" -nt "$LOGO_HDR" ]]; then need=1; break; fi
+    done
+    if (( need == 0 )); then
+      local have
+      have="$(sed -n 's/^#define K_BOOT_LOGO_COUNT *\([0-9][0-9]*\).*/\1/p' "$LOGO_HDR")"
+      [[ "$have" != "${#pngs[@]}" ]] && need=1
+    fi
+  fi
+  if (( need )); then
+    echo "Boot logos changed: regenerating $(basename "$LOGO_HDR") from ${#pngs[@]} picture(s) ..."
+    python3 tools/img2c.py "$LOGO_HDR" 172 320 "${pngs[@]}"
+  fi
+}
+regen_logos
 
 arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" \
   --build-property "runtime.tools.ctags.path=$CTAGS_DIR" \

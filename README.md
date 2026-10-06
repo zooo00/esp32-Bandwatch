@@ -222,6 +222,22 @@ no client of ours has been observed dropping. PMF-enabled networks ignore these 
 - DFS channels are received passively; any channel the driver refuses is skipped and marked `x`.
 - Not a replacement for professional RF tools.
 
+## Credits
+
+Bandwatch began as a port of **[PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD)**
+— the original *Bandwatch* 2.4 GHz Wi‑Fi activity meter for the Waveshare **ESP32‑C6**‑LCD‑1.47. Full credit to
+[Pierre Gode](https://github.com/PierreGode) for that base: the core idea, the LCD/LVGL display glue
+(`Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h`, pins since changed), and the first host dashboard and sweep logic.
+
+This project **adapted it to the Waveshare ESP32‑C5‑LCD‑1.47** (ESP32‑C5, with the pin map, board quirks and
+single-radio constraints that board brings) and then **kept building on it** — adding dual‑band 5 GHz sweeping,
+Bluetooth LE scanning, IEEE 802.15.4 (Zigbee / Thread) sniffing, a 2.4 GHz energy‑detect spectrum mode, per‑radio
+device tables, a signal‑strength "hunt" locator, microSD pcap recording, surveillance‑OUI flagging, the deauth
+investigation, and a rebuilt host dashboard. See [Versions](#versions) for the full trail.
+
+The BLE direct‑NimBLE approach was studied from
+[shermanatoor/ouispy‑blesniff](https://github.com/shermanatoor/ouispy-blesniff).
+
 ## Versions
 
 - **1.12** — **Boot photos.** Eight pictures from `bootlogo/` are embedded in the firmware as RGB565 (~860 KB of flash,

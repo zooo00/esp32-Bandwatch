@@ -486,6 +486,7 @@ void Bandwatch_Loop(void) {
     static uint32_t lastDevMs = 0, bleStatusMs = 0;
     pollSerial();
     pollButton();
+    serviceMirror();     // paces the live LCD-mirror full refresh (no-op unless mirror is on)
     serviceSdRead();
     drainCapture();
     serviceBle();

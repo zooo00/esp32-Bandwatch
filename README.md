@@ -251,6 +251,13 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.13** — **Live LCD mirror.** A `mirror 1|0` command streams the device's 172×320 screen to the host over
+  the USB serial link (default off, not persisted). The LVGL flush callback emits each repainted region as an
+  `M x y w h <base64 RGB565>` line; the host reassembles a framebuffer, serves it at `/screen.bin` (status at
+  `/api/screen`), and the **v2 dashboard** paints it live on a canvas (a *Start mirror* card up top). Bulk
+  repaints (page switches, the splash, the first frame) are paced one screen-strip per loop so they never
+  overrun the 8 KB serial TX buffer, and it costs no extra device RAM — the flush path already holds the
+  pixels. See [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §19.
 - **1.12.2** — Boot-photo UX: removed the page-wrap picture flash. Tapping BOOT to cycle pages no longer
   flashes a random boot picture when it wraps from the last page back to the first (and so no longer briefly
   captures taps into picture-stepping). Pictures now appear only at boot and when the BOOT hold-walk is

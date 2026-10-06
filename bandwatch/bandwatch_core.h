@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.12.2";
+constexpr const char* kVersion = "1.13";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -396,6 +396,16 @@ void releaseCapture();
 void syncCapActive();
 void drainCapture();
 void writeBase64(const uint8_t* d, size_t n);
+
+// Live LCD mirror: when on, the LVGL flush path streams each dirty region as an "M x y w h <base64 RGB565>"
+// serial line and the host dashboard reassembles the 172x320 screen. Default off, not persisted (like park
+// and hunt). The flushes in one lv_timer_handler are synchronous, so a bulk repaint would overrun the serial
+// TX buffer; serviceMirror() paces a full re-send one horizontal strip per loop so it converges without
+// dropping. See docs/DEVELOPER.md section 19.
+extern bool g_mirror;                                                   // host_proto.cpp owns the command flag
+void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px);  // emit one flushed region (host_proto.cpp)
+void serviceMirror();        // strip-paced full-screen refresh, called from the loop (lcd_ui.cpp)
+void mirrorRequestFull();    // schedule a complete re-send (on enable, or after a dropped region)
 
 // SD sink (sd_sink.cpp).
 bool sdMount();                     // also queried by the "sdinfo" command

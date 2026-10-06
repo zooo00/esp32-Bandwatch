@@ -360,6 +360,13 @@ class Bandwatch:
         self.wifi_devs = {}
         self.ble_devs = {}
         self.z_devs = {}
+        # Live LCD mirror: the device streams "M x y w h <base64 RGB565-LE>" regions while `mirror` is on; we
+        # blit them into this framebuffer and serve it at /screen.bin for the dashboard canvas.
+        self.screen_w, self.screen_h = 172, 320
+        self.screen = bytearray(self.screen_w * self.screen_h * 2)   # RGB565, little-endian, row-major
+        self.screen_seq = 0
+        self.screen_last = 0.0
+        self.screen_lock = threading.Lock()
         self.cap_band = None
         self.history = deque(maxlen=HISTORY_LEN)
         self._last_hist = 0
@@ -513,6 +520,9 @@ class Bandwatch:
             return
         if raw.startswith(b"S "):
             self.handle_sd_chunk(raw)   # sdread file chunks are not JSON; without this they flood the log pane
+            return
+        if raw.startswith(b"M "):
+            self.handle_mirror(raw)     # live LCD-mirror region; not JSON
             return
         try:
             msg = json.loads(raw.decode("utf-8", "replace"))
@@ -1033,6 +1043,27 @@ class Bandwatch:
             if self.state.get("sd_read") is not None:
                 self.state["sd_read"]["received"] = len(r["buf"])
 
+    def handle_mirror(self, raw):
+        # "M x y w h <base64 RGB565-LE>": one flushed LCD region. Blit it into the framebuffer at (x,y).
+        try:
+            parts = raw.split(b" ", 5)
+            x, y, w, h = int(parts[1]), int(parts[2]), int(parts[3]), int(parts[4])
+            data = base64.b64decode(parts[5])
+        except Exception:
+            return
+        W, H = self.screen_w, self.screen_h
+        # Reject a malformed or out-of-bounds region rather than letting it corrupt the buffer or wrap a row.
+        if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > W or y + h > H or len(data) != w * h * 2:
+            return
+        row_bytes = w * 2
+        with self.screen_lock:
+            for row in range(h):
+                dst = ((y + row) * W + x) * 2
+                src = row * row_bytes
+                self.screen[dst:dst + row_bytes] = data[src:src + row_bytes]
+            self.screen_seq += 1
+            self.screen_last = time.time()
+
     # ---------------- control ----------------
     def start_capture(self, snaplen=None):
         if self.pcap:
@@ -1140,6 +1171,23 @@ def make_handler(bw, classic_path, v2_path=None, ui="classic"):
             path = urlparse(self.path).path
             if path == "/api/state":
                 return self._json(bw.snapshot())
+            if path == "/api/screen":   # live LCD mirror status (polled fast by the dashboard canvas)
+                on = (time.time() - bw.screen_last) < 3.0
+                return self._json({"on": on, "seq": bw.screen_seq, "w": bw.screen_w, "h": bw.screen_h})
+            if path == "/screen.bin":   # raw RGB565 (little-endian) framebuffer, 172x320
+                with bw.screen_lock:
+                    body = bytes(bw.screen)
+                    seq = bw.screen_seq
+                self.send_response(200)
+                self.send_header("Content-Type", "application/octet-stream")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Screen-Seq", str(seq))
+                self.send_header("X-Screen-W", str(bw.screen_w))
+                self.send_header("X-Screen-H", str(bw.screen_h))
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if path == "/file":   # capture pulled off the card (or over USB) for download
                 name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
                 fpath = os.path.join(bw.captures_dir, name)
@@ -1231,6 +1279,8 @@ def make_handler(bw, classic_path, v2_path=None, ui="classic"):
                         bw.send(f"sdread /{name}")
                     else:
                         return self._json({"error": "bad card file path"}, 400)
+                elif cmd == "mirror":
+                    bw.send(f"mirror {1 if req.get('value') else 0}")
                 elif cmd == "addr1":
                     bw.send(f"addr1 {1 if req.get('value') else 0}")
                 elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):

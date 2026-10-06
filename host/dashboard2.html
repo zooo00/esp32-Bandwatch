@@ -244,6 +244,17 @@
 
       <div class="hero" id="hero"></div>
 
+      <section class="card" id="mirrorCard">
+        <div style="display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap">
+          <h2>LCD mirror <small>live 172×320 device screen over USB serial · off by default</small></h2>
+          <button id="mirrorBtn">Start mirror</button>
+        </div>
+        <div id="mirrorWrap" hidden style="display:flex; justify-content:center; margin-top:12px">
+          <canvas id="mirrorCanvas" width="172" height="320"
+                  style="width:206px; height:384px; image-rendering:pixelated; border-radius:10px; background:#000; border:1px solid var(--border)"></canvas>
+        </div>
+      </section>
+
       <section class="card" id="zoneHopBars">
         <h2>Busy score by channel <small>0–100, smoothed · hover for details</small></h2>
         <div class="chart-wrap"><svg id="bars" viewBox="0 0 1000 300"></svg><div class="tip" id="barTip"></div></div>
@@ -1053,6 +1064,7 @@
     $('#connText').textContent = s.connected ? `${esc(s.port)}${s.age != null ? ' · ' + s.age + ' s ago' : ''}` : 'no device';
     $('#fw').textContent = s.hello ? `firmware ${s.hello.fw}${s.hello.ver ? ' ' + s.hello.ver : ''} · mode ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
     $('#app').classList.toggle('stale', !s.connected);
+    if (s.hello && !mirrorInit) { mirrorInit = true; if (s.hello.mir) { mirrorOn = true; mirrorSetBtn(); } }
     renderRail(s); renderHero(s); renderAct(s); renderExplain(s);
 
     // device cards: the active radio's table is open, the other two fold into "last seen" caches.
@@ -1093,6 +1105,46 @@
     if (hop) renderChannels(s);
     $('#log').textContent = (s.log || []).join('\n');
   }
+
+  // Live LCD mirror: toggle streams the device screen; a separate fast poll fetches /screen.bin and paints
+  // it onto the canvas (RGB565 little-endian -> RGBA), only redrawing when the device's frame seq changes.
+  let mirrorOn = false, mirrorInit = false, mirrorSeq = -1, mirrorCtx = null, mirrorImg = null, mirrorBusy = false;
+  function mirrorSetBtn() {
+    const b = $('#mirrorBtn');
+    b.textContent = mirrorOn ? 'Stop mirror' : 'Start mirror';
+    b.classList.toggle('stop', mirrorOn);
+    $('#mirrorWrap').hidden = !mirrorOn;
+  }
+  $('#mirrorBtn').addEventListener('click', () => { mirrorOn = !mirrorOn; mirrorSetBtn(); post({ cmd: 'mirror', value: mirrorOn }); });
+  async function drawScreen() {
+    const cv = $('#mirrorCanvas');
+    if (!mirrorCtx) mirrorCtx = cv.getContext('2d');
+    const r = await fetch('/screen.bin', { cache: 'no-store' });
+    const buf = new Uint8Array(await r.arrayBuffer());
+    const w = +r.headers.get('X-Screen-W') || 172, h = +r.headers.get('X-Screen-H') || 320;
+    if (buf.length < w * h * 2) return;
+    if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; mirrorImg = null; }
+    if (!mirrorImg) mirrorImg = mirrorCtx.createImageData(w, h);
+    const px = mirrorImg.data;
+    for (let i = 0, j = 0; i < w * h; i++, j += 4) {
+      const c = buf[i * 2] | (buf[i * 2 + 1] << 8);   // RGB565, little-endian (matches LVGL's buffer)
+      px[j]     = ((c >> 11) & 0x1f) * 255 / 31 | 0;
+      px[j + 1] = ((c >> 5) & 0x3f) * 255 / 63 | 0;
+      px[j + 2] = (c & 0x1f) * 255 / 31 | 0;
+      px[j + 3] = 255;
+    }
+    mirrorCtx.putImageData(mirrorImg, 0, 0);
+  }
+  async function mirrorTick() {
+    try {
+      if (mirrorOn) {
+        const s = await (await fetch('/api/screen', { cache: 'no-store' })).json();
+        if (s.seq !== mirrorSeq && !mirrorBusy) { mirrorSeq = s.seq; mirrorBusy = true; await drawScreen(); mirrorBusy = false; }
+      }
+    } catch (e) { mirrorBusy = false; }
+    setTimeout(mirrorTick, mirrorOn ? 250 : 1000);
+  }
+  mirrorTick();
 
   async function tick() {
     try { const r = await fetch('/api/state', { cache: 'no-store' }); render(await r.json()); lastGood = Date.now(); }

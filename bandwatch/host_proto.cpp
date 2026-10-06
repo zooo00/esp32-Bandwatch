@@ -3,6 +3,7 @@
 // handle_line/merge_* in host/bandwatch_host.py and docs/DEVELOPER.md. Every send checks serialRoom()
 // first so a slow or absent host drops whole lines, never half of one.
 #include "bandwatch_core.h"
+#include "LVGL_Driver.h"   // LCD_WIDTH/LCD_HEIGHT for the mirror ack
 #include <WiFi.h>
 #include <esp_wifi.h>   // C API for the txtest branch (promiscuous on/off, channel)
 #include <SD.h>     // the sdinfo branch reports card size while mounted
@@ -10,6 +11,23 @@
 
 void fmtMac(char* out, size_t n, const uint8_t* m) {
     snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
+}
+
+// Live LCD mirror (see bandwatch_core.h / docs/DEVELOPER.md section 19). g_mirror is toggled by the "mirror"
+// command below; the LVGL flush callback calls mirrorOnFlush() for every flushed region while it is on.
+bool g_mirror = false;
+
+void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px) {
+    const int w = x2 - x1 + 1, h = y2 - y1 + 1;
+    if (w <= 0 || h <= 0) return;
+    const int nbytes = w * h * 2;   // RGB565, little-endian (LV_COLOR_16_SWAP is 0)
+    // base64 is 4/3 the raw size. Keep whole lines - a region is sent intact or not at all (the drop-whole-
+    // lines rule, section 6): if the TX buffer can't hold it, skip it and schedule a full re-send so the host
+    // still converges once the buffer drains.
+    if (!serialRoom(nbytes * 4 / 3 + 48)) { mirrorRequestFull(); return; }
+    Serial.printf("M %d %d %d %d ", x1, y1, w, h);
+    writeBase64(px, static_cast<size_t>(nbytes));
+    Serial.write('\n');
 }
 
 namespace {
@@ -110,6 +128,7 @@ void sendHello() {
                   sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
                   static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
                   static_cast<unsigned long>(sd.errors), epochValid ? 1 : 0);
+    Serial.printf(",\"mir\":%d", g_mirror ? 1 : 0);
     Serial.print("}\n");
 }
 
@@ -472,6 +491,11 @@ void handleCommand(char* line) {
             saveSettings();
         }
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"specstep\",\"step\":%u}\n", specStepMhz);
+    } else if (!strcmp(line, "mirror")) {
+        g_mirror = (atoi(arg) != 0);
+        if (g_mirror) mirrorRequestFull();   // push a full frame now (paced across the next loops)
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"mirror\",\"mirror\":%d,\"w\":%d,\"h\":%d}\n",
+                      g_mirror ? 1 : 0, LCD_WIDTH, LCD_HEIGHT);
     } else if (!strcmp(line, "reboot")) {
         Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);

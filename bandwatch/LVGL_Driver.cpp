@@ -7,6 +7,7 @@
 #include "LVGL_Driver.h"
 
 #include "bandwatch.h"
+#include "bandwatch_core.h"   // g_mirror + mirrorOnFlush for the live LCD mirror
 
 // RGB565 draw buffers (lv_color_t would be 3 bytes/pixel in LVGL 9; the panel is 16-bit)
 static uint16_t buf1[ LVGL_BUF_LEN ];   // single buffer: the SPI flush is synchronous anyway
@@ -27,6 +28,7 @@ void Lvgl_print(const char * buf)
 void Lvgl_Display_LCD( lv_display_t *disp, const lv_area_t *area, uint8_t *px_map )
 {
   LCD_addWindow(area->x1, area->y1, area->x2, area->y2, (uint16_t *)px_map);
+  if (g_mirror) mirrorOnFlush(area->x1, area->y1, area->x2, area->y2, px_map);   // live mirror over serial
   lv_display_flush_ready( disp );
 }
 /*Read the touchpad*/

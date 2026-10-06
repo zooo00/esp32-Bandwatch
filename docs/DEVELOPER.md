@@ -800,3 +800,48 @@ LCD: `PAGE_SPECTRUM` (`buildSpectrumPage`/`refreshSpectrum` in `lcd_ui.cpp`), on
 from `edMax` via `edDbmToScore()`, available only in `spec` mode (`pageAvailable`). Dashboard: a Spectrum tab
 with a dBm bar chart, a client-side waterfall (`<canvas>`, one row per completed sweep), and the
 unexplained-energy list from `s.unidentified`.
+
+## 19. Live LCD mirror over serial (1.13)
+
+A `mirror 1|0` command streams the device's 172×320 LCD to the host so the dashboard can show the real
+screen, not just the decoded data. Default **off**, not persisted (like `park`/`hunt`): a reboot never comes
+up mirroring.
+
+### Why it piggybacks the flush callback
+LVGL renders in `LV_DISPLAY_RENDER_MODE_PARTIAL` into one ~5 KB draw buffer (`buf1`, `LVGL_WIDTH*LVGL_HEIGHT/21`).
+Every repaint calls `Lvgl_Display_LCD(disp, area, px_map)` (`LVGL_Driver.cpp`) with the dirty rectangle and its
+RGB565 pixels on the way to the panel. The mirror taps exactly there — when `g_mirror` is set, the callback
+also calls `mirrorOnFlush(x1,y1,x2,y2,px_map)` (`host_proto.cpp`), which emits one line:
+
+```
+M <x> <y> <w> <h> <base64 of w*h*2 bytes, RGB565 little-endian>
+```
+
+So there is **no extra framebuffer in RAM** (a full frame is 110 KB, more than free heap): it sends pixels
+that already flow through the flush path. `px_map` is LVGL's native buffer (`LV_COLOR_16_SWAP` is 0), so the
+host decodes each pixel as a little-endian `uint16` — which is the colour the panel shows, since the device
+displays LVGL's intended colours correctly. `LCD_WriteData_nbyte` uses `SPI.writeBytes` (no swap, no mutation),
+so reading `px_map` after the panel write is safe.
+
+### Pacing: why a naïve full-frame drops
+All dirty regions in one `lv_timer_handler()` flush **synchronously** back-to-back, and `Serial` is
+non-blocking with an 8 KB TX buffer (`setTxTimeoutMs(0)`, §6) — it never drains mid-handler. A bulk repaint
+(page switch, mode splash, the first frame after enabling) is ~21 chunks of ~7 KB each; only the first fits,
+the rest are dropped whole (never truncated, §6). Re-invalidating the whole screen would just re-send the top
+and livelock.
+
+So `serviceMirror()` (`lcd_ui.cpp`, called once per `Bandwatch_Loop`) re-sends the screen **one ~10-row strip
+per loop** via `lv_obj_invalidate_area()` — each strip is ~4.6 KB base64, well under the TX buffer, and the
+buffer drains between loops, so a full frame converges over ~32 loops (<1 s) without dropping. Steady-state
+label updates are tiny and flush immediately. A dropped region (TX full in `mirrorOnFlush`) calls
+`mirrorRequestFull()`, which schedules a fresh strip scan (ignored if one is already running, so drops don't
+thrash). Enabling the mirror (`mirror 1`) also calls `mirrorRequestFull()` to push a first full frame.
+
+### Host + dashboard
+`handle_mirror()` (`bandwatch_host.py`) parses the `M` line and blits the region into a 172×320 RGB565
+framebuffer under `screen_lock`, bumping `screen_seq`. `GET /screen.bin` serves the raw bytes (with
+`X-Screen-W/H/Seq` headers); `GET /api/screen` returns `{on, seq, w, h}` (`on` = an `M` line within 3 s). The
+**v2 dashboard** (`dashboard2.html`) has a *Start mirror* card: the toggle POSTs `mirror 1|0`, a 4 Hz poll
+watches `seq`, and on a change it fetches `/screen.bin` and paints it onto a `<canvas>` (RGB565 LE → RGBA,
+`image-rendering: pixelated`). `sendHello` carries `"mir"` so the button reflects the device state on load.
+The classic dashboard does not have the mirror card.

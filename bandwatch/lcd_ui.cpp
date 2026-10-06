@@ -491,6 +491,27 @@ void showPage(int n) {
     }
 }
 
+// --- Live LCD mirror pacing ---------------------------------------------------------------------
+// g_mirror (host_proto.cpp) gates emission in the LVGL flush callback. Within one lv_timer_handler every
+// dirty region flushes synchronously, so a bulk repaint (page switch, splash, the first frame) would push
+// far more than the 8 KB serial TX buffer at once and most regions would drop. serviceMirror() instead
+// re-sends the screen one ~10-row strip per loop, each well under the TX buffer, so the buffer drains
+// between strips and a full frame streams over ~32 loops (<1 s) without dropping. A dropped steady-state
+// region (mirrorOnFlush) schedules a fresh scan here. Only runs while a full refresh is pending.
+static int mirrorScanY = -1;   // next strip's top row, or -1 when idle
+void mirrorRequestFull() { if (mirrorScanY < 0) mirrorScanY = 0; }   // ignore while a scan is already running
+void serviceMirror() {
+    if (!g_mirror || mirrorScanY < 0) return;
+    constexpr int kStripH = 10;   // 172*10*2 = 3440 B raw (~4.6 KB base64), comfortably under the 8 KB TX buffer
+    if (!serialRoom(LCD_WIDTH * kStripH * 2 * 4 / 3 + 64)) return;   // wait for the TX buffer to drain
+    int y2 = mirrorScanY + kStripH - 1;
+    if (y2 > LCD_HEIGHT - 1) y2 = LCD_HEIGHT - 1;
+    lv_area_t a;
+    a.x1 = 0; a.y1 = mirrorScanY; a.x2 = LCD_WIDTH - 1; a.y2 = y2;
+    lv_obj_invalidate_area(lv_scr_act(), &a);   // forces this strip to re-render + flush -> mirrorOnFlush emits it
+    mirrorScanY = (y2 >= LCD_HEIGHT - 1) ? -1 : y2 + 1;
+}
+
 namespace {
 inline bool splashActive() { return splashDurMs > 0 && (millis() - splashStartMs) < splashDurMs; }
 inline bool logoActive()   { return logoSplash != nullptr && !lv_obj_has_flag(logoSplash, LV_OBJ_FLAG_HIDDEN); }

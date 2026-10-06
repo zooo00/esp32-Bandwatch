@@ -268,7 +268,7 @@
       </section>
 
       <section class="card" id="zoneBle" hidden>
-        <h2>Devices by signal <small>RSSI per advertiser, strongest first · live while scanning BLE</small></h2>
+        <h2>What's advertising <small>live BLE devices grouped by what they look like</small></h2>
         <div class="chart-wrap"><svg id="bleBars" viewBox="0 0 1000 300"></svg><div class="tip" id="bleBarTip"></div></div>
       </section>
 
@@ -806,23 +806,40 @@
   }
 
   function rssiBarColor(r) { return r >= -55 ? 'var(--critical)' : r >= -70 ? 'var(--warning)' : r >= -82 ? '#caa23a' : 'var(--series)'; }
+  // BLE: a breakdown of live advertisers by what they look like (from the continuity/service/appearance
+  // labels the host already derives). A per-device RSSI bar chart just duplicated the table below it; this
+  // instead answers "what's around me" at a glance - the table doesn't summarise that.
+  const BLE_CATS = [
+    ['Find My / AirTag',    /find my|airtag/i,                                                '#f59e0b'],
+    ['AirPods / audio',     /airpod|audio|headphone|headset|earbud/i,                         '#06b6d4'],
+    ['Phone / Mac / Watch', /nearby|handoff|hey siri|airdrop|airplay|homekit|continuity|iphone|ipad|\bwatch\b|\bmac\b|\bphone\b|tethering/i, '#3b82f6'],
+    ['Beacon',              /ibeacon|beacon|eddystone|exposure|fast pair/i,                    '#22c55e'],
+    ['Other / unknown',     null,                                                             '#8b8b86'],
+  ];
   function renderBleBars(s) {
-    const svg = $('#bleBars'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 36, padR = 10, padT = 18, padB = 46;
+    const svg = $('#bleBars'), W = 1000, H = 300, padL = 196, padR = 54, padT = 14, padB = 14;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    const devs = (s.ble_devs || []).filter(d => d.age < 60).sort((a, b) => b.rssi - a.rssi).slice(0, 32);
+    const devs = (s.ble_devs || []).filter(d => d.age < 60);
     if (!devs.length) { svg.innerHTML = `<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">scanning…</text>`; return; }
-    const plotW = W - padL - padR, plotH = H - padT - padB, LO = -100, HI = -30;
-    const yOf = r => { const v = Math.max(LO, Math.min(HI, r)); return padT + plotH - (v - LO) / (HI - LO) * plotH; };
-    const slot = plotW / devs.length, bw = Math.min(22, Math.max(3, slot - 2)), out = [];
-    out.push(gridAxis(W, padL, padR, [-90, -70, -50, -30].map(v => ({ y: yOf(v), label: v })), `<text x="${padL - 6}" y="${padT - 6}" text-anchor="end">dBm</text>`));
-    devs.forEach((d, i) => {
-      const cx = padL + slot * i + slot / 2, bx = cx - bw / 2, top = yOf(d.rssi), h = Math.max(1, yOf(LO) - top);
-      out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
-      out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="2" style="fill:${rssiBarColor(d.rssi)}"/>`);
+    const counts = BLE_CATS.map(() => 0), picks = BLE_CATS.map(() => []);
+    for (const d of devs) {
+      const hay = `${d.kind || ''} ${d.vendor || ''}`;
+      let idx = BLE_CATS.findIndex(c => c[1] && c[1].test(hay));
+      if (idx < 0) idx = BLE_CATS.length - 1;
+      counts[idx]++; if (picks[idx].length < 6) picks[idx].push(d.name || d.mac);
+    }
+    const max = Math.max(1, ...counts), plotW = W - padL - padR, rowH = (H - padT - padB) / BLE_CATS.length;
+    const bh = Math.min(30, rowH - 12), out = [], tips = [];
+    BLE_CATS.forEach(([label, , color], i) => {
+      const cy = padT + rowH * i + rowH / 2, n = counts[i], bw = (n / max) * plotW;
+      out.push(`<rect class="hit" data-i="${i}" x="0" y="${padT + rowH * i}" width="${W}" height="${rowH}"/>`);
+      out.push(`<text x="${padL - 10}" y="${cy}" text-anchor="end" dominant-baseline="central" style="fill:var(--ink-2);font-size:15px">${label}</text>`);
+      out.push(`<rect x="${padL}" y="${cy - bh / 2}" width="${Math.max(0, bw)}" height="${bh}" rx="3" style="fill:${n ? color : 'transparent'}"/>`);
+      out.push(`<text x="${padL + Math.max(0, bw) + 8}" y="${cy}" dominant-baseline="central" style="fill:var(--ink);font-size:15px;font-weight:600">${n}</text>`);
+      tips.push({ label, n, ex: picks[i] });
     });
-    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-weight:600">${devs.length} nearest advertisers — RSSI (dBm)</text>`);
     svg.innerHTML = out.join('');
-    chartTips(svg, '#bleBarTip', devs, d => `<b>${esc(d.name) || d.mac}</b><br>${d.rssi} dBm · ${fmt(d.adv)} adv<br><span style="opacity:.6">${esc(d.vendor || d.kind || '')}</span>`);
+    chartTips(svg, '#bleBarTip', tips, t => `<b>${t.label}</b> · ${t.n} live<br><span style="opacity:.6">${t.ex.map(esc).join(', ') || '—'}</span>`);
   }
 
   // Spectrum page is 2.4 GHz only: real RF energy (dBm, auto-ranged) from the 15.4 energy detector. 5 GHz has

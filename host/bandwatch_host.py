@@ -628,10 +628,22 @@ class Bandwatch:
                     self._spec_track(lo + i * step, row[2])   # track edMax per MHz for the noise floor
         elif t == "fd":
             # Fine spectrum per-dwell: which frequency the sweep is on now + that bin's energy (walking cursor).
-            self.fine["current_mhz"] = msg.get("mhz", 0)
+            mhz = msg.get("mhz", 0)
+            self.fine["current_mhz"] = mhz
             self.fine["step"] = msg.get("step", self.fine["step"])
             st["spec_step"] = msg.get("step", st.get("spec_step", 2))
             st["sweep"] = msg.get("n", st.get("sweep", 0))
+            # Write this one bin live so the dashboard bars track each probe, not only once per full sweep (fs).
+            # In-place element swap is GIL-safe against snapshot() iterating the same list; same [min,mean,max,ns]
+            # shape as an fs row.
+            lo, step = self.fine.get("lo", 2400), self.fine.get("step", 2) or 2
+            bins = self.fine.get("bins") or []
+            i = (mhz - lo) // step if mhz else -1
+            if 0 <= i < len(bins):
+                bins[i] = [msg.get("min", 0), msg.get("mean", 0), msg.get("max", 0), msg.get("ns", 0)]
+                self.fine["ts"] = time.time()
+                if msg.get("ns"):
+                    self._spec_track(mhz, msg.get("max", 0))
         elif t == "w":
             self.merge_wifi(msg.get("dev", []))
         elif t == "z":

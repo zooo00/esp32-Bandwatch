@@ -677,15 +677,20 @@ void refreshOverview(float global) {
         lv_label_set_text(statsLine2, "");
     }
 
+    // "APs" is a Wi-Fi concept (beacon senders); in 802.15.4 there are no APs - count live nodes instead, so
+    // the footer stops reading a misleading "APs 0" in Zigbee/Thread mode.
+    const bool is154 = mode154();
+    const char* entL = is154 ? "nodes" : "APs";
+    const unsigned entN = is154 ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen;
     if (captureEnabled) {
-        snprintf(buf, sizeof(buf), "APs %u  " LV_SYMBOL_DOWNLOAD " %lu  drop %lu", lastApSeen,
+        snprintf(buf, sizeof(buf), "%s %u  " LV_SYMBOL_DOWNLOAD " %lu  drop %lu", entL, entN,
                  static_cast<unsigned long>(capSent), static_cast<unsigned long>(capDropped));
     } else {
         const int q = quietestChannel();   // C8: name the quietest channel when the line has room (capture off)
         if (q >= 0)
-            snprintf(buf, sizeof(buf), "APs %u   quiet ch%u %.0f", lastApSeen, kChannels[q], channels[q].busyEma);
+            snprintf(buf, sizeof(buf), "%s %u   quiet ch%u %.0f", entL, entN, kChannels[q], channels[q].busyEma);
         else
-            snprintf(buf, sizeof(buf), "APs %u", lastApSeen);
+            snprintf(buf, sizeof(buf), "%s %u", entL, entN);
     }
     lv_label_set_text(footLabel, buf);
 }
@@ -719,7 +724,9 @@ void refreshChannels(float global) {
         slot++;
     }
     for (; slot < kListSlots; slot++) lv_obj_add_flag(listRow[slot], LV_OBJ_FLAG_HIDDEN);
-    snprintf(buf, sizeof(buf), "max %.0f  sweep %lu  APs %u", global, static_cast<unsigned long>(sweepCount), lastApSeen);
+    const bool is154 = mode154();   // "APs" is Wi-Fi-only; show live node count in 802.15.4
+    snprintf(buf, sizeof(buf), "max %.0f  sweep %lu  %s %u", global, static_cast<unsigned long>(sweepCount),
+             is154 ? "nodes" : "APs", is154 ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen);
     lv_label_set_text(listFoot, buf);
 }
 

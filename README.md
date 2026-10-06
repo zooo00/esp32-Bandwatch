@@ -251,6 +251,12 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.15** — Review pass (dashboard + LCD). **Spectrum energy updates per probe** now, not once per full
+  sweep: the host writes each per-dwell `fd` bin live, so the 2.4 GHz bars track the walking cursor (the other
+  modes already updated per-dwell via the `d` line). **BLE chart replaced**: the per-device RSSI bars just
+  duplicated the table, so they became a *What's advertising* breakdown — live devices grouped by what they
+  look like (Find My/AirTag, AirPods/audio, phone/Mac/Watch, beacon, other). **LCD 802.15.4**: the
+  Overview/Channels footer reads "nodes `<n>`" (live node count) instead of a meaningless "APs 0".
 - **1.14** — Mirror UI: moved the LCD-mirror panel into the dashboard's left control rail (the 172×320 canvas
   fits its width), and added **Page ‹ ›** buttons that step the LCD like a BOOT tap — a new `page next|prev`
   command (`stepPage()`) lets you drive the interface from the browser and hold on a page. (Fast-updating

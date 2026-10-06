@@ -170,6 +170,7 @@
 </head>
 <body>
 <div class="toasts" id="toasts"></div>
+<div id="explainBanner" hidden style="position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:50;background:var(--accent,#2b6cb0);color:#fff;padding:8px 14px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.3);font-size:13px;max-width:92vw"></div>
 <div id="app">
   <header class="topbar">
     <h1>Bandwatch <span class="tag">new UI</span></h1>
@@ -260,7 +261,15 @@
         <div id="specStatus" class="specstatus"></div>
         <div class="warnbar" id="specWarn" hidden></div>
         <section class="card">
-          <h2>2.4 GHz — RF energy <small>true dBm per fine bin · auto-ranged · bar = peak (max-hold)</small></h2>
+          <h2>2.4 GHz — RF energy <small>bar = power (dBm, auto-ranged) · cap colour = what explains it</small></h2>
+          <div class="speclegend" style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--ink-2,#9aa);margin-bottom:6px">
+            <span style="opacity:.75">cap:</span>
+            <span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#3b82f6;margin-right:4px"></i>Wi-Fi</span>
+            <span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#06b6d4;margin-right:4px"></i>BLE</span>
+            <span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#22c55e;margin-right:4px"></i>Zigbee/15.4</span>
+            <span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#ef4444;margin-right:4px"></i>unexplained</span>
+            <span style="opacity:.75">· no cap = energy with no recent decode</span>
+          </div>
           <div class="chart-wrap"><svg id="spec" viewBox="0 0 1000 300"></svg><div class="tip" id="specTip"></div></div>
         </section>
         <div class="grid2">
@@ -271,9 +280,19 @@
           </section>
           <section class="card">
             <h2>Unexplained energy <small>sustained 2.4 GHz power no decoded device accounts for</small></h2>
+            <div class="seg" style="margin-bottom:8px">
+              <button id="explainCurrent" title="Decode only the channels covering the frequencies flagged now, then return to the spectrum">Explain current</button>
+              <button id="explainFull" title="Sweep all three 2.4 GHz decode modes to refresh what's known, then return to the spectrum">Full rescan</button>
+            </div>
+            <div id="explainStatus" class="note" style="margin:0 0 8px" hidden></div>
             <div id="unid"></div>
           </section>
         </div>
+        <section class="card">
+          <h2>Explained energy <small>remembered until you clear or a rescan overwrites · faded = cached, solid = live</small></h2>
+          <div class="seg" style="margin-bottom:8px"><button id="explainClear" title="Forget all remembered explanations">Clear memory</button></div>
+          <div id="explained"></div>
+        </section>
         <section class="card">
           <h2>5 GHz — traffic activity <small>busy score 0–100 from decoded packets · not RF energy (no 5 GHz energy sensor)</small></h2>
           <div class="chart-wrap"><svg id="spec5" viewBox="0 0 1000 300"></svg><div class="tip" id="spec5Tip"></div></div>
@@ -373,6 +392,7 @@
   const frozen = { wifi: false, ble: false, zig: false };      // table under the mouse keeps its rows put
   const expanded = { wifi: false, ble: false, zig: false };    // user-opened "last seen" cards
   const pending = { cap: 0, sd: 0, deauth: 0 };                // click latches until the device confirms (poll is 1 Hz)
+  let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
   const prev = {};
 
   const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
@@ -387,6 +407,14 @@
     const mix = (a, b) => Math.round(a + (b - a) * f);
     return `rgb(${mix(stops[i][0], stops[i + 1][0])},${mix(stops[i][1], stops[i + 1][1])},${mix(stops[i][2], stops[i + 1][2])})`;
   }
+  // Classification colours for the spectrum bars: explained energy split by the source that accounts for it,
+  // unexplained energy flagged in red. A bin with energy but no classification keeps the edColor gradient.
+  const CLS_COLORS = { wifi: '#3b82f6', ble: '#06b6d4', zigbee: '#22c55e', unexplained: '#ef4444' };
+  const CLS_LABEL = { wifi: 'Wi-Fi', ble: 'BLE', zigbee: 'Zigbee/15.4', unexplained: 'unexplained' };
+  const CLS_UNCLASSED = '#6b7280';   // energy present but not sustained enough to classify
+  // Colour encodes the explanation ONLY; strength is the bar height (dBm). Keeping edColor out of the fill
+  // stops the energy gradient from competing with the classification palette.
+  const barColor = (b) => CLS_COLORS[b.cls] || CLS_UNCLASSED;
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const ago = (s) => s == null ? 'never' : s < 1 ? 'now' : s < 60 ? fmt(s) + ' s' : s < 3600 ? fmt(s / 60) + ' min' : fmt(s / 3600, 1) + ' h';
   const post = (body) => fetch('/api/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -445,6 +473,12 @@
   document.addEventListener('click', (e) => { if (e.target.closest('[data-startspec]')) post({ cmd: 'band', value: 'spec' }); });
   document.addEventListener('click', (e) => { if (e.target.closest('[data-start5g]')) post({ cmd: 'band', value: '5g' }); });
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-specstep]'); if (b) post({ cmd: 'specstep', value: +b.dataset.specstep }); });
+  // "Explain" unexplained energy: leave spec to decode, then the host jumps back. Latch a local pending state
+  // so the button reads as busy immediately (the 1 Hz poll would otherwise look dead until the host responds).
+  function explain(scope, btn) { explainPending = { scope, t: Date.now() }; btn.disabled = true; post({ cmd: 'explain', value: scope }); }
+  $('#explainCurrent').addEventListener('click', (e) => explain('current', e.currentTarget));
+  $('#explainFull').addEventListener('click', (e) => explain('full', e.currentTarget));
+  $('#explainClear').addEventListener('click', () => post({ cmd: 'explain', value: 'clear' }));
   // Deauth button: broadcast mode (kick every station on an AP)
   document.addEventListener('click', (e) => {
     const k = e.target.closest('button[data-deauth]');
@@ -799,6 +833,48 @@
       ((s.band === '5g' || s.band === 'both') ? '' : `<button class="small" data-start5g>Scan 5 GHz</button>`);
   }
 
+  function renderExplain(s) {
+    const box = $('#explainStatus'), banner = $('#explainBanner');
+    const cur = $('#explainCurrent'), full = $('#explainFull');
+    const ex = s.explain;
+    const running = ex && ex.active;
+    // Clear the local latch once the host has picked the request up (active) or finished one after our click.
+    if (explainPending && (running || (ex && ex.finished && ex.finished * 1000 > explainPending.t))) explainPending = null;
+    const busy = running || !!explainPending;
+    if (cur) cur.disabled = busy;
+    if (full) full.disabled = busy;
+    let msg = '';
+    if (running) msg = `Explaining (${ex.scope}): ${ex.phase} — step ${ex.leg}/${ex.legs}. Returning to the spectrum automatically.`;
+    else if (explainPending) msg = `Starting ${explainPending.scope} rescan…`;
+    // In-card status (only visible while on the spectrum zone) + a global banner (the band leaves spec during
+    // the run, so the spectrum card is hidden - the banner is how progress stays visible meanwhile).
+    if (box) { box.hidden = !msg; if (msg) box.textContent = msg; }
+    banner.hidden = !busy; if (busy) banner.textContent = msg;
+  }
+  // Merge consecutive same-source classified bins into frequency ranges (25 Wi-Fi bins -> one "2412–2462 MHz"
+  // row). Unexplained bins are excluded - they have their own list.
+  function explainedSpans(s) {
+    const step = (s.fine && s.fine.step) || 2, bins = (s.fine && s.fine.bins) || [];
+    const spans = []; let cur = null;
+    for (const b of bins) {   // merge consecutive bins of the same source AND device into one frequency range
+      const c = (b.cls && b.cls !== 'unexplained') ? b.cls : null;
+      if (cur && c === cur.cls && b.expl === cur.expl && b.mhz - cur.hi <= step) { cur.hi = b.mhz; cur.peak = Math.max(cur.peak, b.max); cur.age = Math.min(cur.age, b.age || 0); }
+      else { if (cur) spans.push(cur); cur = c ? { cls: c, expl: b.expl, lo: b.mhz, hi: b.mhz, peak: b.max, age: b.age || 0 } : null; }
+    }
+    if (cur) spans.push(cur);
+    return spans;
+  }
+  function renderExplained(s) {
+    const spans = explainedSpans(s);
+    $('#explained').innerHTML = spans.length
+      ? '<table><thead><tr><th class="l">Source</th><th class="l">Device</th><th class="l">Frequency</th><th>Peak</th><th>Seen</th></tr></thead><tbody>'
+        + spans.map(e => `<tr><td class="l"><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${CLS_COLORS[e.cls]};opacity:${e.age ? 0.45 : 1};margin-right:5px"></i>${CLS_LABEL[e.cls]}</td>`
+            + `<td class="l mono">${esc(e.expl) || '—'}</td>`
+            + `<td class="l">${e.lo === e.hi ? e.lo + ' MHz' : e.lo + '–' + e.hi + ' MHz'}</td><td>${e.peak} dBm</td>`
+            + `<td>${e.age ? ago(e.age) + ' ago' : '<span style="color:#22c55e">live</span>'}</td></tr>`).join('')
+        + '</tbody></table>'
+      : '<p class="note" style="margin:0">Nothing explained yet — no recently-decoded Wi‑Fi/BLE/Zigbee covers the energy on air. Use the buttons above to decode; matches are remembered here until you clear them.</p>';
+  }
   function renderEnergy24(s) {
     const svg = $('#spec'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 46, padR = 12, padT = 18, padB = 42;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
@@ -826,9 +902,10 @@
     bins.forEach((b, i) => {
       const cx = padL + slot * i + slot / 2, bx = cx - bw / 2;
       out.push(`<rect class="hit" data-i="${i}" x="${padL + slot * i}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
-      if (b.n > 0) {   // bar = peak (max-hold), the clearest way to show emitters at fine resolution
+      if (b.n > 0) {   // bar = energy (height + edColor); a coloured cap on top marks the classification
         const top = yOf(b.max), h = Math.max(1, yOf(lo) - top);
         out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="${bw > 3 ? 2 : 0}" style="fill:${edColor(b.max)}"/>`);
+        if (b.cls) out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${Math.min(6, h)}" style="fill:${CLS_COLORS[b.cls]};fill-opacity:${b.age ? 0.45 : 1}"/>`);  // faded = cached, solid = live
       } else {
         out.push(`<rect x="${bx}" y="${yOf(lo) - 2}" width="${bw}" height="2" style="fill:var(--grid)"/>`);
       }
@@ -837,7 +914,7 @@
     });
     out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-weight:600">2.4 GHz · frequency (MHz) · ${s.spec_step || 2} MHz steps</text>`);
     svg.innerHTML = out.join('');
-    chartTips(svg, '#specTip', bins, b => b.n > 0 ? `<b>${b.mhz} MHz</b><br>peak ${b.max} dBm · avg ${b.mean} dBm<br>min ${b.min} dBm · ${b.n} samples` : `<b>${b.mhz} MHz</b><br>no data yet`);
+    chartTips(svg, '#specTip', bins, b => b.n > 0 ? `<b>${b.mhz} MHz</b>${b.cls ? ` · <span style="color:${CLS_COLORS[b.cls]}">${CLS_LABEL[b.cls]}</span>${b.expl ? '<br>' + esc(b.expl) : ''}` : ''}<br>peak ${b.max} dBm · avg ${b.mean} dBm<br>min ${b.min} dBm · ${b.n} samples` : `<b>${b.mhz} MHz</b><br>no data yet`);
     // Waterfall: one row per completed sweep, columns = frequency bins (peak energy). A resolution change
     // re-bins the spectrum, so clear the canvas rather than draw misaligned rows.
     const cv = $('#waterfall');
@@ -1007,7 +1084,7 @@
     $('#connText').textContent = s.connected ? `${esc(s.port)}${s.age != null ? ' · ' + s.age + ' s ago' : ''}` : 'no device';
     $('#fw').textContent = s.hello ? `firmware ${s.hello.fw}${s.hello.ver ? ' ' + s.hello.ver : ''} · mode ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
     $('#app').classList.toggle('stale', !s.connected);
-    renderRail(s); renderHero(s); renderAct(s);
+    renderRail(s); renderHero(s); renderAct(s); renderExplain(s);
 
     // device cards: the active radio's table is open, the other two fold into "last seen" caches.
     const actK = activeKind(s.band);
@@ -1031,7 +1108,7 @@
     if (hop) { renderBars(s); renderTrend(s); }
     else if (s.band === 'ble') renderBleBars(s);
     else {
-      renderSpecStatus(s); renderEnergy24(s); renderActivity5(s);
+      renderSpecStatus(s); renderEnergy24(s); renderActivity5(s); renderExplained(s);
       const list = s.unidentified || [];
       $('#unid').innerHTML = list.length
         ? '<table><thead><tr><th class="l">Frequency</th><th>Peak</th><th>Floor</th><th>Duty</th></tr></thead><tbody>'

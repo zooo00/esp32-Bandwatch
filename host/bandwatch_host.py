@@ -65,6 +65,12 @@ SPEC_HIST_LEN = 40          # recent energy-detect samples kept per 15.4 channel
 SPEC_FLOOR_MARGIN = 6       # dB above the rolling floor that counts as "energy present"
 SPEC_MIN_DUTY = 0.10        # need energy in at least this fraction of recent sweeps to flag a bin
 SPEC_KNOWN_AGE_S = 120      # a decoded emitter older than this no longer "explains" a frequency
+# "Explain" orchestration leg durations (seconds the device spends decoding each mode before returning to spec).
+EXPLAIN_DUR_WIFI_FULL = 6.0   # full 2.4 GHz Wi-Fi sweep (13 channels hopping) - a couple of beacon intervals
+EXPLAIN_DUR_154_FULL  = 5.0   # full 802.15.4 sweep (channels 11-26)
+EXPLAIN_DUR_BLE       = 5.0   # BLE discovery window
+EXPLAIN_DUR_PARK      = 3.5   # a single parked Wi-Fi/15.4 channel (targeted "current" scope)
+EXPLAIN_SETTLE_S      = 0.3   # let the radio come up before the dwell timing starts to matter
 DEV_HIST_LEN = 120      # per-device RSSI samples (one per device report, ~2 s)
 DEV_EXPIRE_S = 600      # forget devices not seen for this long
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
@@ -358,6 +364,15 @@ class Bandwatch:
         self.history = deque(maxlen=HISTORY_LEN)
         self._last_hist = 0
         self.spec_hist = {}          # spectrum mode: MHz -> deque of recent edMax (dBm), for the noise floor/duty
+        # Sticky explanations: MHz -> {src, label, ts}. A live decode writes/overwrites the entry for that
+        # frequency; it then persists (shown as cached, with age) until a newer decode replaces it or the user
+        # clears it. Lets the spectrum stay annotated between scans despite the single-radio limitation.
+        self.spec_explained = {}
+        # "Explain" orchestration: a background thread that leaves spec mode to re-decode Wi-Fi/BLE/15.4 (so the
+        # unexplained-energy comparison has fresh "known" devices), then jumps back to spec. See start_explain().
+        self._explain_thread = None
+        self._explain_lock = threading.Lock()
+        self.state["explain"] = None   # {active, scope, leg, legs, phase, until} while running
         # Fine 2.4 GHz spectrum (spec mode): the device sweeps 2400-2483 MHz in `step` MHz bins via off-grid
         # tuning. bins is a list of [edMin, edMean, edMax, edSamples] in frequency order (lo + i*step).
         self.fine = {"step": 2, "lo": 2400, "count": 0, "bins": [], "current_mhz": 0, "ts": 0}
@@ -813,52 +828,153 @@ class Bandwatch:
                 self.spec_hist[mhz] = h
             h.append(ed_max)
 
-    def _unidentified(self):
-        """Flag 2.4 GHz energy bins carrying sustained power that no recently-decoded Wi-Fi/BLE/Zigbee
-        emitter explains. The single radio can't decode and energy-scan at once, so "known" is drawn from
-        the last time those modes ran: this is an unexplained-energy flag, not a device identification."""
-        now = time.time()
-        known = []   # (lo_mhz, hi_mhz) spans we have actually decoded recently
+    def _spec_known_spans(self, now):
+        """Frequency spans we have actually decoded recently, each tagged with its source and the specific
+        device that accounts for it, so an energy bin falling in one is "explained" by that device. The single
+        radio can't decode and energy-scan at once, so "known" is drawn from the last time those modes ran.
+        Each span: {lo, hi, src, label, str} - str (the device's peak RSSI) breaks ties when spans overlap."""
+        spans = []
         with self.dlock:
             for d in self.wifi_devs.values():
                 ch = d.get("ch") or 0
                 if 1 <= ch <= 14 and now - d["last"] <= SPEC_KNOWN_AGE_S:
                     f = 2412 + 5 * (ch - 1)
-                    known.append((f - 11, f + 11))   # ~22 MHz occupied bandwidth
+                    name = d.get("ssid") or d.get("vendor") or ""
+                    label = (name + " · " if name else "") + d["mac"]
+                    spans.append({"lo": f - 11, "hi": f + 11, "src": "wifi", "label": label,    # ~22 MHz wide
+                                  "str": d.get("max", d.get("rssi", -128))})
             for d in self.z_devs.values():
                 ch = d.get("ch") or 0
                 if 11 <= ch <= 26 and now - d["last"] <= SPEC_KNOWN_AGE_S:
                     f = 2405 + 5 * (ch - 11)
-                    known.append((f - 1, f + 1))
-            ble_recent = any(now - d["last"] <= SPEC_KNOWN_AGE_S for d in self.ble_devs.values())
-        if ble_recent:
-            # BLE advertises on 2402/2426/2480 and hops data channels across the band; if we've decoded any
-            # BLE recently, treat at least the advertising frequencies as explained.
+                    pan = d.get("pan")
+                    label = (d.get("proto") or "802.15.4") + (f" · pan {pan}" if pan else "") + (f" · {d['short']}" if d.get("short") else "")
+                    spans.append({"lo": f - 1, "hi": f + 1, "src": "zigbee", "label": label,
+                                  "str": d.get("max", d.get("rssi", -128))})
+            bles = [d for d in self.ble_devs.values() if now - d["last"] <= SPEC_KNOWN_AGE_S]
+        if bles:
+            # BLE advertises on 2402/2426/2480 and hops data channels; attribute the adv frequencies to the
+            # strongest BLE device we've heard (a loose attribution - BLE hops - hence "+N more").
+            strongest = max(bles, key=lambda d: d.get("max", d.get("rssi", -128)))
+            nm = strongest.get("name") or strongest.get("vendor") or strongest.get("mac")
+            label = nm + (f" +{len(bles) - 1} more" if len(bles) > 1 else "")
             for f in (2402, 2426, 2480):
-                known.append((f - 1, f + 1))
-        # Snapshot the per-bin history under the lock (the reader thread appends to these deques), then work
-        # off the copy. Noise floor = the band-wide quiet level (a low percentile across all bins and recent
-        # sweeps), so a continuously-on emitter is still measured against ambient quiet, not its own history.
+                spans.append({"lo": f - 1, "hi": f + 1, "src": "ble", "label": label,
+                              "str": strongest.get("max", strongest.get("rssi", -128))})
+        return spans
+
+    def clear_explained(self):
+        """Forget all sticky explanations (the user's 'clear')."""
+        with self.dlock:
+            self.spec_explained.clear()
+
+    def _spec_analyze(self):
+        """Classify every 2.4 GHz energy bin carrying sustained power by the specific device that accounts for
+        it (wifi/ble/zigbee), or 'unexplained'. A live decode (device seen < SPEC_KNOWN_AGE_S) writes a sticky
+        entry per frequency; between scans a bin falls back to its sticky entry, flagged with its age, until a
+        newer decode overwrites it or the user clears it. Returns {unidentified, cls:{mhz:source},
+        expl:{mhz:device}, age:{mhz:seconds}} - age 0 = live, >0 = cached. 'unexplained' is evidence, not an id."""
+        now = time.time()
+        spans = self._spec_known_spans(now)
+        # Snapshot the per-bin history and the sticky map under the lock (the reader thread appends to the
+        # deques), then work off the copies. Noise floor = the band-wide quiet level (a low percentile across
+        # all bins and recent sweeps), so a continuously-on emitter is measured against ambient quiet.
         with self.dlock:
             hist = {mhz: list(h) for mhz, h in self.spec_hist.items()}   # keyed by frequency (MHz)
+            sticky = dict(self.spec_explained)
         all_samples = sorted(v for h in hist.values() for v in h)
         if len(all_samples) < 8:
-            return []
+            return {"unidentified": [], "cls": {}, "expl": {}, "age": {}}
         floor = all_samples[max(0, int(len(all_samples) * 0.15) - 1)]
         gate = floor + SPEC_FLOOR_MARGIN
-        out = []
+        unid, cls, expl, age, new_sticky = [], {}, {}, {}, {}
         for mhz, h in hist.items():
             if not h:
                 continue
             peak = max(h)
             duty = sum(1 for v in h if v > gate) / len(h)
             if peak <= gate or duty < SPEC_MIN_DUTY:
-                continue
-            if any(lo <= mhz <= hi for lo, hi in known):
-                continue
-            out.append({"freq_mhz": mhz, "peak_dbm": peak, "floor_dbm": floor, "duty": round(duty, 2)})
-        out.sort(key=lambda e: e["peak_dbm"], reverse=True)
-        return out
+                continue   # no sustained energy: leave unclassified (drawn as plain energy, not flagged)
+            covering = [s for s in spans if s["lo"] <= mhz <= s["hi"]]
+            if covering:
+                best = max(covering, key=lambda s: s["str"])   # strongest device covering this frequency, live
+                cls[mhz], expl[mhz], age[mhz] = best["src"], best["label"], 0
+                new_sticky[mhz] = {"src": best["src"], "label": best["label"], "ts": now}
+            elif mhz in sticky:
+                s = sticky[mhz]                                 # no live decode: fall back to the cached one
+                cls[mhz], expl[mhz], age[mhz] = s["src"], s["label"], round(now - s["ts"])
+            else:
+                cls[mhz] = "unexplained"
+                unid.append({"freq_mhz": mhz, "peak_dbm": peak, "floor_dbm": floor, "duty": round(duty, 2)})
+        if new_sticky:
+            with self.dlock:
+                self.spec_explained.update(new_sticky)
+        unid.sort(key=lambda e: e["peak_dbm"], reverse=True)
+        return {"unidentified": unid, "cls": cls, "expl": expl, "age": age}
+
+    def _unidentified(self):
+        """Just the unexplained-energy list (used by the explain orchestration); see _spec_analyze()."""
+        return self._spec_analyze()["unidentified"]
+
+    # ---------------- "explain" orchestration ----------------
+    def start_explain(self, scope):
+        """Leave spec mode, re-decode Wi-Fi/BLE/15.4 so the unexplained-energy comparison has fresh 'known'
+        devices, then jump back to spec. scope 'full' = sweep all three 2.4 GHz modes; 'current' = park only
+        on the channels covering the frequencies flagged unexplained right now. Runs in a daemon thread so the
+        HTTP server stays responsive; a second request while one runs is ignored."""
+        with self._explain_lock:
+            if self._explain_thread and self._explain_thread.is_alive():
+                return False
+            self._explain_thread = threading.Thread(target=self._explain_run, args=(scope,), daemon=True)
+            self._explain_thread.start()
+            return True
+
+    def _explain_legs_current(self):
+        """Map the currently-unexplained frequencies to the decode legs that could account for them: the Wi-Fi
+        2.4 GHz channel and/or 15.4 channel covering each bin, plus BLE if an advertising frequency is flagged."""
+        wifi_chs, z_chs, need_ble = set(), set(), False
+        for e in self._unidentified():
+            f = e["freq_mhz"]
+            wch = round((f - 2412) / 5) + 1            # 2.4 GHz Wi-Fi occupies ~±11 MHz, so most bins map to one
+            if 1 <= wch <= 13:
+                wifi_chs.add(wch)
+            zch = round((f - 2405) / 5) + 11           # 15.4 channels are 5 MHz apart, ~2 MHz wide
+            if 11 <= zch <= 26 and abs(f - (2405 + 5 * (zch - 11))) <= 2:
+                z_chs.add(zch)
+            if any(abs(f - a) <= 2 for a in (2402, 2426, 2480)):
+                need_ble = True
+        legs = [("2.4g", ch, EXPLAIN_DUR_PARK, f"Wi-Fi ch{ch}") for ch in sorted(wifi_chs)]
+        legs += [("154", ch, EXPLAIN_DUR_PARK, f"802.15.4 ch{ch}") for ch in sorted(z_chs)]
+        if need_ble:
+            legs.append(("ble", 0, EXPLAIN_DUR_BLE, "BLE"))
+        return legs
+
+    def _explain_run(self, scope):
+        if scope == "current":
+            legs = self._explain_legs_current()
+        else:   # full
+            legs = [("2.4g", 0, EXPLAIN_DUR_WIFI_FULL, "Wi-Fi 2.4 GHz (full)"),
+                    ("ble", 0, EXPLAIN_DUR_BLE, "BLE (full)"),
+                    ("154", 0, EXPLAIN_DUR_154_FULL, "802.15.4 (full)")]
+        try:
+            for i, (band, ch, dur, phase) in enumerate(legs):
+                self.state["explain"] = {"active": True, "scope": scope, "leg": i + 1, "legs": len(legs),
+                                         "phase": phase, "until": time.time() + dur + EXPLAIN_SETTLE_S}
+                self.send(f"band {band}")
+                time.sleep(EXPLAIN_SETTLE_S)
+                if ch:                       # 0 = sweep (no park); a real channel = targeted park
+                    self.send(f"park {ch}")
+                time.sleep(dur)
+                if ch:
+                    self.send("park 0")      # unpark before the next leg / before returning to spec
+            # Jump back to the scanning view regardless of scope (and whether any legs ran).
+            self.state["explain"] = {"active": True, "scope": scope, "leg": len(legs), "legs": len(legs),
+                                     "phase": "back to spectrum", "until": time.time() + EXPLAIN_SETTLE_S}
+            self.send("band spec")
+            time.sleep(EXPLAIN_SETTLE_S)
+        finally:
+            self.state["explain"] = {"active": False, "scope": scope, "leg": len(legs), "legs": len(legs),
+                                     "phase": "done", "until": 0, "finished": time.time()}
 
     def handle_frame(self, raw):
         pcap = self.pcap          # stop_capture() runs on the HTTP thread and may clear/close it mid-frame
@@ -962,6 +1078,10 @@ class Bandwatch:
     def snapshot(self):
         st = self.state
         now = time.time()
+        # Analyze the spectrum once per snapshot: the unexplained list and the per-bin {mhz: source} map both
+        # come from it, so the bar colours and the table agree.
+        spec_analysis = self._spec_analyze() if st["band"] == "spec" else {"unidentified": [], "cls": {}, "expl": {}, "age": {}}
+        spec_cls, spec_expl, spec_age = spec_analysis["cls"], spec_analysis["expl"], spec_analysis["age"]
         chans = [dict(ch=c, **st["channels"].get(c, {})) for c in st["chs"]]
         with self.dlock:
             wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.wifi_devs.values()]
@@ -982,14 +1102,18 @@ class Bandwatch:
             "band": st["band"], "current": st["current"], "global": st["global"], "sweep": st["sweep"], "aps": st["aps"],
             "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
             "channels": chans, "history": list(self.history), "capture": st["capture"],
-            "unidentified": self._unidentified() if st["band"] == "spec" else [],
+            "unidentified": spec_analysis["unidentified"],
+            "explain": st.get("explain"),
             "wide": self._wide(),
             "spec_step": st.get("spec_step", 2),
             "fine": {"step": self.fine["step"], "lo": self.fine["lo"], "count": self.fine["count"],
                      "current_mhz": self.fine["current_mhz"],
                      "age": round(now - self.fine["ts"], 1) if self.fine["ts"] else None,
                      "bins": [{"mhz": self.fine["lo"] + i * self.fine["step"],
-                               "min": r[0], "mean": r[1], "max": r[2], "n": r[3]}
+                               "min": r[0], "mean": r[1], "max": r[2], "n": r[3],
+                               "cls": spec_cls.get(self.fine["lo"] + i * self.fine["step"]),
+                               "expl": spec_expl.get(self.fine["lo"] + i * self.fine["step"]),
+                               "age": spec_age.get(self.fine["lo"] + i * self.fine["step"])}
                               for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
@@ -1117,6 +1241,12 @@ def make_handler(bw, classic_path, v2_path=None, ui="classic"):
                     bw.send("sdls")
                 elif cmd == "info":
                     bw.send("info")
+                elif cmd == "explain" and req.get("value") in ("full", "current"):
+                    # Host-orchestrated (not a device command): decode the relevant modes, then return to spec.
+                    if not bw.start_explain(req["value"]):
+                        return self._json({"error": "explain already running"}, 409)
+                elif cmd == "explain" and req.get("value") == "clear":
+                    bw.clear_explained()   # forget sticky explanations
                 else:
                     return self._json({"error": "unknown command"}, 400)
             except (TypeError, ValueError) as e:

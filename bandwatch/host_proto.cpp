@@ -344,6 +344,7 @@ void handleCommand(char* line) {
         setPark((idx >= 0 && chanEnabled(idx)) ? idx : -1);
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"park\",\"park\":%d}\n", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
     } else if (!strcmp(line, "band")) {
+        const BandMode prev = bandMode;
         if (!strcmp(arg, "5g")) setBandMode(BAND_5G);
         else if (!strcmp(arg, "2.4g") || !strcmp(arg, "24g")) setBandMode(BAND_24G);
         else if (!strcmp(arg, "both")) setBandMode(BAND_BOTH);
@@ -352,6 +353,7 @@ void handleCommand(char* line) {
         else if (!strcmp(arg, "spec") || !strcmp(arg, "spectrum")) setBandMode(BAND_SPEC);
         if (modeSpec()) showPage(PAGE_SPECTRUM);
         else if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
+        if (bandMode != prev) showBandSplash(bandMode, kSplashShowMs);   // name the new mode before its scan page
         Serial.printf("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
         sendHello();
     } else if (!strcmp(line, "hunt")) {

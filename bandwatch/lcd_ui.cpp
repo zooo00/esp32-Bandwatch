@@ -97,6 +97,22 @@ lv_obj_t* spStatsLabel = nullptr;
 constexpr int kLcdSpecBars = 42;   // fixed LCD bar slots; the fine bins (up to 84) map onto these (max-per-group)
 lv_obj_t* spBars[kLcdSpecBars] = {nullptr};
 lv_obj_t* spFoot = nullptr;
+// mode splash: a full-screen name card flashed over whatever page is up when the band changes; while BOOT is held
+// it steps through the modes' splashes and release commits the one on screen (pollButton + showBandSplash)
+lv_obj_t* splashBg = nullptr;
+lv_obj_t* splashTitle = nullptr;
+lv_obj_t* splashSub = nullptr;
+uint32_t splashStartMs = 0, splashDurMs = 0;
+
+struct SplashText { const char* title; const char* sub; };
+constexpr SplashText kSplash[] = {   // indexed by BandMode (kBandName is too terse for a full-screen card)
+    {"5 GHz",         "Wi-Fi ch 36-165"},
+    {"2.4 GHz",       "Wi-Fi ch 1-13"},
+    {"Both bands",    "ch 1-13 + 36-165"},
+    {"BLE",           "Bluetooth Low Energy"},
+    {"Zigbee",        "802.15.4 ch 11-26"},   // "Zigbee / 15.4" is ~182 px at _28, just too wide for the card
+    {"Spectrum",      "raw 2.4 GHz energy"},
+};
 
 uint16_t apMaxWindow = 0;
 uint32_t apWindowStartedMs = 0;
@@ -160,7 +176,8 @@ lv_obj_t* make_header(lv_obj_t* page, const char* title, lv_obj_t** rightLabel) 
     lv_obj_t* header = make_panel(page, 26, PANEL_565, 4);
     lv_obj_t* t = make_label(header, title, c565(WHITE_565), &lv_font_montserrat_14);
     lv_obj_align(t, LV_ALIGN_LEFT_MID, 2, 0);
-    *rightLabel = make_label(header, "", c565(CYAN_565), &lv_font_montserrat_14);
+    // _12 (not _14): the right label carries live strings ("park 165 USB") that would collide with long titles.
+    *rightLabel = make_label(header, "", c565(CYAN_565), &lv_font_montserrat_12);
     lv_obj_align(*rightLabel, LV_ALIGN_RIGHT_MID, -2, 0);
     return header;
 }
@@ -189,7 +206,7 @@ lv_obj_t* make_bar(lv_obj_t* parent, int w, int h) {
 }
 
 void buildOverviewPage(lv_obj_t* page) {
-    make_header(page, "Bandwatch", &chanLabel);
+    make_header(page, "Activity", &chanLabel);   // was "Bandwatch" (the product name) - ambiguous next to Channels/Devices/...
 
     lv_obj_t* globalWrap = make_panel(page, 56, PANEL_565, 6);
     globalLabel = make_label(globalWrap, "0", c565(WHITE_565), &lv_font_montserrat_20);
@@ -210,10 +227,11 @@ void buildOverviewPage(lv_obj_t* page) {
     lv_obj_set_flex_flow(topBox, LV_FLEX_FLOW_COLUMN);
     make_label(topBox, "Top 3", c565(YELLOW_565), &lv_font_montserrat_12);
     for (int i = 0; i < 3; i++) {
-        lv_obj_t* row = make_row(topBox, 20, 5);
+        // "ch165 100" is ~72 px at _14: the label box must hold it on one line or it wraps into the row below.
+        lv_obj_t* row = make_row(topBox, 20, 4);
         topRows[i] = make_label(row, "--", c565(WHITE_565), &lv_font_montserrat_14);
-        lv_obj_set_width(topRows[i], 62);
-        topBars[i] = make_bar(row, 50, 10);
+        lv_obj_set_width(topRows[i], 72);
+        topBars[i] = make_bar(row, 42, 10);
         topRates[i] = make_label(row, "", c565(GREY_565), &lv_font_montserrat_12);
     }
 
@@ -277,9 +295,11 @@ void buildChannelsPage(lv_obj_t* page) {
         listName[i] = make_label(row, "", c565(WHITE_565), &lv_font_montserrat_12);
         lv_obj_set_width(listName[i], 20);
         lv_obj_set_style_text_align(listName[i], LV_TEXT_ALIGN_RIGHT, 0);
-        listBar[i] = make_bar(row, 14, 8);
+        lv_label_set_long_mode(listName[i], LV_LABEL_LONG_CLIP);   // "165" just fits; no wrapping into the next row
+        listBar[i] = make_bar(row, 11, 8);
         listVal[i] = make_label(row, "-", c565(GREY_565), &lv_font_montserrat_12);
-        lv_obj_set_width(listVal[i], 15);
+        lv_obj_set_width(listVal[i], 18);   // a maxed "100" is ~22 px: CLIP keeps it inside its column
+        lv_label_set_long_mode(listVal[i], LV_LABEL_LONG_CLIP);
     }
     listFoot = make_label(page, "", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(listFoot, LV_PCT(100));
@@ -335,7 +355,7 @@ void buildHuntPage(lv_obj_t* page) {
     lv_label_set_long_mode(huntNameLbl, LV_LABEL_LONG_CLIP);
     huntInfo1 = make_label(info, "", c565(GREY_565), &lv_font_montserrat_12);
     huntInfo2 = make_label(info, "", c565(GREY_565), &lv_font_montserrat_12);
-    huntHint = make_label(page, "hold BOOT to stop hunting", c565(GREY_565), &lv_font_montserrat_12);
+    huntHint = make_label(page, "hold to stop the hunt", c565(GREY_565), &lv_font_montserrat_12);   // one line: ~140 px in a 164 box
     lv_obj_set_width(huntHint, LV_PCT(100));
     lv_obj_set_style_text_align(huntHint, LV_TEXT_ALIGN_CENTER, 0);
 }
@@ -426,11 +446,39 @@ void showPage(int n) {
     }
 }
 
+namespace {
+inline bool splashActive() { return splashDurMs > 0 && (millis() - splashStartMs) < splashDurMs; }
+} // namespace
+
+void showBandSplash(BandMode m, uint32_t durMs) {
+    splashStartMs = millis();
+    splashDurMs = durMs;
+    lv_label_set_text(splashTitle, kSplash[m].title);
+    lv_label_set_text(splashSub, kSplash[m].sub);
+    lv_obj_remove_flag(splashBg, LV_OBJ_FLAG_HIDDEN);
+    const int n = lv_obj_get_child_count(lv_scr_act());      // keep it above any page just (re)built below it
+    if (n > 0) lv_obj_move_to_index(splashBg, n - 1);
+}
+
 void buildUi() {
     lv_obj_t* scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, c565(BG_565), 0);
     lv_obj_remove_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
     showPage(PAGE_OVERVIEW);
+
+    // Splash overlay: created after the first page so it starts above it; hidden until a band change.
+    splashBg = lv_obj_create(scr);
+    lv_obj_set_size(splashBg, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_pos(splashBg, 0, 0);
+    lv_obj_set_style_bg_color(splashBg, c565(BG_565), 0);
+    lv_obj_set_style_border_width(splashBg, 0, 0);
+    lv_obj_remove_flag(splashBg, LV_OBJ_FLAG_SCROLLABLE);
+    splashTitle = make_label(splashBg, "", c565(WHITE_565), &lv_font_montserrat_28);
+    lv_obj_align(splashTitle, LV_ALIGN_CENTER, 0, -14);
+    splashSub = make_label(splashBg, "", c565(GREY_565), &lv_font_montserrat_12);
+    lv_obj_align(splashSub, LV_ALIGN_CENTER, 0, 18);
+    lv_obj_add_flag(splashBg, LV_OBJ_FLAG_HIDDEN);
+    showBandSplash(bandMode, kSplashShowMs);   // name the boot mode while Wi-Fi is still coming up
 }
 
 namespace {
@@ -456,7 +504,10 @@ void chanHeaderText(char* buf, size_t n) {
     const char* band = (currentIdx >= 0 && is154(currentIdx)) ? "15.4" : (currentIdx >= 0 && is5g(currentIdx)) ? "5G" : "2.4G";
     if (!monitorReady)       snprintf(buf, n, "no ch%s", recTag());
     else if (parkedIdx >= 0) snprintf(buf, n, "park %u%s", kChannels[currentIdx], recTag());
-    else                     snprintf(buf, n, "%s ch%u%s", band, kChannels[currentIdx], recTag());
+    // In BOTH mode the per-band prefix would just flip ("2.4G ch6" / "5G ch36") and read like single-band mode;
+    // anchor the set instead - the number says which side (36+ = 5 GHz), and the strip below highlights it too.
+    else if (bandMode == BAND_BOTH) snprintf(buf, n, "BOTH ch%u%s", kChannels[currentIdx], recTag());
+    else                            snprintf(buf, n, "%s ch%u%s", band, kChannels[currentIdx], recTag());
 }
 
 void refreshOverview(float global) {
@@ -514,7 +565,7 @@ void refreshOverview(float global) {
     lv_label_set_text(specLabel, bandMode == BAND_5G ? "36-64   100-144   149-165"
                                  : bandMode == BAND_24G ? "2.4 GHz channels 1-13"
                                  : bandMode == BAND_154 ? "802.15.4 channels 11-26"
-                                 : "1-13 | 36-64 | 100-144 | 149-165");
+                                 : "1-13 + 36-165");   // the full list is ~190 px and would wrap in this panel
 
     const int curIdx = currentIdx < 0 ? 0 : currentIdx;
     const ChannelState& cur = channels[curIdx];
@@ -761,8 +812,8 @@ void refreshSystem(float global) {
     lv_label_set_text(sysLines[n++], buf);
     snprintf(buf, sizeof(buf), "heap %u kB free", static_cast<unsigned>(ESP.getFreeHeap() / 1024));
     lv_label_set_text(sysLines[n++], buf);
-    lv_label_set_text(sysLines[n++], "BOOT: tap=page  hold=mode");
-    lv_label_set_text(sysLines[n++], "(5g>2.4g>both>ble>15.4>spec)");
+    lv_label_set_text(sysLines[n++], "BOOT: tap = next page");
+    lv_label_set_text(sysLines[n++], "hold=walk, release picks");   // both lines are ~160 px max (CLIP past the box)
     for (; n < kSysLines; n++) lv_label_set_text(sysLines[n], "");
 }
 
@@ -862,6 +913,8 @@ void refreshUi() {
         }
     }
 
+    if (splashActive()) return;                    // the splash owns the screen until it fades out
+    lv_obj_add_flag(splashBg, LV_OBJ_FLAG_HIDDEN);
     if (!pageAvailable(currentPage) || !pages[currentPage]) showPage(currentPage + 1);
     switch (currentPage) {
         case PAGE_OVERVIEW: refreshOverview(global); break;
@@ -881,38 +934,56 @@ void uiTimerCb(lv_timer_t* t) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// BOOT button: tap = next page, hold = cycle band mode (or stop the hunt when on the hunt page)
+// BOOT button: tap = next page. Hold = walk the mode splashes one by one, release commits the one on
+// screen (holding from the hunt page stops the hunt first, then walks). See showBandSplash + kSplash*Ms.
 // ---------------------------------------------------------------------------------------------
 void pollButton() {
     static bool wasDown = false;
     static uint32_t downSince = 0;
-    static bool longFired = false;
+    static bool holding = false;      // long-press engaged: mode walk (or the hunt-stop that opens one)
+    static bool stepped = false;      // at least one band step during this hold (release re-splashes it)
+    static uint32_t lastStepMs = 0;
     static uint32_t lastEdgeMs = 0;
     const uint32_t now = millis();
     const bool down = digitalRead(kBootButtonPin) == LOW;
-    if (down != wasDown) {
+
+    if (down != wasDown) {                        // edge, debounced to 30 ms
         if (now - lastEdgeMs < 30) return;
         lastEdgeMs = now;
         wasDown = down;
         if (down) {
             downSince = now;
-            longFired = false;
-        } else if (!longFired) {
-            showPage(currentPage + 1);
+            holding = false;
+            stepped = false;
+        } else if (!holding) {
+            showPage(currentPage + 1);            // tap: next page
+            splashDurMs = 0;                      // ... without a lingering mode splash shadowing it
             refreshUi();
+        } else if (stepped) {                     // release commits the mode on screen: linger on its splash
+            showBandSplash(bandMode, kSplashTailMs);
         }
         return;
     }
-    if (down && !longFired && (now - downSince) >= kLongPressMs) {
-        longFired = true;
+
+    if (!down) return;
+    auto step = []() {                            // one walk-step: next band + its splash for one interval
+        setBandMode(static_cast<BandMode>((bandMode + 1) % kBandModes));
+        showBandSplash(bandMode, kSplashStepMs);
+        if (serialRoom(120)) Serial.printf("{\"t\":\"log\",\"msg\":\"button: band %s\"}\n", kBandName[bandMode]);
+        sendHello();
+        stepped = true;
+    };
+    if (!holding && now - downSince >= kLongPressMs) {   // hold engaged
+        holding = true;
+        lastStepMs = now;
         if (currentPage == PAGE_HUNT && hunt.active) {
-            stopHunt();
+            stopHunt();                           // keep holding to walk modes from here too
             if (serialRoom(80)) Serial.print("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":null,\"park\":0}\n");
-        } else {
-            setBandMode(static_cast<BandMode>((bandMode + 1) % kBandModes));
-            if (serialRoom(120)) Serial.printf("{\"t\":\"log\",\"msg\":\"button: band %s\"}\n", kBandName[bandMode]);
-            sendHello();
-        }
+        } else step();
+        refreshUi();
+    } else if (holding && now - lastStepMs >= kSplashStepMs) {   // keep holding: next splash
+        lastStepMs = now;
+        step();
         refreshUi();
     }
 }

@@ -26,6 +26,9 @@ constexpr int kUniqueSlots = 24;            // Best-effort unique transmitter sl
 constexpr int kRgbPin = 8;                  // Onboard WS2812B data pin (Waveshare ESP32-C5-LCD-1.47)
 constexpr int kBootButtonPin = 28;          // BOOT key = GPIO28 strap; free to use as an input after boot
 constexpr uint32_t kLongPressMs = 700;      // Hold BOOT this long to cycle band mode (or stop a hunt)
+constexpr uint32_t kSplashShowMs = 900;     // Mode splash duration for host- or boot-driven band changes
+constexpr uint32_t kSplashStepMs = 700;     // BOOT held: cadence of stepping through the splashes (== kLongPressMs, so it's even from button-down)
+constexpr uint32_t kSplashTailMs = 700;     // After release, linger on the chosen mode's splash
 constexpr uint32_t kApUpdateMs = 3000;      // AP count refresh cadence
 constexpr uint32_t kDevListMs = 2000;       // Device table -> host cadence
 constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not reported
@@ -421,5 +424,6 @@ extern uint16_t lastApSeen;
 void buildUi();
 void refreshUi();
 void showPage(int n);
+void showBandSplash(BandMode m, uint32_t durMs);   // flash the mode's name card before its scan page takes over
 void pollButton();
 void uiTimerCb(lv_timer_t* t);   // declared here so the core file can create the lv timer

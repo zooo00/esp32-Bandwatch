@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----------------------------------------------------------------------------
-NOTE ON SCOPE: This MIT license covers only this project's own contributions.
-This repository is a derivative of PierreGode/WaveshareESP32C6LCD, which
-publishes no license of its own; those upstream-derived portions are NOT
-relicensed here. See the NOTICE file for details.
----------------------------------------------------------------------------

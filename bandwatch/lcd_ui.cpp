@@ -499,6 +499,11 @@ inline bool logoActive()   { return logoSplash != nullptr && !lv_obj_has_flag(lo
 void showBandSplash(BandMode m, uint32_t durMs) {
     splashStartMs = millis();
     splashDurMs = durMs;
+    // A mode card supersedes any picture: hide the logo overlay so logoActive() reads false. Otherwise a
+    // photo shown earlier in the walk (the slot after Spectrum, or the page-wrap flash) stays "active"
+    // underneath this card, and a tap during the committed-mode splash is misread as photo-stepping.
+    if (logoSplash) lv_obj_add_flag(logoSplash, LV_OBJ_FLAG_HIDDEN);
+    logoThenModeCard = false;
     lv_label_set_text(splashTitle, kSplash[m].title);
     lv_label_set_text(splashSub, kSplash[m].sub);
     lv_obj_remove_flag(splashBg, LV_OBJ_FLAG_HIDDEN);

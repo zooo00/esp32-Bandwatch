@@ -224,6 +224,15 @@ no client of ours has been observed dropping. PMF-enabled networks ignore these 
 
 ## Versions
 
+- **1.10** — **Mode splash on the LCD.** A band change - button, host command or boot - flashes a full‑screen name
+  card for the new mode before its scan page takes over ("5 GHz / Wi-Fi ch 36‑165", "Spectrum / raw 2.4 GHz energy").
+  Holding BOOT walks the modes' cards one by one at an even 700 ms cadence; release commits the one on screen (holding
+  from the hunt page stops the hunt first, then keeps walking). With it came a layout pass measured against the real
+  font widths: header right labels shrank so "park 165 USB" no longer collides with the title, the main page's
+  product‑name title became *Activity*, Top‑3 rows widened (a wrapped "ch149 75" used to spill into the row below), a
+  maxed score stays inside its channels‑grid column, and dual‑wifi reads `BOTH chNN` instead of a flipping 2.4G/5G
+  prefix that looked like single‑band mode.
+
 - **1.9** — **Dashboard v2, and a review pass.** A fresh dashboard layout (`dashboard2.html`: left‑rail controls,
   one scrolling column instead of tabs, the active radio's device table open while the other two fold into "last seen"
   caches, hunt/deauth sharing one action bar) ships in parallel — `--ui v2` or `./host/run-v2.sh` puts it at `/`, and

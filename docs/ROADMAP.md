@@ -1,9 +1,20 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.9**.
+Planned work, open questions and known gaps. Current release: **v1.10**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
+
+---
+
+## 1.10 — mode splash (shipped)
+
+A band change - button hold/walk, host command or boot - flashes a full-screen name card for the new mode before its
+scan page takes over; holding BOOT walks the six cards at an even 700 ms cadence and release commits the one on
+screen. Open items:
+
+- **The splash is fire-and-forget.** It fades on its timer even if the picked radio (BLE/15.4) still needs a moment
+  to come up; a brief "starting..." state would close that gap.
 
 ---
 

@@ -581,7 +581,13 @@ class Bandwatch:
             st["drop"] = msg["drop"]
             now = time.time()
             if now - self._last_hist >= 1.0:
-                self.history.append((round(now, 1), msg["g"], c, msg["s"]))
+                # Trend history: timestamp, band-wide max (busiest channel), the channel sampled now + its
+                # score, and the band AVERAGE over channels sampled in the last ~15 s (≈2 sweeps). The max
+                # pins high in busy air; the average moves, giving a sense of overall load vs the one peak.
+                fresh = [e["s"] for e in st["channels"].values()
+                         if e.get("state") == 0 and now - e.get("t", 0) < 15]
+                avg = round(sum(fresh) / len(fresh), 1) if fresh else 0.0
+                self.history.append((round(now, 1), msg["g"], c, msg["s"], avg))
                 self._last_hist = now
             if msg.get("da") is not None and st["deauth"]:
                 st["deauth"]["sent"] = msg["da"]

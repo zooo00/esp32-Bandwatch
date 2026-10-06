@@ -251,6 +251,10 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.15.2** — Dashboard trend now shows two lines: the **busiest channel** (solid, tends to sit high) and
+  the **band average** across recently-sampled channels (dashed, moves), so the chart conveys overall load
+  vs the single peak instead of a near-flat top line. The host records the average in the trend history; the
+  card is retitled "Channel load over time" with a legend. Host+dashboard; kVersion bumped for parity.
 - **1.15.1** — Dashboard: the Wi‑Fi trend card was an unreadable solid blob — because it plots the *busiest*
   channel's score (which sits high in busy air), the flat 55%-opacity area fill covered most of the chart.
   Switched to a fade-out gradient fill so the line and its dips/spikes read clearly, renamed it "Busiest

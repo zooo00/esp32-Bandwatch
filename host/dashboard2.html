@@ -140,6 +140,7 @@
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; min-width: 0; }
 
   #zoneSpec { display: grid; gap: 14px; align-content: start; min-width: 0; }
+  #zoneSpec[hidden] { display: none; }   /* an id's display:grid overrides [hidden]'s display:none - restore it */
 
   .logcard summary { cursor: pointer; font-weight: 650; font-size: 14.5px; }
   .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--page); border-radius: 8px; padding: 10px 13px; margin-top: 9px; max-height: min(320px, 40vh); overflow-y: auto; white-space: pre-wrap; word-break: break-word; }

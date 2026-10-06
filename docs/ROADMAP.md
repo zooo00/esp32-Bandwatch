@@ -1,9 +1,26 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.7**.
+Planned work, open questions and known gaps. Current release: **v1.9**.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
+
+---
+
+## 1.9 — dashboard v2 (shipped, running in parallel)
+
+`dashboard2.html`: controls grouped into a sticky left rail, one scrolling column instead of five tabs, the active
+radio's device table open while the other two fold into "last seen" caches, and hunt/deauth sharing a single action
+bar. Same data, same zero‑dependency hand‑rolled charts; served alongside the classic page — `--ui v2` /
+`./host/run-v2.sh` flips which one sits at `/`, and both pages cross‑link. The SD pull flow landed with it: card
+files stream back over serial (`sdread`) and become downloadable from the new UI.
+
+Open items:
+
+- **Promote it.** Once v2 has lived with you for a while, make it the default route and drop the classic page (and
+  its cross‑links) rather than carrying both forever.
+- **SD pull still stops at download.** One step away from opening the pulled pcap in Wireshark directly; a tiny
+  "open" affordance or an in‑page frame counter would close that gap.
 
 ---
 
@@ -12,12 +29,13 @@ with its numbers; anything assumed is labelled as such.
 A `spec` mode runs the 15.4 radio's `esp_ieee802154_energy_detect()` across channels 11–26 for a true
 2.4 GHz RF-power reading (dBm, no decode), and the host flags per-bin energy that no recently-decoded
 Wi-Fi/BLE/Zigbee emitter explains — evidence of an emitter whose protocol this radio can't demodulate, not
-an identification. See [DEVELOPER.md §18](DEVELOPER.md). Known limits, not yet addressed:
+an identification. See [DEVELOPER.md §18](DEVELOPER.md). Known limits (the coarse one was addressed in 1.8):
 
 - **2.4 GHz only.** The energy-detect primitive is a 15.4 feature; Wi-Fi/5 GHz expose no raw-energy API, so
   there is no swept analyzer above 2.4 GHz without moving off the prebuilt core.
-- **Coarse resolution.** 16 fixed 5 MHz bins (the 15.4 channel grid). Sub-channel or swept-centre-frequency
-  resolution would need driver work and is unverified.
+- **Coarse resolution — addressed in 1.8.** Was 16 fixed 5 MHz bins (the 15.4 channel grid); v1.8 sweeps off-grid
+  at a selectable 1/2/5 MHz step (`specstep`). Sub-MHz swept-centre-frequency resolution would still need driver
+  work and is unverified.
 - **Correlation is time-separated.** One radio can't decode and energy-scan at once, so "unexplained" is
   relative to the last Wi-Fi/BLE/15.4 sweep. An automatic round-robin (dwell in `spec`, periodically dip into
   the decode modes to refresh the "known" picture) is a possible future improvement.

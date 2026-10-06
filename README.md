@@ -106,11 +106,19 @@ Notes for this board:
 ```sh
 python3 host/bandwatch_host.py            # http://127.0.0.1:8080 , pcaps in ./captures
 python3 host/bandwatch_host.py --port /dev/cu.usbmodem21101 --http 8080 --captures ~/pcaps
+./host/run-v2.sh                          # the new dashboard at "/" (classic moves to /classic)
 ```
 
 The page polls the device state once a second: band and park controls, capture start/stop, stat tiles, a busy‑score
 bar chart per channel (grouped by band segment, current channel marked), a 10‑minute trend of the max score, a
 per‑channel table and the device log.
+
+A second layout ships alongside it (`dashboard2.html`, always served at `/v2`): controls grouped into a left rail,
+one scrolling column instead of tabs, only the active radio's device table open — the other two fold away as
+"last seen" caches — and hunt/deauth sharing one action bar. `--ui v2` (or `run-v2.sh`) puts it at `/`; both pages
+cross‑link, so you can flip between them without restarting until you are ready to promote one. The new page also
+shows the SD pull flow: every file on the card gets a *pull to Mac* button that streams it back over serial and
+offers a download.
 
 The dashboard is served on `127.0.0.1` only. `/api/cmd` has no authentication and can start a deauth attack,
 so think before using `--bind` to expose it beyond the loopback interface.
@@ -158,10 +166,11 @@ addresses) have no vendor by design.
 Everything needed is in this repository. Clone it, run `./setup.sh`, then `./build.sh --upload`. The only
 per‑machine state is the Arduino core and libraries that `setup.sh` installs.
 
-## Tuning knobs (`bandwatch/bandwatch.cpp`)
+## Tuning knobs (`bandwatch/bandwatch_core.h`, SD in `sd_sink.cpp`)
 
 `kChannels[]`, `kDwellMs` (220), `kStrongThresholdDbm` (−65), `kBusyEmaAlpha` (0.22), `kLongPressMs` (700),
-`kCapSlots` / `kCapMaxLen` (capture ring: 20 × 1600 B), `kCountryCode` ("EU", only affects the regulatory table),
+`kCapSlotsMax/Min` / `kCapMaxLen` (capture ring: up to 20 × 1600 B, sized down while the card is mounted),
+`kCountryCode` ("EU", only affects the regulatory table),
 `kDeauthMaxMs` (5 min, the deauth dead‑man's switch), `kSdCsPin` (4), `kSdSpiHz` (20 MHz), `kSdBufSize` (4 KB,
 matches the FATFS sector size), `kSdFlushMs` (5 s), `kSdBudgetUs` (8 ms of SD writing per loop).
 
@@ -214,6 +223,28 @@ no client of ours has been observed dropping. PMF-enabled networks ignore these 
 - Not a replacement for professional RF tools.
 
 ## Versions
+
+- **1.9** — **Dashboard v2, and a review pass.** A fresh dashboard layout (`dashboard2.html`: left‑rail controls,
+  one scrolling column instead of tabs, the active radio's device table open while the other two fold into "last seen"
+  caches, hunt/deauth sharing one action bar) ships in parallel — `--ui v2` or `./host/run-v2.sh` puts it at `/`, and
+  both pages cross‑link. The host finally reassembles the `sdread` file chunks it had been dropping into the log pane:
+  `S <n> <base64>` lines now become a real pcap under `captures/`, served back for download (the new UI's pull button).
+  Firmware review fixes: the internal‑kick deauth sequence now encodes like its outer path — the old bytes put the
+  sequence's low nibble into the *fragment* field and repeated every 256 frames; `finishDwell()` lost the spec branch
+  left unreachable by v1.8 (in fine spectrum, `currentIdx` indexes the bin grid, not the channels); Wi‑Fi/BLE hunt hits
+  check `kind == 0`, so a stale MAC from an earlier hunt can no longer light up a 15.4 key hunt; and `cap`/`sdcap` are
+  refused in spectrum mode with a reason line, where no RX is armed (an empty file growing forever).
+
+- **1.8** — **Fine‑resolution spectrum.** `spec` mode leaves the fixed 16‑bin grid: the sweep now walks
+  2400–2483 MHz at a selectable 1/2/5 MHz step (`specstep`, on the LCD and in the dashboard), with a per‑dwell cursor,
+  max‑hold bins, and a waterfall that finally resolves sub‑channel emitters.
+
+- **1.7** — **The spectrum analyzer.** A `spec` mode reads true 2.4 GHz RF power (dBm) from the 802.15.4 energy
+  detector across channels 11–26, and the host flags bins whose sustained energy no recently‑decoded Wi‑Fi/BLE/Zigbee
+  device explains — evidence of an emitter this radio can't demodulate, not an identification. The 1.7.x patches fixed
+  the readings themselves: a reverted loop‑driven hop (the ED window was being re‑armed too often to integrate),
+  widened windows so the spectrum tracks the Wi‑Fi band's shape, RF‑energy colours that read on both themes, and a
+  receiver‑blocked warning when every frequency's noise floor is elevated.
 
 - **1.6** — **The deauth attack transmits.** Settled with an external witness (`tools/witness/`: an ESP32-S3
   in monitor mode that never transmits, plus `verify.py` to drive both boards and report from the air). Two

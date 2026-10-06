@@ -1,5 +1,6 @@
-// Bandwatch 5G - Wi-Fi activity meter for the Waveshare ESP32-C5-LCD-1.47.
-// Observes 802.11 traffic on the 5 GHz band in promiscuous mode and shows a busy score per channel.
+// Bandwatch - Wi-Fi / BLE / Zigbee activity meter for the Waveshare ESP32-C5-LCD-1.47.
+// Observes 802.11 (2.4 + 5 GHz), BLE and 802.15.4 in promiscuous mode, plus a raw-energy spectrum sweep,
+// and shows a busy score per channel.
 // Streams JSON stats (and optionally raw frames) over USB serial for host/bandwatch_host.py.
 #include "Display_ST7789.h"
 #include "LVGL_Driver.h"

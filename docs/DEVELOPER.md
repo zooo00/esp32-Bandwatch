@@ -167,6 +167,11 @@ per-device RSSI history, hunt state), an HTTP server exposes `GET /api/state` (e
 for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Files are named `bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` /
 `bandwatch-802154-…` in `--captures` (default `./captures`).
 
+`captures/` is **git-ignored** — it holds your recorded pcaps, not source, so it is the one thing a fresh
+`git clone` on another machine does not reproduce. Everything else regenerates (`build/` from `./build.sh`,
+the toolchain from `./setup.sh`, `~/.cache/bandwatch/oui.csv` on first host run); the recordings do not. Copy
+them by hand if you want them on the other machine.
+
 The deauth command starts a broadcast deauth attack (`cmd: "deauth", bssid: "XX:XX..."`), while the dca command 
 starts a targeted attack on one client (`cmd: "dca", client_mac: "...", ap_bssid: "..."`).
 

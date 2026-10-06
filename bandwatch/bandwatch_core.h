@@ -29,6 +29,8 @@ constexpr uint32_t kLongPressMs = 700;      // Hold BOOT this long to cycle band
 constexpr uint32_t kSplashShowMs = 900;     // Mode splash duration for host- or boot-driven band changes
 constexpr uint32_t kSplashStepMs = 700;     // BOOT held: cadence of stepping through the splashes (== kLongPressMs, so it's even from button-down)
 constexpr uint32_t kSplashTailMs = 700;     // After release, linger on the chosen mode's splash
+constexpr uint32_t kBootLogoMs = 2000;      // Boot picture (bootlogo/) shown before the boot mode card
+constexpr uint32_t kWrapLogoMs = 5000;      // How long a flashed picture stays up (page wrap, or stopped on the walk's photo slot)
 constexpr uint32_t kApUpdateMs = 3000;      // AP count refresh cadence
 constexpr uint32_t kDevListMs = 2000;       // Device table -> host cadence
 constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not reported

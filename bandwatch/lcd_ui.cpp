@@ -4,7 +4,10 @@
 // pollButton from Bandwatch_Loop); no other task touches LVGL.
 #include "bandwatch.h"        // pulls in lvgl
 #include "bandwatch_core.h"
+#include "Display_ST7789.h"   // LCD_WIDTH/LCD_HEIGHT for the boot logo
 #include "surv_ouis.h"   // kSurvName for the Devices page
+#include "boot_logos.h"   // kBootLogoData*: boot pictures (RGB565, live in flash)
+#include <esp_random.h>    // esp_fill_random: entropy-backed pick, no seeding to worry about
 
 // Shared with host_proto.cpp (the "band" command + the dwell heartbeat); declared in bandwatch_core.h.
 int currentPage = 0;
@@ -103,6 +106,48 @@ lv_obj_t* splashBg = nullptr;
 lv_obj_t* splashTitle = nullptr;
 lv_obj_t* splashSub = nullptr;
 uint32_t splashStartMs = 0, splashDurMs = 0;
+
+// Boot logos: full-screen pictures (bootlogo/) shown at boot and when the page selector wraps around.
+// The pixels are const in flash; LVGL draws them from there, so RAM cost is only the existing draw buffer.
+lv_obj_t* logoSplash = nullptr;
+uint32_t logoSplashUntilMs = 0;
+int logoIdx = -1;               // picture on screen right now (for stepping through them)
+bool logoThenModeCard = false;   // boot: hand off to the mode card when the picture fades
+
+#define BW_LOGO(i)   {.header = {.magic = LV_IMAGE_HEADER_MAGIC, .cf = LV_COLOR_FORMAT_RGB565, \
+                                .flags = 0, .w = LCD_WIDTH, .h = LCD_HEIGHT, .stride = LCD_WIDTH * 2}, \
+                      .data_size = sizeof(kBootLogoData##i), .data = kBootLogoData##i}
+const lv_image_dsc_t kBootLogos[K_BOOT_LOGO_COUNT] = { K_BOOT_LOGO_LIST };   // list stays in sync (boot_logos.h)
+#undef BW_LOGO
+
+// Random pick; skip an immediate repeat while there is a choice.
+int logoPick(int prevIdx) {
+    uint32_t r;
+    esp_fill_random(&r, sizeof(r));
+    int i = static_cast<int>(r % K_BOOT_LOGO_COUNT);
+    if (K_BOOT_LOGO_COUNT > 1 && i == prevIdx) i = (i + 1) % K_BOOT_LOGO_COUNT;
+    return i;
+}
+
+// Show picture idx full-screen for durMs. Boot passes thenModeCard so the mode card still names the boot
+// band afterwards; a page-wrap tap just flashes one. Taps while it is up step to the next (see pollButton).
+void showLogoPic(int idx, uint32_t durMs, bool thenModeCard) {
+    if (!logoSplash) {
+        logoSplash = lv_image_create(lv_scr_act());
+        lv_obj_add_flag(logoSplash, LV_OBJ_FLAG_HIDDEN);
+    }
+    logoIdx = idx;
+    lv_image_set_src(logoSplash, &kBootLogos[idx]);
+    const int n = lv_obj_get_child_count(lv_scr_act());   // above any page or mode card just (re)built below it
+    if (n > 0) lv_obj_move_to_index(logoSplash, n - 1);
+    logoThenModeCard = thenModeCard;
+    lv_obj_remove_flag(logoSplash, LV_OBJ_FLAG_HIDDEN);
+    logoSplashUntilMs = millis() + durMs;
+}
+
+void showLogoSplash(uint32_t durMs, bool thenModeCard) {
+    showLogoPic(logoPick(logoIdx), durMs, thenModeCard);   // random, no immediate repeat
+}
 
 struct SplashText { const char* title; const char* sub; };
 constexpr SplashText kSplash[] = {   // indexed by BandMode (kBandName is too terse for a full-screen card)
@@ -448,6 +493,7 @@ void showPage(int n) {
 
 namespace {
 inline bool splashActive() { return splashDurMs > 0 && (millis() - splashStartMs) < splashDurMs; }
+inline bool logoActive()   { return logoSplash != nullptr && !lv_obj_has_flag(logoSplash, LV_OBJ_FLAG_HIDDEN); }
 } // namespace
 
 void showBandSplash(BandMode m, uint32_t durMs) {
@@ -478,7 +524,10 @@ void buildUi() {
     splashSub = make_label(splashBg, "", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_align(splashSub, LV_ALIGN_CENTER, 0, 18);
     lv_obj_add_flag(splashBg, LV_OBJ_FLAG_HIDDEN);
-    showBandSplash(bandMode, kSplashShowMs);   // name the boot mode while Wi-Fi is still coming up
+
+    // Boot logo on top of everything: a random picture for kBootLogoMs, then refreshUi() hides it and
+    // shows the boot mode card (showBandSplash) while Wi-Fi is still coming up.
+    showLogoSplash(kBootLogoMs, true);
 }
 
 namespace {
@@ -928,6 +977,15 @@ void refreshUi() {
         }
     }
 
+    if (logoActive()) {                          // picture: owns the screen until its timer runs out
+        if (millis() < logoSplashUntilMs) return;
+        lv_obj_add_flag(logoSplash, LV_OBJ_FLAG_HIDDEN);
+        if (logoThenModeCard) {                     // boot only: name the mode while Wi-Fi is still coming up
+            logoThenModeCard = false;
+            showBandSplash(bandMode, kSplashShowMs);
+        }
+        return;
+    }
     if (splashActive()) return;                    // the splash owns the screen until it fades out
     lv_obj_add_flag(splashBg, LV_OBJ_FLAG_HIDDEN);
     if (!pageAvailable(currentPage) || !pages[currentPage]) showPage(currentPage + 1);
@@ -949,14 +1007,17 @@ void uiTimerCb(lv_timer_t* t) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// BOOT button: tap = next page. Hold = walk the mode splashes one by one, release commits the one on
-// screen (holding from the hunt page stops the hunt first, then walks). See showBandSplash + kSplash*Ms.
+// BOOT button: tap = next page. Hold = walk the mode splashes one by one - with a photo stop after
+// Spectrum (the last mode) before wrapping; release commits the one on screen, and stopping on the
+// photo lets taps step through the pictures. Holding from the hunt page stops the hunt first, then walks.
+// See showBandSplash + kSplash*Ms, walkPhoto below.
 // ---------------------------------------------------------------------------------------------
 void pollButton() {
     static bool wasDown = false;
     static uint32_t downSince = 0;
     static bool holding = false;      // long-press engaged: mode walk (or the hunt-stop that opens one)
     static bool stepped = false;      // at least one band step during this hold (release re-splashes it)
+    static bool walkPhoto = false;    // current walk position is the photo slot (after Spectrum, before the wrap)
     static uint32_t lastStepMs = 0;
     static uint32_t lastEdgeMs = 0;
     const uint32_t now = millis();
@@ -970,21 +1031,38 @@ void pollButton() {
             downSince = now;
             holding = false;
             stepped = false;
+            walkPhoto = false;
         } else if (!holding) {
-            showPage(currentPage + 1);            // tap: next page
-            splashDurMs = 0;                      // ... without a lingering mode splash shadowing it
+            const int prev = currentPage;
+            if (logoActive()) {                   // stopped on a picture instead of a scan page: step through them
+                showLogoPic((logoIdx + 1) % K_BOOT_LOGO_COUNT, kWrapLogoMs, false);   // loops at the end
+            } else {
+                showPage(prev + 1);               // tap: next page
+                splashDurMs = 0;                  // ... without a lingering mode splash shadowing it
+                if (prev != 0 && currentPage == 0)   // wrapped past the last page on the way around: flash one
+                    showLogoSplash(kWrapLogoMs, false);
+            }
             refreshUi();
         } else if (stepped) {                     // release commits the mode on screen: linger on its splash
-            showBandSplash(bandMode, kSplashTailMs);
+            if (walkPhoto)                        // ... stopped on the photo slot: keep it up so taps step through pictures
+                showLogoPic(logoIdx, kWrapLogoMs, false);
+            else
+                showBandSplash(bandMode, kSplashTailMs);
             saveSettings();                        // persist the committed mode once, not per walk-step (C3)
         }
         return;
     }
 
     if (!down) return;
-    auto step = []() {                            // one walk-step: next band + its splash for one interval
-        setBandMode(static_cast<BandMode>((bandMode + 1) % kBandModes));
-        showBandSplash(bandMode, kSplashStepMs);
+    auto step = [&]() {                           // one walk-step: next position for one interval (modes, then the photo slot)
+        const bool toPhoto = !walkPhoto && bandMode == kBandModes - 1;   // after Spectrum comes the picture, not another mode
+        if (!toPhoto) {
+            setBandMode(walkPhoto ? BandMode(0) : static_cast<BandMode>(bandMode + 1));
+            showBandSplash(bandMode, kSplashStepMs);   // (release still names the committed mode with the tail card)
+        } else {
+            showLogoSplash(kSplashStepMs, false);      // photo slot: one random picture for the interval
+        }
+        walkPhoto = toPhoto;
         if (serialRoom(120)) Serial.printf("{\"t\":\"log\",\"msg\":\"button: band %s\"}\n", kBandName[bandMode]);
         sendHello();
         stepped = true;

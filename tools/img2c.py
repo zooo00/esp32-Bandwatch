@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Convert images (JPEG/PNG) to const RGB565 C arrays for the LCD boot logo splash.
+
+Usage: img2c.py <out.h> [width height] <image...>
+  - resamples each image to width x height with sips if it is not already that size
+    (default panel: 172x320); decodes PNGs in pure Python, no PIL needed
+  - writes <out.h> with static const uint8_t arrays kBootLogoData0..N-1
+    (RGB565 little-endian) plus K_BOOT_LOGO_COUNT
+
+The arrays live in flash; LVGL draws them from there, so RAM cost is only the
+existing draw buffer. Regenerate after changing bootlogo/:
+  python3 tools/img2c.py bandwatch/boot_logos.h 172 320 bootlogo/boot_*.png
+"""
+import struct
+import subprocess
+import sys
+import tempfile
+import zlib
+
+
+def to_png(src, w, h):
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as f:
+        out = f.name
+    subprocess.run(
+        ["sips", "-s", "format", "png", "--resampleHeightWidth", str(h), str(w), src, "--out", out],
+        check=True, capture_output=True)
+    return out
+
+
+def read_png(path):
+    """Minimal PNG decoder: 8-bit, color types 0/2/4/6. Returns (w, h, rows of RGB tuples)."""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise SystemExit(f"{path}: not a PNG")
+    pos, idat, w = 8, b"", None
+    while pos < len(data):
+        (length,) = struct.unpack(">I", data[pos:pos + 4])
+        ctype = data[pos + 4:pos + 8]
+        body = data[pos + 8:pos + 8 + length]
+        pos += 12 + length
+        if ctype == b"IHDR":
+            w, h, depth, color = struct.unpack(">IIBB", body[:10])
+            if depth != 8:
+                raise SystemExit(f"{path}: only 8-bit PNGs supported")
+        elif ctype == b"IDAT":
+            idat += body
+        elif ctype == b"IEND":
+            break
+    if w is None:
+        raise SystemExit(f"{path}: no IHDR")
+    raw = zlib.decompress(idat)
+    channels = {0: 1, 2: 3, 4: 2, 6: 4}[color]
+    stride = w * channels
+    out_rows, prev = [], bytearray(stride)
+    for y in range(h):
+        ftype = raw[y * (stride + 1)]
+        line = bytearray(raw[y * (stride + 1) + 1:(y + 1) * (stride + 1)])
+        if ftype == 1:      # Sub
+            for i in range(channels, stride):
+                line[i] = (line[i] + line[i - channels]) & 0xFF
+        elif ftype == 2:    # Up
+            for i in range(stride):
+                line[i] = (line[i] + prev[i]) & 0xFF
+        elif ftype == 3:    # Average
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                line[i] = (line[i] + ((left + prev[i]) >> 1)) & 0xFF
+        elif ftype == 4:    # Paeth
+            for i in range(stride):
+                left = line[i - channels] if i >= channels else 0
+                up = prev[i]
+                ul = prev[i - channels] if i >= channels else 0
+                p = left + up - ul
+                pa, pb, pc = abs(p - left), abs(p - up), abs(p - ul)
+                ref = left if (pa <= pb and pa <= pc) else (up if pb <= pc else ul)
+                line[i] = (line[i] + ref) & 0xFF
+        prev = line
+        if color == 2:
+            out_rows.append([tuple(line[x * 3:x * 3 + 3]) for x in range(w)])
+        elif color == 6:
+            out_rows.append([tuple(line[x * 4:x * 4 + 3]) for x in range(w)])
+        elif color == 0:
+            out_rows.append([(line[x],) * 3 for x in range(w)])
+        else:               # grayscale + alpha
+            out_rows.append([(line[x * 2],) * 3 for x in range(w)])
+    return w, h, out_rows
+
+
+def to_rgb565(path, w, h):
+    """One image -> bytearray of little-endian RGB565 pixels (w*h*2 bytes)."""
+    if path.lower().endswith((".jpg", ".jpeg")):
+        src = to_png(path, w, h)
+    else:
+        pw, ph = peek_size(path)      # already sized? then skip sips (no resampling of a PNG)
+        src = path if (pw, ph) == (w, h) else to_png(path, w, h)
+    _, _, rows = read_png(src)
+    px = bytearray()
+    for row in rows:
+        for r, g, b in row:
+            px += struct.pack("<H", ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3))
+    return px
+
+
+def peek_size(path):
+    with open(path, "rb") as f:
+        data = f.read(33)
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        w, h = struct.unpack(">II", data[16:24])
+        return w, h
+    return 0, 0   # not a PNG; force the sips path
+
+
+def main():
+    if len(sys.argv) < 3:
+        sys.exit(__doc__)
+    out = sys.argv[1]
+    args = sys.argv[2:]
+    images = [a for a in args if not a.isdigit()]
+    nums = [int(a) for a in args if a.isdigit()]
+    w, h = (nums[0], nums[1]) if len(nums) >= 2 else (172, 320)
+    if not images:
+        raise SystemExit("no input images")
+
+    with open(out, "w") as f:
+        f.write("#pragma once\n#include <stdint.h>\n\n")
+        f.write(f"// Boot logos: {len(images)} pictures from bootlogo/ resampled to the full {w}x{h}\n")
+        f.write("// panel, RGB565 little-endian. Generated by tools/img2c.py - do not edit;\n")
+        f.write("// regenerate after changing the images (see the usage at the top of that script).\n")
+        total = 0
+        for i, img in enumerate(images):
+            px = to_rgb565(img, w, h)
+            total += len(px)
+            f.write(f"static const uint8_t kBootLogoData{i}[{w} * {h} * 2] = {{\n")
+            for j in range(0, len(px), 16):
+                f.write("    " + ", ".join(f"0x{b:02X}" for b in px[j:j + 16]) + ",\n")
+            f.write("};\n\n")
+        # BW_LOGO is defined where the lv_image_dsc_t table lives (lcd_ui.cpp); keep list and count in sync.
+        f.write("#define K_BOOT_LOGO_LIST   " + ", ".join(f"BW_LOGO({i})" for i in range(len(images))) + "\n")
+        f.write(f"#define K_BOOT_LOGO_COUNT {len(images)}\n")
+    print(f"wrote {out}: {len(images)} x {w}x{h} RGB565, {total // 1024} KB total in flash")
+
+
+if __name__ == "__main__":
+    main()

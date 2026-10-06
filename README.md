@@ -224,6 +224,12 @@ no client of ours has been observed dropping. PMF-enabled networks ignore these 
 
 ## Versions
 
+- **1.12** — **Boot photos.** Eight pictures from `bootlogo/` are embedded in the firmware as RGB565 (~860 KB of flash,
+  no RAM cost - LVGL draws the const arrays straight from flash). A random one shows full-screen for two seconds at boot
+  before the mode card; the BOOT hold-walk gains a photo stop after Spectrum - release there and it lingers five seconds
+  while taps step through the pictures in order. Tapping past the last page flashes one on the way around too.
+  Regenerate `bandwatch/boot_logos.h` after changing the images:
+  `python3 tools/img2c.py bandwatch/boot_logos.h 172 320 bootlogo/boot_*.png`.
 - **1.10** — **Mode splash on the LCD.** A band change - button, host command or boot - flashes a full‑screen name
   card for the new mode before its scan page takes over ("5 GHz / Wi-Fi ch 36‑165", "Spectrum / raw 2.4 GHz energy").
   Holding BOOT walks the modes' cards one by one at an even 700 ms cadence; release commits the one on screen (holding

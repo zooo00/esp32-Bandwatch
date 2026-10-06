@@ -1,7 +1,8 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.11** (batch one: C3 + C6 + C8 shipped;
-C1/C2/C4/C5/C7/C9/C10/C11 still candidates, C12 the exit ramp).
+Planned work, open questions and known gaps. Current release: **v1.12** (boot photos - an LCD nicety, no candidate
+features moved). Batch one shipped in v1.11 (C3 + C6 + C8); C1/C2/C4/C5/C7/C9/C10/C11 still candidates, C12 the exit
+ramp.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
@@ -338,6 +339,24 @@ limited to a dwell field; banks RAM-headroom knowledge for the rest. Batch two: 
 (surveillance evidence), and its design questions deserve their own release. Then C2 (stage 1 before stage 2), C4 (with the
 shared LED decision from 1.6.1/C10), C5, then C7 and C9 as natural attachés of the hunt/deauth families. C11 rides any host
 change; C12 when BLE coverage is the wall left.
+
+---
+
+## 1.12 — boot photos (shipped)
+
+Eight pictures (`bootlogo/boot_*.png`, already panel-sized; sources in `bootlogo/orginals/`) are embedded as RGB565
+arrays by `tools/img2c.py` -> `bandwatch/boot_logos.h`. A random one shows full-screen for 2 s at boot (then the mode
+card), and the BOOT hold-walk gains a stop after Spectrum - release on it and the picture lingers 5 s while taps step
+through them in order; tapping past the last page flashes one on the way around.
+
+- **Flash, not RAM.** ~860 KB of const pixels in flash (app image now ~2.77 MB of a 3.14 MB partition, ~88%); LVGL draws
+  from there, so the only RAM cost is the existing draw buffer. Regenerate after changing `bootlogo/`:
+  `python3 tools/img2c.py bandwatch/boot_logos.h 172 320 bootlogo/boot_*.png`.
+
+Open items:
+
+- **Headroom.** ~370 KB of app partition left - a handful more pictures (or bigger ones) and the budget bites; a
+  compressed format or palette pass would buy room if the set grows.
 
 ---
 

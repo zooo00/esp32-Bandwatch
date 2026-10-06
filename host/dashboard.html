@@ -343,10 +343,6 @@
       </div>
       <div class="chart-wrap"><svg id="spec" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="specTip"></div></div>
     </section>
-    <section class="card" style="margin-bottom:14px">
-      <h2>5 GHz — traffic activity <small>busy score 0–100 from decoded packets · <em>not</em> RF energy (no 5 GHz energy sensor)</small></h2>
-      <div class="chart-wrap"><svg id="spec5" viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg><div class="tip" id="spec5Tip"></div></div>
-    </section>
     <div class="grid2" style="margin-bottom:14px">
       <section class="card">
         <h2>2.4 GHz waterfall <small>frequency across · time down, newest at the bottom</small></h2>
@@ -368,7 +364,7 @@
         <div id="explained"></div>
       </section>
     </div>
-    <p class="note"><b>Two different measurements, one view.</b> The single radio scans one band at a time, so each chart is as of its last scan — the status row above shows how fresh each is, with a button to re-scan it. <b>2.4 GHz</b> is <b>real RF energy</b> (dBm) from the 802.15.4 energy detector: true power whether or not anything decodes. <b>5 GHz</b> has no energy sensor on this chip, so it shows <b>traffic activity</b> (a 0–100 busy score from decoded Wi‑Fi) — a proxy for occupancy, not power; the two axes are not comparable. <b>Unexplained energy</b> flags 2.4 GHz bins with sustained power that no recently-decoded Wi‑Fi/BLE/Zigbee device accounts for — evidence of an emitter (proprietary link, video sender, RC/drone controller, microwave, interferer), <em>not</em> an identification.</p>
+    <p class="note"><b>2.4 GHz RF energy.</b> This is <b>real RF power</b> (dBm) from the 802.15.4 energy detector — true energy whether or not anything decodes. (5 GHz has no energy sensor on this chip; its occupancy lives under the 5 GHz Wi‑Fi band as a traffic busy score, a different measurement.) <b>Unexplained energy</b> flags 2.4 GHz bins with sustained power that no recently-decoded Wi‑Fi/BLE/Zigbee device accounts for — evidence of an emitter (proprietary link, video sender, RC/drone controller, microwave, interferer), <em>not</em> an identification.</p>
   </div>
 </div>
 
@@ -490,7 +486,6 @@
   document.addEventListener('keydown', (e) => { if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('#pauseBtn').click(); } });
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
   document.addEventListener('click', (e) => { if (e.target.closest('[data-startspec]')) post({ cmd: 'band', value: 'spec' }); });
-  document.addEventListener('click', (e) => { if (e.target.closest('[data-start5g]')) post({ cmd: 'band', value: '5g' }); });
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-specstep]'); if (b) post({ cmd: 'specstep', value: +b.dataset.specstep }); });
   // Deauth button: broadcast mode (kick every station on an AP)
   document.addEventListener('click', (e) => {
@@ -921,19 +916,16 @@
   }
 
   function renderSpecStatus(s) {
-    const w = s.wide || {}, f = s.fine || {};
+    const f = s.fine || {};
     const txt = a => a == null ? 'never' : a < 1.5 ? 'live' : `${Math.round(a)}s ago`;
     const e = s.band === 'spec' ? 'live' : txt(f.age);
-    const a = (s.band === '5g' || s.band === 'both') ? 'live' : txt(w.activity5_age);
     const pill = v => v === 'live' ? 'pill on' : 'pill';
     const step = s.spec_step || f.step || 2;
     const toggles = [1, 2, 5].map(k => `<button class="${k === step ? 'small' : 'ghost'}" data-specstep="${k}">${k} MHz</button>`).join(' ');
     $('#specStatus').innerHTML =
       `<span class="${pill(e)}"><span class="dot"></span>2.4 GHz energy: ${e}</span>` +
       (s.band === 'spec' ? '' : `<button class="small" data-startspec>Scan 2.4 GHz</button>`) +
-      `<span style="opacity:.7;margin-left:4px">resolution</span>${toggles}` +
-      `<span class="${pill(a)}" style="margin-left:4px"><span class="dot"></span>5 GHz activity: ${a}</span>` +
-      ((s.band === '5g' || s.band === 'both') ? '' : `<button class="small" data-start5g>Scan 5 GHz</button>`);
+      `<span style="opacity:.7;margin-left:4px">resolution</span>${toggles}`;
   }
 
   function renderEnergy24(s) {
@@ -985,35 +977,9 @@
     }
   }
 
-  function renderActivity5(s) {
-    const svg = $('#spec5'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 36, padR = 12, padT = 18, padB = 42;
-    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    const act = (s.wide && s.wide.activity5) || [];
-    if (!act.length) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">No 5 GHz scan yet — click “Scan 5 GHz” above.</text>'; return; }
-    const plotW = W - padL - padR, plotH = H - padT - padB, yOf = v => padT + plotH - Math.max(0, Math.min(100, v)) / 100 * plotH;
-    const groupOf = ch => ch <= 48 ? 0 : ch <= 64 ? 1 : ch <= 144 ? 2 : 3;
-    let ng = 0; for (let i = 1; i < act.length; i++) if (groupOf(act[i].ch) !== groupOf(act[i - 1].ch)) ng++;
-    const gap = 14, slot = (plotW - ng * gap) / act.length, bw = Math.min(22, Math.max(3, slot - 2)), out = [];
-    out.push(gridAxis(W, padL, padR, [0, 25, 50, 75, 100].map(v => ({ y: yOf(v), label: [0, 50, 100].includes(v) ? v : null }))));
-    let x = padL;
-    act.forEach((a, i) => {
-      if (i > 0 && groupOf(a.ch) !== groupOf(act[i - 1].ch)) x += gap;
-      const cx = x + slot / 2, bx = cx - bw / 2, top = yOf(a.s), h = Math.max(1, yOf(0) - top);
-      out.push(`<rect class="hit" data-i="${i}" x="${x}" y="${padT}" width="${slot}" height="${plotH + padB}"/>`);
-      out.push(`<rect x="${bx}" y="${top}" width="${bw}" height="${h}" rx="2" style="fill:var(--series)"/>`);
-      if ((s.band === '5g' || s.band === 'both') && a.ch === s.current) out.push(`<path class="marker" d="M${cx - 5},${yOf(0) + 28} l5,-6 l5,6 z"/>`);
-      if (i === 0 || i === act.length - 1 || groupOf(a.ch) !== groupOf(act[i - 1].ch)) out.push(`<text class="axis" x="${cx}" y="${yOf(0) + 16}" text-anchor="middle">${a.freq}</text>`);
-      x += slot;
-    });
-    out.push(`<text x="${padL + plotW / 2}" y="${H - 4}" text-anchor="middle" style="fill:var(--ink-2);font-size:11px;font-weight:600">5 GHz · frequency (MHz) · activity, not energy</text>`);
-    svg.innerHTML = out.join('');
-    chartTips(svg, '#spec5Tip', act, a => `<b>${a.freq} MHz</b> <span style="opacity:.55">ch ${a.ch}</span><br>activity ${Math.round(a.s)}/100<br>${rate(a.f / dwellS)} pkt/s · ${a.u} talkers`);
-  }
-
   function renderSpectrum(s) {
     renderSpecStatus(s);
     renderEnergy24(s);
-    renderActivity5(s);
     renderExplained(s);
     const list = s.unidentified || [];
     $('#unid').innerHTML = list.length

@@ -144,7 +144,8 @@
 
   /* last-known data shown outside the mode that produces it */
   .stalenote { margin: 4px 0 8px; color: var(--warning); font-size: 12.5px; }
-  .card.cached svg, .card.cached table { opacity: .6; }
+  .card.cached svg, .card.cached table, #zoneSpec.cached svg, #zoneSpec.cached table { opacity: .6; }
+  [hidden] { display: none !important; }   /* .pill/.specstatus/.actbar set display, which would beat the attribute */
   .logcard summary { cursor: pointer; font-weight: 650; font-size: 14.5px; }
   .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--page); border-radius: 8px; padding: 10px 13px; margin-top: 9px; max-height: min(320px, 40vh); overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
 
@@ -180,6 +181,7 @@
     <h1>Bandwatch <span class="tag">new UI</span></h1>
     <span class="pill" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
     <span class="note" id="fw"></span>
+    <button class="pill" id="unidPill" hidden title="Sustained 2.4 GHz energy no decoded device accounts for, from the last spectrum sweep - click to show it"></button>
     <a class="link push" href="/classic" title="the classic UI, same data">classic UI</a>
     <button class="ghost small" id="pauseBtn" style="margin-left:8px" title="Freeze the page (space bar). Tables also freeze while the mouse is over them.">Pause updates</button>
   </header>
@@ -296,6 +298,12 @@
         <div class="chart-wrap"><svg id="bleBars" viewBox="0 0 1000 300"></svg><div class="tip" id="bleBarTip"></div></div>
       </section>
 
+      <section class="card specstatus" id="specCache" hidden>
+        <h2 style="margin-right:auto">2.4 GHz spectrum <small id="specCacheSub"></small></h2>
+        <span class="chip" id="specCacheUnid" hidden></span>
+        <button class="small" id="specCacheToggle" hidden>Show cached spectrum</button>
+        <button class="small" data-startspec title="Switch Mode to Spectrum: sweeps 2400–2483 MHz (pauses decoding - one radio)">Scan 2.4 GHz</button>
+      </section>
       <div id="zoneSpec" hidden>
         <div id="specStatus" class="specstatus"></div>
         <div class="warnbar" id="specWarn" hidden></div>
@@ -311,8 +319,8 @@
           </div>
           <div class="chart-wrap"><svg id="spec" viewBox="0 0 1000 300"></svg><div class="tip" id="specTip"></div></div>
         </section>
-        <div class="grid2">
-          <section class="card">
+        <div class="grid2" id="specGrid">
+          <section class="card" id="wfCard">
             <h2>Waterfall <small>frequency across · time down, newest at the bottom</small></h2>
             <canvas id="waterfall" width="360" height="180"></canvas>
             <div class="wfaxis"><span>2400</span><span>2420</span><span>2440</span><span>2460</span><span>2483 MHz</span></div>
@@ -427,8 +435,9 @@
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };      // table under the mouse keeps its rows put
   const expanded = { wifi: false, ble: false, zig: false };    // user-opened "last seen" cards
-  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0 };                // click latches until the device confirms (poll is 1 Hz)
-  let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
+  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0, spec: 0 };                // click latches until the device confirms (poll is 1 Hz)
+  let explainPending = null;
+  let specOpen = false;                                        // cached spectrum expanded outside spec mode                                   // {scope, t} latched from click until the host reports it active
   const prev = {};
   const EV_FILES = ['events.csv', 'events.old.csv', 'seen.csv', 'surveil.csv'];   // C4 text files on the card (not pcaps)
   const EV_PULL = ['events.csv', 'seen.csv'];                                     // the ones offered for pulling
@@ -531,7 +540,19 @@
   for (const id of ['wifiApOnly', 'survOnly', 'wifiActive', 'bleActive', 'zigActive']) $('#' + id).addEventListener('change', () => state && render(state));
 
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
-  document.addEventListener('click', (e) => { if (e.target.closest('[data-startspec]')) post({ cmd: 'band', value: 'spec' }); });
+  // "Scan 2.4 GHz" from any mode: latch every scan button until the device reports spec mode (poll is 1 Hz).
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('[data-startspec]') || pending.spec) return;
+    pending.spec = Date.now();
+    document.querySelectorAll('[data-startspec]').forEach(b => { b.disabled = true; b.textContent = 'Switching…'; });
+    post({ cmd: 'band', value: 'spec' });
+  });
+  $('#specCacheToggle').addEventListener('click', () => { specOpen = !specOpen; if (state) render(state); });
+  $('#unidPill').addEventListener('click', () => {
+    if (state && state.band !== 'spec') specOpen = true;
+    if (state) render(state);
+    const z = $('#zoneSpec'); if (!z.hidden) z.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-specstep]'); if (b) post({ cmd: 'specstep', value: +b.dataset.specstep }); });
   // "Explain" unexplained energy: leave spec to decode, then the host jumps back. Latch a local pending state
   // so the button reads as busy immediately (the 1 Hz poll would otherwise look dead until the host responds).
@@ -935,6 +956,28 @@
 
   // Spectrum page is 2.4 GHz only: real RF energy (dBm, auto-ranged) from the 15.4 energy detector. 5 GHz has
   // no energy sensor on this chip, so it lives in the 5 GHz band mode (busy score), not here.
+  // Outside spec mode: what the last sweep left behind, how old it is, and how to get a fresh one.
+  function renderSpecCache(s, hasBins) {
+    const f = s.fine || {}, n = (s.unidentified || []).length;
+    $('#specCacheSub').textContent = hasBins
+      ? `cached — last swept ${f.age == null ? 'earlier' : ago(f.age) + ' ago'} · energy only refreshes in Spectrum mode`
+      : 'no sweep yet this session — a scan pauses decoding while it runs (one radio)';
+    $('#specCacheUnid').hidden = !hasBins;
+    $('#specCacheUnid').textContent = `${n} unexplained`;
+    $('#specCacheUnid').style.color = n ? 'var(--critical)' : '';
+    $('#specCacheToggle').hidden = !hasBins;
+    $('#specCacheToggle').textContent = specOpen ? 'Hide cached spectrum' : 'Show cached spectrum';
+  }
+  // Topbar count of unexplained 2.4 GHz energy, in every mode, whenever a sweep exists (classic's #nUnid).
+  function renderUnidPill(s) {
+    const pill = $('#unidPill'), f = s.fine || {};
+    const hasBins = (f.bins || []).some(b => b.n > 0);
+    pill.hidden = !hasBins;
+    if (!hasBins) return;
+    const n = (s.unidentified || []).length;
+    pill.innerHTML = `<span class="dot" style="background:${n ? 'var(--critical)' : 'var(--muted)'}"></span>${n} unexplained · 2.4 GHz` +
+      (s.band === 'spec' ? '' : ` <span class="dim">(${f.age == null ? 'cached' : ago(f.age) + ' old'})</span>`);
+  }
   function renderSpecStatus(s) {
     const f = s.fine || {};
     const txt = a => a == null ? 'never' : a < 1.5 ? 'live' : `${Math.round(a)}s ago`;
@@ -944,7 +987,7 @@
     const toggles = [1, 2, 5].map(k => `<button class="${k === step ? 'small' : 'ghost'}" data-specstep="${k}">${k} MHz</button>`).join(' ');
     $('#specStatus').innerHTML =
       `<span class="${pill(e)}"><span class="dot"></span>2.4 GHz energy: ${e}</span>` +
-      (s.band === 'spec' ? '' : `<button class="small" data-startspec>Scan 2.4 GHz</button>`) +
+      (s.band === 'spec' ? '' : `<button class="small" data-startspec ${pending.spec ? 'disabled' : ''}>${pending.spec ? 'Switching…' : 'Scan 2.4 GHz'}</button>`) +
       `<span style="opacity:.7;margin-left:4px">resolution</span>${toggles}`;
   }
 
@@ -1194,7 +1237,12 @@
     $('#fw').textContent = s.hello ? `firmware ${s.hello.fw}${s.hello.ver ? ' ' + s.hello.ver : ''} · mode ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
     $('#app').classList.toggle('stale', !s.connected);
     if (s.hello && !mirrorInit) { mirrorInit = true; if (s.hello.mir) { mirrorOn = true; mirrorSetBtn(); } }
-    renderRail(s); renderHero(s); renderAct(s); renderExplain(s);
+    renderRail(s); renderHero(s); renderAct(s); renderExplain(s); renderUnidPill(s);
+    if (pending.spec && (s.band === 'spec' || Date.now() - pending.spec > 6000)) {
+      pending.spec = 0;
+      document.querySelectorAll('[data-startspec]').forEach(b => { b.disabled = false; b.textContent = 'Scan 2.4 GHz'; });
+    }
+    if (s.band === 'spec') specOpen = false;   // leaving spec later starts collapsed again
 
     // device cards: the active radio's table is open, the other two fold into "last seen" caches.
     const actK = activeKind(s.band);
@@ -1231,12 +1279,22 @@
     $('#zoneProbe').hidden = !probesShown;
     if (probesShown) renderProbes(s, wifiBand);
     $('#zoneBle').hidden = s.band !== 'ble';
-    $('#zoneSpec').hidden = s.band !== 'spec';
+    // Spectrum: live in spec mode; elsewhere a header card with the cached sweep's age, unexplained count and a
+    // scan button, and the cached views behind a toggle (collapsed by default - they are large).
+    const spec = s.band === 'spec';
+    const hasBins = ((s.fine || {}).bins || []).some(b => b.n > 0);
+    const showSpec = spec || (specOpen && hasBins);
+    $('#zoneSpec').hidden = !showSpec;
+    $('#zoneSpec').classList.toggle('cached', !spec);
+    $('#specCache').hidden = spec;
+    if (!spec) renderSpecCache(s, hasBins);
+    $('#wfCard').hidden = !spec;   // the waterfall is a live scroll; nothing to show from a cache
+    $('#specGrid').style.gridTemplateColumns = spec ? '' : '1fr';
 
     if (showCh) renderBars(hv);
     if (showTrend) renderTrend(s);
     if (s.band === 'ble') renderBleBars(s);
-    else if (s.band === 'spec') {
+    if (showSpec) {
       renderSpecStatus(s); renderEnergy24(s); renderExplained(s);
       const list = s.unidentified || [];
       $('#unid').innerHTML = list.length

@@ -275,6 +275,7 @@ void serviceEvents() {
         if (baseInsert(h)) {
             addRow("new", e, (e.flags & EVF_TIER1) ? "dest only" : "");
             g_evStats.fresh++;
+            ledAlertNote(LED_ALERT_NEW);   // D1: less urgent blip than surveillance (rate-limited in led_alert.cpp)
             if (ev.newN < kNewMacCap) memcpy(ev.newMacs[ev.newN++], e.mac, 6);
         }
     }

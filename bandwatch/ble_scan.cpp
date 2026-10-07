@@ -126,6 +126,7 @@ void trackBleDevice(const uint8_t* mac, int8_t rssi, uint8_t addrType, const AdI
         d.surv = survLookup(mac);
         isNew = true;
         eventFlag(mac, rssi, 0, d.surv, EVF_BLE | (addrType ? EVF_RANDOM : 0));   // C4: random BLE addresses rotate
+        if (d.surv) ledNoteSurv(mac);   // 1.6.1 LED alert, independent of the event log
     }
     d.rssi = rssi;
     if (rssi > d.maxRssi) d.maxRssi = rssi;

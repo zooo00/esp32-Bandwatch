@@ -14,7 +14,6 @@ from unittest import mock
 
 from _support import bh, make_bw, feed, HELLO_24, HOST_DIR
 
-CLASSIC = os.path.join(HOST_DIR, "dashboard.html")
 V2 = os.path.join(HOST_DIR, "dashboard2.html")
 
 
@@ -24,8 +23,8 @@ def read(path):
 
 
 class Server:
-    def __init__(self, bw, classic=CLASSIC, v2=V2, ui="v2"):
-        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), bh.make_handler(bw, classic, v2, ui))
+    def __init__(self, bw, page=V2):
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), bh.make_handler(bw, page))
         self.base = "http://127.0.0.1:%d" % self.srv.server_address[1]
         self.thread = threading.Thread(target=self.srv.serve_forever, daemon=True)
         self.thread.start()
@@ -40,6 +39,17 @@ class Server:
                 return r.status, r.read(), dict(r.headers)
         except urllib.error.HTTPError as e:
             return e.code, e.read(), dict(e.headers)
+
+    def get_noredirect(self, path):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        opener = urllib.request.build_opener(NoRedirect)
+        try:
+            with opener.open(self.base + path, timeout=5) as r:
+                return r.status, dict(r.headers)
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers)
 
     def post(self, body, path="/api/cmd", raw=None):
         data = raw if raw is not None else json.dumps(body).encode()
@@ -58,14 +68,27 @@ class RoutingTest(unittest.TestCase):
         self.s = Server(self.bw)
         self.addCleanup(self.s.close)
 
-    def test_v2_is_default_and_both_pages_reachable(self):
-        for path, page in (("/", V2), ("/index.html", V2), ("/v2", V2), ("/v2/", V2), ("/v2.html", V2),
-                           ("/classic", CLASSIC), ("/classic/", CLASSIC)):
+    def test_dashboard_served_at_root_and_v2(self):
+        for path in ("/", "/index.html", "/v2", "/v2/", "/v2.html"):
             with self.subTest(path=path):
                 code, body, hdrs = self.s.get(path)
                 self.assertEqual(code, 200)
-                self.assertEqual(body, read(page))
+                self.assertEqual(body, read(V2))
                 self.assertTrue(hdrs["Content-Type"].startswith("text/html"))
+
+    def test_classic_redirects_to_root(self):
+        # The classic dashboard was removed in v1.19; old bookmarks get a permanent redirect to "/".
+        for path in ("/classic", "/classic/"):
+            with self.subTest(path=path):
+                code, hdrs = self.s.get_noredirect(path)
+                self.assertEqual(code, 301)
+                self.assertEqual(hdrs["Location"], "/")
+        code, body, _ = self.s.get("/classic")   # followed: lands on the dashboard
+        self.assertEqual((code, body), (200, read(V2)))
+
+    def test_classic_file_is_gone(self):
+        self.assertFalse(os.path.exists(os.path.join(HOST_DIR, "dashboard.html")))
+        self.assertEqual(self.s.get("/dashboard.html")[0], 404)
 
     def test_unknown_path_404(self):
         self.assertEqual(self.s.get("/nope")[0], 404)
@@ -105,18 +128,37 @@ class RoutingTest(unittest.TestCase):
                 self.assertEqual(self.s.get("/file?name=" + name)[0], 404)
 
 
-class UiFlagTest(unittest.TestCase):
-    def test_ui_classic_puts_classic_at_root(self):
-        s = Server(make_bw(), ui="classic")
+class MissingPageTest(unittest.TestCase):
+    def test_missing_dashboard_404s(self):
+        s = Server(make_bw(), page=os.path.join(HOST_DIR, "no-such-dashboard.html"))
         self.addCleanup(s.close)
-        self.assertEqual(s.get("/")[1], read(CLASSIC))
-        self.assertEqual(s.get("/v2")[1], read(V2))
-
-    def test_missing_v2_falls_back_to_classic(self):
-        s = Server(make_bw(), v2=None)
-        self.addCleanup(s.close)
-        self.assertEqual(s.get("/")[1], read(CLASSIC))
+        self.assertEqual(s.get("/")[0], 404)
         self.assertEqual(s.get("/v2")[0], 404)
+
+
+class UiFlagTest(unittest.TestCase):
+    def test_ui_flag_accepted_and_ignored(self):
+        # --ui was removed with the classic dashboard (v1.19) but still parses, so old scripts keep running.
+        started = {}
+
+        class Stop(Exception):
+            pass
+
+        def fake_server(addr, handler):
+            started["handler"] = handler
+            raise Stop
+
+        for argv in (["--ui", "classic"], ["--ui", "v2"], []):
+            with self.subTest(argv=argv), \
+                    mock.patch("sys.argv", ["bandwatch_host.py", "--no-oui-download", "--port", "/dev/null-x",
+                                               "--captures", tempfile.gettempdir()] + argv), \
+                    mock.patch.object(bh, "ThreadingHTTPServer", fake_server), \
+                    mock.patch.object(bh.threading, "Thread"), \
+                    mock.patch.object(bh.OuiDb, "load_cache", return_value=True), \
+                    mock.patch("builtins.print"):
+                with self.assertRaises(Stop):
+                    bh.main()
+                self.assertIn("handler", started)
 
 
 class CommandMappingTest(unittest.TestCase):

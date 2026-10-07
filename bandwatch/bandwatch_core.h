@@ -401,15 +401,17 @@ void drainCapture();
 void writeBase64(const uint8_t* d, size_t n);
 
 // Live LCD mirror: when on, the LVGL flush path streams each dirty region as an "M x y w h <base64 RGB565>"
-// serial line and the host dashboard reassembles the 172x320 screen. Default off, not persisted (like park
-// and hunt). The flushes in one lv_timer_handler are synchronous, so a bulk repaint would overrun the serial
-// TX buffer; serviceMirror() paces a full re-send one horizontal strip per loop so it converges without
-// dropping. See docs/DEVELOPER.md section 19.
+// serial line, and the last flush of every LVGL refresh adds an "MF <seq> <complete>" frame marker; the host
+// publishes its framebuffer only at markers, so it never shows a half-updated frame. Default off, not
+// persisted (like park and hunt). A region that doesn't fit the TX buffer is folded into one pending repair
+// rectangle (a union bounding box) that serviceMirror() re-sends in TX-sized strips; `mirror 1` starts with
+// the whole screen as that rectangle. See docs/DEVELOPER.md section 19.
 extern bool g_mirror;                                                   // host_proto.cpp owns the command flag
-void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px);  // emit one flushed region (host_proto.cpp)
-void serviceMirror();        // strip-paced full-screen refresh, called from the loop (lcd_ui.cpp)
-void mirrorRequestFull();    // schedule a complete re-send (on enable, or an explicit full frame)
-void mirrorNoteDrop();       // a region didn't fit the TX buffer; re-scan the screen after the current pass
+void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px, bool last);   // one flushed region
+void serviceMirror();        // strip-paced re-send of the repair rectangle, called from the loop (lcd_ui.cpp)
+void mirrorRequestFull();    // mark the whole screen for re-send (on enable, or an explicit full frame)
+void mirrorNoteDrop(int x1, int y1, int x2, int y2);   // a region didn't fit the TX buffer: add it to the repair
+bool mirrorFrameEnd();       // last flush of a refresh: in-flight strips landed; true if a repair is still pending
 void stepPage(int dir);      // host page-step (BOOT-tap emulation): dir>0 next page, dir<0 previous (lcd_ui.cpp)
 
 // SD sink (sd_sink.cpp).

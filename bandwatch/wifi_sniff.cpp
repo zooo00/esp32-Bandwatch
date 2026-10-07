@@ -148,6 +148,7 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
         d.maxRssi = rssi;
         d.surv = survLookup(mac);
         if (destOnly) d.flags |= 4;
+        eventFlag(mac, rssi, currentChannelNum, d.surv, destOnly ? EVF_TIER1 : 0);   // C4: no-op unless events on
     }
     if (!destOnly) d.flags &= ~4;   // heard it transmit: upgrade to tier 2
     // Association, when the DS bits made it unambiguous. Never cleared once learned: a station that goes

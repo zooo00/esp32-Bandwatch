@@ -78,9 +78,18 @@ constexpr SurvOui kSurvOuis[] = {
 };
 constexpr int kSurvOuiCount = sizeof(kSurvOuis) / sizeof(kSurvOuis[0]);
 
+constexpr int kSurvNames = sizeof(kSurvName) / sizeof(kSurvName[0]);
+
+// Extra OUIs read from /surveil.csv on the card at boot (events.cpp, loadSurvExtra); nullptr/0 without one.
+extern SurvOui* g_survExtra;
+extern int g_survExtraN;
+
 inline uint8_t survLookup(const uint8_t* mac) {
     for (int i = 0; i < kSurvOuiCount; i++)
         if (kSurvOuis[i].o[0] == mac[0] && kSurvOuis[i].o[1] == mac[1] && kSurvOuis[i].o[2] == mac[2])
             return kSurvOuis[i].cat;
+    for (int i = 0; i < g_survExtraN; i++)
+        if (g_survExtra[i].o[0] == mac[0] && g_survExtra[i].o[1] == mac[1] && g_survExtra[i].o[2] == mac[2])
+            return g_survExtra[i].cat;
     return SURV_NONE;
 }

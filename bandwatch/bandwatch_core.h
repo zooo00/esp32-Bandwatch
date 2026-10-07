@@ -264,6 +264,7 @@ struct SdSink {
     uint8_t* buf = nullptr;
     size_t bufLen = 0;
     uint32_t frames = 0, bytes = 0, dropped = 0, lastFlushMs = 0, errors = 0;
+    bool ioFailed = false;        // a capture write failed (card pulled?): sdServiceFlush closes the capture
     char path[48] = "";
 };
 
@@ -413,6 +414,13 @@ void stepPage(int dir);      // host page-step (BOOT-tap emulation): dir>0 next 
 
 // SD sink (sd_sink.cpp).
 bool sdMount();                     // also queried by the "sdinfo" command
+void sdUnmount();     // release FATFS (~30 KB) unless a capture or sdread owns the card
+void sdSetPresent(bool present, const char* why);   // the one place card presence changes (LCD face on a change)
+uint8_t sdProbeR1();         // raw CMD0 reply: 0x01 = a card answered, 0xFF = empty slot
+void sdServicePresence();    // loop: probe an idle, unmounted card every 2 s
+void showSdFace(bool happy, const char* why);   // lcd_ui.cpp: sad face on removal, happy on insertion
+void serviceSdFace();        // lcd_ui.cpp: take the face down after its 3 s
+void eventsNudge();          // events.cpp: attach a just-inserted card now
 void sdProbeAtBoot();
 void sdCloseCapture();
 bool sdOpenCapture();
@@ -436,6 +444,26 @@ extern ProbeEvt g_probeQ[kProbeQ];
 extern volatile uint8_t probeHead, probeTail;   // single producer (Wi-Fi task) / single consumer (loop)
 extern volatile uint32_t probeDropped;
 void serviceProbes();
+
+// C4 event log (events.cpp): radio paths call eventFlag() under g_devMux when they create a device slot;
+// serviceEvents() (loop) classifies, buffers CSV rows and flushes them to /events.csv on the card.
+enum : uint8_t { EVF_BLE = 0x01, EVF_RANDOM = 0x02, EVF_TIER1 = 0x04 };
+struct EvtPending { uint8_t mac[6]; int8_t rssi; uint8_t ch; uint8_t surv; uint8_t flags; };
+constexpr int kEvtQ = 16;
+extern EvtPending g_evtQ[kEvtQ];
+extern volatile uint8_t evtHead, evtTail;
+extern volatile uint32_t evtQDropped;
+extern volatile bool g_eventsOn;
+struct EventStats { uint32_t written = 0, pending = 0, surv = 0, fresh = 0, dropped = 0, errors = 0, qDropped = 0, baseFile = 0, waiting = 0; bool cardOk = false; };
+extern EventStats g_evStats;
+void eventFlag(const uint8_t* mac, int8_t rssi, uint8_t ch, uint8_t surv, uint8_t flags);
+bool eventsEnable();
+void eventsDisable();
+void serviceEvents();
+void sendEventStatus();   // host_proto.cpp: {"t":"ev"} every 5 s while armed
+int eventsBaseCount();
+extern bool g_eventsWanted;   // settings.cpp: restored "events" flag, applied in Bandwatch_Init
+void loadSurvExtra();   // /surveil.csv extra surveillance OUIs, read at boot while the card is mounted
 
 // Hunt (bandwatch.cpp). Callers hold g_devMux and have already evaluated the match for their radio kind.
 void IRAM_ATTR noteHuntHit(bool isTarget, int8_t rssi, uint32_t now);

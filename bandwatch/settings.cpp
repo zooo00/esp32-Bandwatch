@@ -3,7 +3,7 @@
 // through serial every time. Transient RAM only: the Preferences handle opens for the load/save and is
 // closed immediately, so nothing stays resident (the §16 budget is tight - see docs/DEVELOPER.md).
 //
-// Persisted: band mode + the scalar policies (addr1, blescan, specstep, snap).
+// Persisted: band mode + the scalar policies (addr1, blescan, specstep, snap) + whether the C4 event log is armed.
 // NOT persisted, on purpose:
 //   - park: a device that boots silently parked on one channel is a "why is it stuck" footgun; let it hop.
 //   - hunt / deauth: a reboot must STOP transmitting (the same safety argument as the dead-man's switch),
@@ -12,6 +12,7 @@
 #include <Preferences.h>
 
 BandMode g_restoredMode = BAND_5G;
+bool     g_eventsWanted = false;   // C4 event log armed (persisted so an untethered walk logs after a power cycle)
 bool     g_settingsRestored = false;
 
 namespace {
@@ -32,6 +33,7 @@ void loadSettings() {
     const uint8_t  bs   = prefs.getUChar("blescan", bleScan.mode);
     const uint8_t  ss   = prefs.getUChar("specstep", specStepMhz);
     const uint16_t sn   = prefs.getUShort("snap", capSnapLen);
+    const uint8_t  evw  = prefs.getUChar("events", 0);
     prefs.end();
 
     // Validate every value: NVS is off-device state and a corrupt byte must not reach the radio paths.
@@ -40,6 +42,7 @@ void loadSettings() {
     if (bs <= BLE_SCAN_AUTO)                        bleScan.mode = static_cast<BleScanMode>(bs);
     if (ss == 1 || ss == 2 || ss == 5)             specStepMhz  = ss;
     if (sn >= 32 && sn <= kCapMaxLen)              capSnapLen   = sn;
+    g_eventsWanted = (evw == 1);
     g_settingsRestored = true;
 }
 
@@ -53,5 +56,6 @@ void saveSettings() {
     prefs.putUChar("blescan", bleScan.mode);
     prefs.putUChar("specstep", specStepMhz);
     prefs.putUShort("snap", capSnapLen);
+    prefs.putUChar("events", g_eventsOn ? 1 : 0);
     prefs.end();
 }

@@ -57,6 +57,20 @@ void printJsonStr(const char* s) {
     Serial.write('"');
 }
 
+// C4 event-log state, as one JSON object body (~150 B): armed, card usable, baseline in RAM / in the file, rows
+// written / waiting, surveillance and new-device counts, rows dropped, card errors, novelty checks skipped for
+// want of a baseline.
+void printEvents() {
+    const EventStats& e = g_evStats;
+    Serial.printf("\"ev\":{\"on\":%d,\"card\":%d,\"base\":%d,\"file\":%lu,\"written\":%lu,\"pending\":%lu,"
+                  "\"surv\":%lu,\"new\":%lu,\"drop\":%lu,\"err\":%lu,\"wait\":%lu}",
+                  g_eventsOn ? 1 : 0, e.cardOk ? 1 : 0, eventsBaseCount(), static_cast<unsigned long>(e.baseFile),
+                  static_cast<unsigned long>(e.written), static_cast<unsigned long>(e.pending),
+                  static_cast<unsigned long>(e.surv), static_cast<unsigned long>(e.fresh),
+                  static_cast<unsigned long>(e.dropped + e.qDropped), static_cast<unsigned long>(e.errors),
+                  static_cast<unsigned long>(e.waiting));
+}
+
 void printHunt() {
     if (!hunt.active) { Serial.print("\"h\":null"); return; }
     const uint32_t last = hunt.lastMs;
@@ -128,7 +142,8 @@ void sendHello() {
                   sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
                   static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
                   static_cast<unsigned long>(sd.errors), epochValid ? 1 : 0);
-    Serial.printf(",\"mir\":%d", g_mirror ? 1 : 0);
+    Serial.printf(",\"mir\":%d,", g_mirror ? 1 : 0);
+    printEvents();
     Serial.print("}\n");
 }
 
@@ -363,10 +378,25 @@ void handleCommand(char* line) {
                       sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
                       static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
                       static_cast<unsigned long>(sd.errors));
+        sdUnmount();   // sdinfo is a probe, not a mount: it used to leave FATFS (~30 KB) mounted until the next
+                       // capture or sdread came along. sdUnmount() keeps it when a capture/sdread owns the card.
+    } else if (!strcmp(line, "sdface")) {    // diagnostic: show the card-out (0) / card-in (1) face without touching the card
+        showSdFace(atoi(arg) != 0, "test");
+        Serial.print("{\"t\":\"ack\",\"cmd\":\"sdface\"}\n");
+    } else if (!strcmp(line, "sdprobe")) {   // diagnostic: raw CMD0 reply of the presence probe (idle card only)
+        const bool idle = !sd.mounted && !sd.capEnabled && !sd.readActive;
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdprobe\",\"r1\":%d,\"present\":%d}\n",
+                      idle ? sdProbeR1() : -1, sd.cardPresent ? 1 : 0);
     } else if (!strcmp(line, "sdls")) {
         sdListFiles();
     } else if (!strcmp(line, "sdread")) {
         sdReadFile(arg);
+    } else if (!strcmp(line, "events")) {
+        // C4: arm/disarm the SD event log (persisted). Arming works with no card: it retries the mount.
+        if (atoi(arg) != 0) { if (!eventsEnable()) Serial.print("{\"t\":\"err\",\"msg\":\"events: not enough free heap\"}\n"); }
+        else eventsDisable();
+        saveSettings();
+        if (serialRoom(220)) { Serial.print("{\"t\":\"ack\",\"cmd\":\"events\","); printEvents(); Serial.print("}\n"); }
     } else if (!strcmp(line, "addr1")) {
         trackAddr1 = atoi(arg) != 0;
         saveSettings();
@@ -578,4 +608,16 @@ void serviceProbes() {
         slot.ssidHash = h;
         slot.lastMs = now ? now : 1;
     }
+}
+
+// C4: a small status line every 5 s while the event log is armed, so the dashboard's counters move in every mode.
+void sendEventStatus() {
+    static uint32_t lastMs = 0;
+    if (!g_eventsOn) return;
+    const uint32_t now = millis();
+    if (now - lastMs < 5000 || !serialRoom(200)) return;
+    lastMs = now;
+    Serial.print("{\"t\":\"ev\",");
+    printEvents();
+    Serial.print("}\n");
 }

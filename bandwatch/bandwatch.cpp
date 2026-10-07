@@ -469,6 +469,7 @@ void Bandwatch_Init(void) {
     // SPI is already up: LCD_Init() runs before this, and both share the bus from the loop task.
     sdProbeAtBoot();
     loadSettings();   // restore band mode + scalar policies before the radios come up (C3)
+    if (g_eventsWanted) eventsEnable();   // C4, persisted: armed even with no card (it retries)
 
     setLedColor({255, 0, 0}, 100);
     delay(120);
@@ -499,6 +500,10 @@ void Bandwatch_Loop(void) {
     serviceSdRead();
     drainCapture();
     serviceProbes();     // C1: directed probe requests -> "pr" lines (Wi-Fi modes)
+    sdServicePresence(); // card-presence probe while idle (LCD face on removal/insertion)
+    serviceSdFace();
+    serviceEvents();     // C4: classify new/surveillance sightings, flush /events.csv (no-op unless events on)
+    sendEventStatus();
     serviceBle();
     serviceSpectrum();   // re-arm energy detection (spec mode only; no-op otherwise)
     const uint32_t now = millis();

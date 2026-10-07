@@ -36,10 +36,36 @@ void nowEpoch(uint32_t& sec, uint32_t& usec) {
 // Mounting FATFS costs ~30 KB of heap, and BLE mode cuts its scans short below ~28 KB free, so the card is
 // mounted only while it is being used and released again afterwards. sd.cardPresent/sd.cardMb remember what
 // the boot probe found so the dashboard can still show the card without paying for it.
+//
+// Removal / insertion: there is no card-detect pin, so presence is learned from mount attempts. A failed mount
+// clears cardPresent (the dashboard stops claiming a card), a successful one sets it, and SD.end() is always
+// called before the next SD.begin() so a re-inserted card gets a fresh init instead of a stale FATFS handle.
+// A card pulled while mounted shows up as I/O errors; every user of the card treats that as "card gone":
+// capture closes itself (sdNoteIoError), sdread reports an error instead of a short file, and the event log
+// keeps its rows and retries on its next flush.
+namespace {
+bool presenceKnown = false;   // set after the boot probe: the first reading is not a change worth a face
+}
+
+// The one place card presence changes. A real transition (not the boot reading) shows the LCD face and,
+// on insertion, nudges the event log to attach now instead of on its next 30 s retry.
+void sdSetPresent(bool present, const char* why) {
+    if (present == sd.cardPresent) return;
+    sd.cardPresent = present;
+    if (!presenceKnown) return;
+    showSdFace(present, why);
+    if (serialRoom(100))
+        Serial.printf("{\"t\":\"log\",\"msg\":\"sd card %s%s%s\"}\n", present ? "inserted" : "removed",
+                      why && *why ? ": " : "", why ? why : "");
+    if (present) eventsNudge();
+}
+
 bool sdMount() {
     if (sd.mounted) return true;
+    SD.end();   // harmless when not begun; clears a handle left by a card that vanished mid-use
     sd.mounted = SD.begin(kSdCsPin, SPI, kSdSpiHz);
-    if (sd.mounted) { sd.cardPresent = true; sd.cardMb = static_cast<uint32_t>(SD.cardSize() / (1024 * 1024)); }
+    sdSetPresent(sd.mounted, "");
+    if (sd.mounted) sd.cardMb = static_cast<uint32_t>(SD.cardSize() / (1024 * 1024));
     return sd.mounted;
 }
 
@@ -51,13 +77,47 @@ void sdUnmount() {
 }
 
 void sdProbeAtBoot() {
-    if (sdMount()) sdUnmount();
+    if (sdMount()) { loadSurvExtra(); sdUnmount(); }   // /surveil.csv extra OUIs ride the boot probe's mount
+    presenceKnown = true;
+}
+
+// Card-presence probe for an idle, unmounted card (no card-detect pin on this board). One SPI CMD0 at 400 kHz:
+// a card answers R1 = 0x01 (idle), an empty slot leaves MISO high (0xFF). Under 1 ms, no FATFS, no heap. Never
+// while the card is mounted - CMD0 would reset a card mid-session; mounted users see removal as I/O errors.
+// Returns the raw R1 byte (the "sdprobe" command reports it).
+uint8_t sdProbeR1() {
+    pinMode(kSdCsPin, OUTPUT);
+    SPI.beginTransaction(SPISettings(400000, MSBFIRST, SPI_MODE0));
+    digitalWrite(kSdCsPin, HIGH);
+    for (int i = 0; i < 10; i++) SPI.transfer(0xFF);   // >= 74 clocks with CS high
+    digitalWrite(kSdCsPin, LOW);
+    static const uint8_t kCmd0[6] = {0x40, 0, 0, 0, 0, 0x95};
+    for (uint8_t b : kCmd0) SPI.transfer(b);
+    uint8_t r = 0xFF;
+    for (int i = 0; i < 10 && r == 0xFF; i++) r = SPI.transfer(0xFF);
+    digitalWrite(kSdCsPin, HIGH);
+    SPI.transfer(0xFF);
+    SPI.endTransaction();
+    return r;
+}
+
+// Every 2 s while idle: two agreeing readings in a row change the presence state (debounces a card mid-insert).
+void sdServicePresence() {
+    static uint32_t lastMs = 0;
+    static int8_t lastReading = -1;
+    if (!presenceKnown || sd.mounted || sd.capEnabled || sd.readActive) return;
+    const uint32_t now = millis();
+    if (now - lastMs < 2000) return;
+    lastMs = now;
+    const bool reading = sdProbeR1() == 0x01;
+    if (lastReading >= 0 && reading == (lastReading == 1)) sdSetPresent(reading, "");
+    lastReading = reading ? 1 : 0;
 }
 
 namespace {
 
 bool sdWriteRaw(const uint8_t* d, size_t n) {
-    if (sd.file.write(d, n) != n) { sd.errors++; return false; }
+    if (sd.file.write(d, n) != n) { sd.errors++; sd.ioFailed = true; return false; }
     sd.bytes += n;
     return true;
 }
@@ -99,8 +159,8 @@ bool sdOpenCapture() {
     if (sd.capEnabled) return true;
     if (!sdMount()) return false;
     sd.buf = static_cast<uint8_t*>(malloc(kSdBufSize));
-    if (!sd.buf) return false;
-    sd.bufLen = 0; sd.frames = 0; sd.bytes = 0; sd.dropped = 0; sd.errors = 0;
+    if (!sd.buf) { sdUnmount(); return false; }
+    sd.bufLen = 0; sd.frames = 0; sd.bytes = 0; sd.dropped = 0; sd.errors = 0; sd.ioFailed = false;
     const bool is154 = mode154();
     const bool isBle = (bandMode == BAND_BLE);
     if (epochValid) {   // host gave us a clock: name the file after it, like the host tool does
@@ -122,7 +182,7 @@ bool sdOpenCapture() {
         nextSeq = i + 1;
     }
     sd.file = SD.open(sd.path, FILE_WRITE);
-    if (!sd.file) { free(sd.buf); sd.buf = nullptr; return false; }
+    if (!sd.file) { free(sd.buf); sd.buf = nullptr; sdUnmount(); return false; }
     uint8_t gh[24];                                  // pcap global header, little endian
     putLE32(gh + 0, 0xA1B2C3D4); putLE16(gh + 4, 2); putLE16(gh + 6, 4);
     putLE32(gh + 8, 0); putLE32(gh + 12, 0); putLE32(gh + 16, 65535);
@@ -215,7 +275,17 @@ void serviceSdRead() {
         if (!serialRoom(sizeof(chunk) * 4 / 3 + 24)) return;      // no room: try again next loop
         if ((micros() - started) > kSdBudgetUs) return;           // same budget the capture drain uses
         const int n = sdReadFh.read(chunk, sizeof(chunk));
-        if (n <= 0) break;
+        if (n <= 0) {
+            // Short of the size we announced: the card went away (or the file is damaged). Say so, rather than
+            // sending sdread_done and letting the host save a truncated file as if it were complete.
+            Serial.printf("{\"t\":\"err\",\"msg\":\"sdread: read failed at %lu of %lu bytes (card removed?)\"}\n",
+                          static_cast<unsigned long>(sdReadSent), static_cast<unsigned long>(sdReadTotal));
+            sd.readActive = false;
+            sdReadFh.close();
+            SD.end(); sd.mounted = false;
+            sdSetPresent(false, "file pull stopped");
+            return;
+        }
         Serial.printf("S %d ", n);
         writeBase64(chunk, n);
         Serial.write('\n');
@@ -231,7 +301,7 @@ void serviceSdRead() {
 void sdListFiles() {
     if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: no card\"}\n"); return; }
     File root = SD.open("/");
-    if (!root) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); return; }
+    if (!root) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); sdUnmount(); return; }
     // "sent" < "total": the serial buffer filled up mid-list (host slow or absent), so entries were dropped.
     // The host shows what arrived and knows there is more on the card.
     int total = 0, sent = 0;
@@ -253,6 +323,17 @@ void sdListFiles() {
 
 void sdServiceFlush() {
     if (!sd.capEnabled) return;
+    if (sd.ioFailed) {   // a write failed: almost always the card being pulled. Stop instead of failing forever.
+        if (serialRoom(120))
+            Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: write failed after %lu frames (card removed?) - recording stopped\"}\n",
+                          static_cast<unsigned long>(sd.frames));
+        sd.ioFailed = false;
+        sdCloseCapture();
+        SD.end(); sd.mounted = false;
+        sdSetPresent(false, "recording stopped");
+        syncCapActive();   // the ring goes back to the heap if the USB sink is not using it
+        return;
+    }
     const uint32_t now = millis();
     if (now - sd.lastFlushMs < kSdFlushMs) return;
     sd.lastFlushMs = now;

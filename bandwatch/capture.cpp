@@ -171,7 +171,8 @@ void drainCapture() {
         } else if (usbWant) {
             capDropped = capDropped + 1;                    // SD is recording: never block the card on USB
         }
-        if (sd.capEnabled && !sdWriteFrame(f)) { sd.dropped++; sdCloseCapture(); }
+        // A failed card write (pulled card, usually) is reported and closed once, in sdServiceFlush() below.
+        if (sd.capEnabled && !sd.ioFailed && !sdWriteFrame(f)) { sd.dropped++; sd.ioFailed = true; }
         capTail = (capTail + 1) % capSlots;
         // SD writes can stall for tens of ms on card GC; hopIfNeeded() shares this task, so cap the time.
         if (sd.capEnabled && (micros() - started) > kSdBudgetUs) break;

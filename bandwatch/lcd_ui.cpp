@@ -711,6 +711,86 @@ void showBandSplash(BandMode m, uint32_t durMs) {
     if (n > 0) lv_obj_move_to_index(splashBg, n - 1);
 }
 
+// SD card face: a sad face when the card goes away, a happy one when it comes back. Drawn on LVGL's top layer so
+// it sits above any page, mode card or photo and survives a page rebuild underneath; one custom-drawn object,
+// created on demand and deleted by serviceSdFace() after kSdFaceMs.
+namespace {
+constexpr uint32_t kSdFaceMs = 3000;
+lv_obj_t* sdFace = nullptr;
+bool sdFaceHappy = false;
+char sdFaceWhy[40] = "";
+uint32_t sdFaceUntilMs = 0;
+
+void sdFaceDraw(lv_event_t* e) {
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(sdFace, &a);
+    const int32_t cx = (a.x1 + a.x2) / 2, cy = a.y1 + 120;
+    const uint16_t face565 = sdFaceHappy ? YELLOW_565 : 0x5D9F;   // sunny yellow / a glum pale blue
+
+    lv_draw_rect_dsc_t r;
+    lv_draw_rect_dsc_init(&r);
+    r.radius = LV_RADIUS_CIRCLE;
+    r.bg_color = c565(face565);
+    const lv_area_t head{cx - 62, cy - 62, cx + 62, cy + 62};
+    lv_draw_rect(layer, &r, &head);
+    r.bg_color = c565(BLACK_565);
+    for (int s = -1; s <= 1; s += 2) {
+        const lv_area_t eye{cx + s * 22 - 8, cy - 26 - 8, cx + s * 22 + 8, cy - 26 + 8};
+        lv_draw_rect(layer, &r, &eye);
+    }
+
+    lv_draw_arc_dsc_t m;
+    lv_draw_arc_dsc_init(&m);
+    m.color = c565(BLACK_565);
+    m.width = 8;
+    m.rounded = 1;
+    m.radius = 34;
+    if (sdFaceHappy) { m.center = {cx, cy + 2};  m.start_angle = 25;  m.end_angle = 155; }   // smile: bottom arc
+    else             { m.center = {cx, cy + 58}; m.start_angle = 215; m.end_angle = 325; }   // frown: top arc, lower
+    lv_draw_arc(layer, &m);
+
+    lv_draw_label_dsc_t l;
+    lv_draw_label_dsc_init(&l);
+    l.font = &lv_font_montserrat_20;
+    l.color = c565(WHITE_565);
+    l.align = LV_TEXT_ALIGN_CENTER;
+    l.text = sdFaceHappy ? "SD card in" : "SD card out";
+    const lv_area_t t1{a.x1, cy + 80, a.x2, cy + 104};
+    lv_draw_label(layer, &l, &t1);
+    if (sdFaceWhy[0]) {
+        l.font = &lv_font_montserrat_12;
+        l.color = c565(GREY_565);
+        l.text = sdFaceWhy;
+        l.text_local = 1;
+        const lv_area_t t2{a.x1 + 4, cy + 110, a.x2 - 4, cy + 140};
+        lv_draw_label(layer, &l, &t2);
+    }
+}
+} // namespace
+
+void showSdFace(bool happy, const char* why) {
+    sdFaceHappy = happy;
+    snprintf(sdFaceWhy, sizeof(sdFaceWhy), "%s", why ? why : "");
+    sdFaceUntilMs = millis() + kSdFaceMs;
+    if (!sdFace) {
+        sdFace = lv_obj_create(lv_layer_top());
+        lv_obj_set_size(sdFace, LV_PCT(100), LV_PCT(100));
+        lv_obj_set_pos(sdFace, 0, 0);
+        lv_obj_set_style_bg_color(sdFace, c565(BG_565), 0);
+        lv_obj_set_style_bg_opa(sdFace, LV_OPA_COVER, 0);
+        lv_obj_set_style_border_width(sdFace, 0, 0);
+        lv_obj_set_style_radius(sdFace, 0, 0);
+        lv_obj_remove_flag(sdFace, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(sdFace, sdFaceDraw, LV_EVENT_DRAW_MAIN_END, nullptr);
+    }
+    lv_obj_invalidate(sdFace);   // a second change while one is up: repaint with the new mood
+}
+
+void serviceSdFace() {
+    if (sdFace && static_cast<int32_t>(millis() - sdFaceUntilMs) >= 0) { lv_obj_delete(sdFace); sdFace = nullptr; }
+}
+
 void buildUi() {
     lv_obj_t* scr = lv_scr_act();
     lv_obj_set_style_bg_color(scr, c565(BG_565), 0);

@@ -30,7 +30,13 @@ namespace {
 constexpr char kEventsPath[] = "/events.csv";
 constexpr char kEventsOld[]  = "/events.old.csv";
 constexpr char kSeenPath[]   = "/seen.csv";
+constexpr char kSeenOld[]    = "/seen.old.csv";
 constexpr int kBaseLoad = 2048;            // newest entries of /seen.csv kept in RAM (the file itself may be longer)
+// /seen.csv is rotated when an attach finds more than this many entries: twice what is loaded, so the file stays
+// <= ~74 KB (18 B a line) - each attach reads it in full on the loop task - and the rewrite (kBaseLoad lines,
+// ~37 KB) is paid at most once per kBaseLoad new devices. Older entries move to /seen.old.csv (one generation).
+constexpr int kSeenRotate = 2 * kBaseLoad;
+constexpr uint32_t kRotateMinHeapB = 24 * 1024;   // the rewrite holds two FATFS files open (~4.3 KB each)
 constexpr int kBaseCap = kBaseLoad + 512;  // room for this session's new devices on top
 constexpr int kSurvSeenCap = 32;           // surveillance devices already logged this session
 constexpr size_t kRowBuf = 2048;           // pending CSV text
@@ -53,6 +59,7 @@ struct EvState {
     uint32_t lastFlushMs = 0;
     uint32_t lastTryMs = 0;
     bool baseLoaded = false;    // /seen.csv read from the card currently in the slot; novelty is off until then
+    bool flushing = false;      // inside flush(): the card's event files are open (sdrm refuses meanwhile)
 } ev;
 
 uint32_t macHash32(const uint8_t* m) {
@@ -86,20 +93,71 @@ bool parseMac(const char* s, uint8_t* out) {
     return true;
 }
 
+// One /seen.csv line -> MAC. Both passes over the file (load, rotate) read through here, so they agree on which
+// lines count: a line longer than the buffer splits into pieces that do not parse, the same way every time.
+bool readSeenLine(File& f, uint8_t* mac) {
+    char line[40];
+    const size_t n = f.readBytesUntil('\n', line, sizeof(line) - 1);
+    line[n] = 0;
+    return parseMac(line, mac);
+}
+
+// /seen.csv holds `total` entries, more than kSeenRotate: keep only the newest kBaseLoad - exactly the ones the RAM
+// baseline just loaded, so novelty is unchanged - and move the whole old file to /seen.old.csv. The RAM set holds
+// 32-bit hashes, which cannot be turned back into MACs, and buffering 2048 MACs would cost 12 KB; so this is a second
+// pass over the file with one 40-byte line buffer: skip the first total - kBaseLoad entries, copy the rest.
+// Bounded: one extra read of a file that is at most what the attach just read, one write of kBaseLoad lines, and
+// two FATFS files open (skipped below kRotateMinHeapB - it is retried on the next attach). If anything fails after
+// the rename, the old name is put back so the baseline is never lost; a power cut mid-copy leaves /seen.old.csv
+// complete and /seen.csv short (it only loses older novelty history, never the file).
+int rotateSeen(int total) {
+    if (ESP.getFreeHeap() < kRotateMinHeapB) return -1;
+    SD.remove(kSeenOld);                        // one previous generation, like /events.old.csv
+    if (!SD.rename(kSeenPath, kSeenOld)) return -1;
+    File in = SD.open(kSeenOld, FILE_READ);
+    File out = in ? SD.open(kSeenPath, FILE_WRITE) : File();
+    if (!in || !out) {
+        if (in) in.close();
+        if (out) out.close();
+        SD.remove(kSeenPath);
+        SD.rename(kSeenOld, kSeenPath);
+        return -1;
+    }
+    const int skip = total - kBaseLoad;
+    int seen = 0, kept = 0;
+    bool ok = true;
+    char mac[18];
+    uint8_t m[6];
+    while (ok && in.available()) {
+        if (!readSeenLine(in, m)) continue;
+        if (seen++ < skip) continue;
+        fmtMac(mac, sizeof(mac), m);
+        mac[17] = '\n';                         // fmtMac wrote 17 chars + NUL; the newline replaces the NUL
+        ok = out.write(reinterpret_cast<const uint8_t*>(mac), 18) == 18;
+        kept++;
+    }
+    in.close();
+    out.close();
+    if (!ok) {   // card full or gone mid-write: put the complete file back under its own name
+        SD.remove(kSeenPath);
+        SD.rename(kSeenOld, kSeenPath);
+        return -1;
+    }
+    return kept;
+}
+
 // Read /seen.csv, keeping the newest kBaseLoad entries (a ring over the file), then sort for binary search.
+// A file past kSeenRotate entries is trimmed to those same newest kBaseLoad (rotateSeen) while the card is mounted.
 void loadBaseline() {
     ev.baseN = 0;
     ev.baseLoaded = true;   // a card without /seen.csv is a valid, empty baseline
     g_evStats.baseFile = 0;
     File f = SD.open(kSeenPath, FILE_READ);
     if (!f) return;
-    char line[40];
     int ring = 0, total = 0;
     while (f.available()) {
-        const size_t n = f.readBytesUntil('\n', line, sizeof(line) - 1);
-        line[n] = 0;
         uint8_t mac[6];
-        if (!parseMac(line, mac)) continue;
+        if (!readSeenLine(f, mac)) continue;
         ev.base[ring] = macHash32(mac);
         ring = (ring + 1) % kBaseLoad;
         total++;
@@ -109,6 +167,14 @@ void loadBaseline() {
     std::sort(ev.base, ev.base + ev.baseN);
     ev.baseN = static_cast<int>(std::unique(ev.base, ev.base + ev.baseN) - ev.base);
     g_evStats.baseFile = total;
+    if (total > kSeenRotate) {
+        const int kept = rotateSeen(total);
+        if (kept >= 0) {
+            g_evStats.baseFile = kept;
+            if (serialRoom(80))
+                Serial.printf("{\"t\":\"log\",\"msg\":\"seen.csv rotated: %d -> %d\"}\n", total, kept);
+        }
+    }
 }
 
 void addRow(const char* kind, const EvtPending& e, const char* extra) {
@@ -157,6 +223,7 @@ bool flush() {
     if (sd.capEnabled || sd.readActive) return false;   // the card belongs to the capture / sdread right now
     const bool wasMounted = sd.mounted;
     if (!attachCard()) return false;
+    struct FlushMark { FlushMark() { ev.flushing = true; } ~FlushMark() { ev.flushing = false; } } mark;
     bool ok = true;
     if (ev.rowsN) {
         File f = SD.open(kEventsPath, FILE_APPEND);
@@ -243,6 +310,24 @@ void eventsDisable() {
 }
 
 int eventsBaseCount() { return ev.baseN; }
+
+// sdrm support (sd_sink.cpp sdRemoveFile). flush() opens /events.csv and /seen.csv between attachCard() and the
+// unmount; that is the one window in which deleting them would race the log, so sdrm refuses while it is open.
+// Today flush() and the command handler both run on the loop task, so a command always lands between flushes and
+// this is false whenever sdrm asks - the check keeps that true if flushing ever becomes incremental.
+bool eventsFlushing() { return ev.flushing; }
+
+// A card file was just deleted (card mounted, loop task). Deleting /seen.csv while the log is armed means "start
+// novelty over": reload the baseline from the card - now empty - instead of keeping the RAM set, which would go on
+// treating every device of the old baseline as known. MACs still waiting to be appended (newMacs) belonged to the
+// deleted baseline and are dropped with it; their "new" rows are already in /events.csv. Deleting /events.csv
+// needs nothing: the next flush creates it again with its header (rows still buffered land there).
+void eventsFileRemoved(const char* path) {
+    if (!g_eventsOn || strcmp(path, kSeenPath) != 0) return;
+    ev.newN = 0;
+    loadBaseline();          // no file: baseLoaded = true, baseN = 0, baseFile = 0
+    g_evStats.cardOk = true; // the card answered the delete
+}
 
 // A card just appeared: attach on the next serviceEvents() pass instead of waiting out kRetryMs.
 void eventsNudge() { ev.lastTryMs = millis() - kRetryMs; }

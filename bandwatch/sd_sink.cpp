@@ -321,6 +321,41 @@ void sdListFiles() {
     sdUnmount();
 }
 
+// "sdrm <name>": delete one file in the card root. Plain names only - one optional leading '/', then 1-39 chars of
+// [A-Za-z0-9._-] with no ".." (every name the device writes fits; the 39 matches the host's guard: "sdrm /" plus
+// the name must fit the 47-char command line, and a truncated name would delete a different file). The charset
+// also keeps the name safe to echo inside the JSON ack. Refused (err line, card untouched) while an sdread is
+// streaming, when the file is the one sdcap is recording, or while the event log is mid-flush. Mounts on demand
+// and unmounts after (a capture keeps its mount). Deleting /seen.csv while the event log is armed resets its
+// baseline (eventsFileRemoved). docs/DEVELOPER.md §12.
+void sdRemoveFile(const char* arg) {
+    const char* name = (arg[0] == '/') ? arg + 1 : arg;
+    const size_t len = strlen(name);
+    bool okName = len > 0 && len <= 39 && !strstr(name, "..");
+    for (size_t i = 0; okName && i < len; i++) {
+        const char c = name[i];
+        okName = isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-';
+    }
+    if (!okName) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: bad file name (card root only, <= 39 chars)\"}\n"); return; }
+    char path[48];
+    snprintf(path, sizeof(path), "/%s", name);
+    if (sd.readActive) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: busy - a file is being pulled (sdread)\"}\n"); return; }
+    if (sd.capEnabled && !strcmp(sd.path, path)) {
+        Serial.printf("{\"t\":\"err\",\"msg\":\"sdrm: %s is being recorded - stop sdcap first\"}\n", path);
+        return;
+    }
+    if (eventsFlushing()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: busy - the event log is writing to the card\"}\n"); return; }
+    if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: no card\"}\n"); return; }
+    const char* why = "";
+    bool ok = false;
+    if (!SD.exists(path)) why = "no such file";
+    else if (!(ok = SD.remove(path))) why = "remove failed";
+    if (ok) eventsFileRemoved(path);   // card still mounted: a /seen.csv reset reads the (now absent) file
+    if (ok) Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdrm\",\"file\":\"%s\",\"ok\":1}\n", path);
+    else Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdrm\",\"file\":\"%s\",\"ok\":0,\"msg\":\"%s\"}\n", path, why);
+    sdUnmount();
+}
+
 void sdServiceFlush() {
     if (!sd.capEnabled) return;
     if (sd.ioFailed) {   // a write failed: almost always the card being pulled. Stop instead of failing forever.

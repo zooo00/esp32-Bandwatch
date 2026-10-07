@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Bandwatch pre-push: refuse history rewrites / deletions, run the fast host test tier.
+# Bypass deliberately with: git push --no-verify
+zero=0000000000000000000000000000000000000000
+while read -r lref lsha rref rsha; do
+  if [ "$lsha" = "$zero" ]; then
+    echo "pre-push: refusing to delete $rref (use --no-verify if intended)" >&2; exit 1
+  fi
+  if [ "$rsha" != "$zero" ] && ! git merge-base --is-ancestor "$rsha" "$lsha" 2>/dev/null; then
+    echo "pre-push: $rref would not be a fast-forward (force-push / rewritten history / unknown remote commit)." >&2
+    echo "          Hand this to the owner with the exact command; --no-verify bypasses." >&2
+    exit 1
+  fi
+done
+cd "$(git rev-parse --show-toplevel)" || exit 1
+echo "pre-push: host tests (tests/host)..."
+python3 -m unittest discover -s tests/host -q || { echo "pre-push: host tests failed, push cancelled" >&2; exit 1; }

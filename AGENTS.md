@@ -18,3 +18,7 @@ and `docs/DEVELOPER.md` (design). Do not duplicate them here.
 - Commit with your own identity (the owner launches you with `GIT_AUTHOR_*`/`GIT_COMMITTER_*` set to opencode) and
   end each commit message with `Co-Authored-By: opencode <noreply@opencode.ai>`.
 - Say plainly at the end of the session what you changed and whether anything is unpushed.
+
+## One-time setup per clone
+`cp tools/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push` - refuses non-fast-forward pushes and
+branch deletions and runs the host tests. Hooks are not cloned with the repo, so repeat this on every machine.

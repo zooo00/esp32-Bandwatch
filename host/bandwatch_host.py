@@ -95,7 +95,24 @@ MIRROR_STALE_S = 0.5    # LCD mirror: regions left unpublished this long after t
 PROBE_MAX = 512         # cap on probing MACs kept (randomized MACs make one per probe burst)
 # C4 event-log text files on the card that "sdread" may pull besides the pcaps (they land in the captures dir under
 # the same name, overwritten on re-pull, and download through /file like a pcap).
-CARD_TEXT_FILES = ("events.csv", "events.old.csv", "seen.csv", "surveil.csv")
+CARD_TEXT_FILES = ("events.csv", "events.old.csv", "seen.csv", "seen.old.csv", "surveil.csv")
+CARD_PCAP_RE = re.compile(r"^bandwatch-(?:wifi|ble|802154)-[^\s/\\]+\.pcap$")
+
+
+def card_file_name(path):
+    """The bare card-root name for an "sdread"/"sdrm" request, or None when it is not one we may touch.
+
+    The card lists bare names ("bandwatch-wifi-..."), but SD.open wants an absolute path, so either form is
+    accepted (one leading "/") and the caller sends "/name". Only the card root, only our own files: a pcap the
+    device named, or one of CARD_TEXT_FILES - so no "..", no nested path, no other file on the card. The name
+    must be <= 39 chars: "sdread /" is 8 chars and the device's line buffer holds 47, so a longer name loses its
+    last char on the way in (and "sdrm /" would then delete a different, truncated name)."""
+    if not isinstance(path, str):
+        return None
+    name = path[1:] if path.startswith("/") else path
+    if not name or len(name) > 39 or "/" in name or "\\" in name or ".." in name:
+        return None
+    return name if (CARD_PCAP_RE.match(name) or name in CARD_TEXT_FILES) else None
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "bandwatch", "oui.csv")
 
@@ -376,6 +393,7 @@ class Bandwatch:
             "ble": {"devs": 0, "cycles": 0},
             "sd": None,              # {"mounted","mb","cap","file","frames","bytes","err","clock"}
             "sd_read": None,         # a card file being pulled off: {name,total,received,done,path}
+            "sd_rm": None,           # last card-file delete: {name,pending,ok,msg,t} (the dashboard's confirm/toast)
             "events": None,          # C4 SD event log status, the device's "ev" object (None = old firmware)
             # completed captures this session, per sink, for the dashboard counters
             "saved": {"usb": {"count": 0, "last": None, "frames": 0, "bytes": 0},
@@ -765,6 +783,8 @@ class Bandwatch:
                 self._sd_read_start(msg.get("file"), msg.get("bytes"))   # the ack precedes the S chunks
             elif msg.get("cmd") == "sdread_done":
                 self._sd_read_finish(True)
+            elif msg.get("cmd") == "sdrm":
+                self._sd_rm_result(msg.get("file"), bool(msg.get("ok")), msg.get("msg"))
         elif t == "sdls":
             # One-shot listing. hello replaces st["sd"] wholesale (no files field), so the dashboard re-asks
             # whenever the card is present and the list is missing; sent<total means it was truncated.
@@ -787,6 +807,8 @@ class Bandwatch:
                 st["sd"] = sd
             if text.startswith("sdread"):
                 self._sd_read_finish(False)   # the file will not be coming; close out the half-built buffer
+            elif t == "err" and text.startswith("sdrm:"):
+                self._sd_rm_result(None, False, text[5:].strip())   # refused (busy, no card, bad name)
             elif t == "err" and str(msg.get("msg", "")).startswith("sdcap:") and "recording stopped" in str(msg.get("msg")):
                 # A card write failed (pulled mid-recording): the device has already stopped. Clear cap now
                 # rather than wait for the next d/ble line's "sdc", and let _sd_track count the partial file.
@@ -1156,7 +1178,7 @@ class Bandwatch:
         """The 'sdread' ack precedes the chunks and carries the file's size."""
         self._sd_read = {"name": name or "bandwatch.pcap", "total": total or 0, "buf": bytearray()}
         self.state["sd_read"] = {"name": os.path.basename(self._sd_read["name"]), "total": self._sd_read["total"],
-                                 "received": 0, "done": False}
+                                 "received": 0, "done": False, "failed": False}
 
     def _sd_read_finish(self, done):
         r = getattr(self, "_sd_read", None)
@@ -1166,6 +1188,7 @@ class Bandwatch:
         st = dict(self.state.get("sd_read") or {})
         st["received"] = len(r["buf"])
         st["done"] = done
+        st["failed"] = not done   # an error line ended it: the dashboard stops showing a pull in progress
         if done and r["buf"]:   # write it next to the USB captures; same name as on the card, overwritten on re-pull
             path = os.path.join(self.captures_dir, os.path.basename(r["name"]))
             try:
@@ -1177,6 +1200,39 @@ class Bandwatch:
                 st.pop("path", None)
                 self.state["log"].append(f"sd pull could not write the file: {e}")
         self.state["sd_read"] = st
+
+    # ---------------- sdrm (delete a card file) ----------------
+    def sd_rm_request(self, name):
+        """Called by the HTTP handler just before "sdrm /name" goes out: the dashboard shows it as pending."""
+        self.state["sd_rm"] = {"name": os.path.basename(name), "pending": True, "ok": None, "msg": "",
+                               "t": time.time()}
+
+    def _sd_rm_result(self, path, ok, text):
+        """The device's sdrm ack ({"ok":1|0,"msg":..}) or an "sdrm: ..." err line (refused before touching the
+        card; it names no file, so it is pinned on the request in flight). A delete drops the file from the
+        cached listing at once and re-asks sdls for the card's real state. Pulled copies in the captures dir are
+        never touched: deleting on the card is not deleting the local file."""
+        cur = self.state.get("sd_rm") or {}
+        name = os.path.basename(str(path)) if path else cur.get("name", "")
+        self.state["sd_rm"] = {"name": name, "pending": False, "ok": ok, "msg": str(text or ""), "t": time.time()}
+        if ok:
+            self.state["log"].append(f"sd file deleted on card: {name}")
+            with self.dlock:
+                sd = self.state.get("sd") or {}
+                files = sd.get("files")
+                if isinstance(files, list):
+                    kept = [f for f in files if os.path.basename(str(f[0])) != name]
+                    gone = len(files) - len(kept)
+                    if gone:
+                        sd["files"] = kept
+                        try:
+                            sd["file_total"] = max(0, int(sd.get("file_total", len(files))) - gone)
+                        except (TypeError, ValueError):
+                            sd["file_total"] = len(kept)
+                self.state["sd"] = sd
+            self.send("sdls")   # the card's own word on what is left
+        else:
+            self.state["log"].append(f"sd delete failed: {name or '?'}{': ' + str(text) if text else ''}")
 
     def handle_sd_chunk(self, raw):
         """One 'S <n> <base64>' chunk of an sdread file streaming off the card (device: serviceSdRead)."""
@@ -1361,7 +1417,7 @@ class Bandwatch:
                               for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
-             "sd_read": st["sd_read"], "saved": st["saved"], "events": st["events"],
+             "sd_read": st["sd_read"], "sd_rm": st["sd_rm"], "saved": st["saved"], "events": st["events"],
             "oui_source": self.oui.source,
         }
 
@@ -1484,17 +1540,15 @@ def make_handler(bw, classic_path, v2_path=None, ui="v2"):
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
                 elif cmd == "events":   # C4 SD event log; persists on the device
                     bw.send(f"events {1 if req.get('value') else 0}")
-                elif cmd == "sdread":
-                    name = (req.get("path") or "").lstrip("/")
-                    # The card lists bare names ("bandwatch-wifi-..."), but SD.open wants an absolute path, so we
-                    # accept either and normalize to "/name". "sdread /" is 8 chars and the device's line buffer
-                    # holds 47, so the name must be <= 39 or its last char is silently dropped on the way in.
-                    # Besides the pcaps, the C4 event-log files can be pulled (fixed names, all well under 39).
-                    if (re.match(r"^bandwatch-(?:wifi|ble|802154)-[^\s/\\]+\.pcap$", name)
-                            or name in CARD_TEXT_FILES) and len(name) <= 39:
-                        bw.send(f"sdread /{name}")
-                    else:
+                elif cmd in ("sdread", "sdrm"):
+                    # sdread pulls a card file to the captures dir; sdrm deletes it on the card (the pulled copy
+                    # here stays). Same guard for both: card root, our own file names, <= 39 chars.
+                    name = card_file_name(req.get("path") or "")
+                    if not name:
                         return self._json({"error": "bad card file path"}, 400)
+                    if cmd == "sdrm":
+                        bw.sd_rm_request(name)
+                    bw.send(f"{cmd} /{name}")
                 elif cmd == "mirror":
                     bw.send(f"mirror {1 if req.get('value') else 0}")
                 elif cmd == "page" and req.get("value") in ("next", "prev"):

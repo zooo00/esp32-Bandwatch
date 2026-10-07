@@ -11,9 +11,17 @@ constexpr uint32_t kCapHeapReserve = 14000;   // keep this much heap free when s
 constexpr uint32_t kMinFreeHeapB = 24 * 1024;
 
 // Single-producer (Wi-Fi task, NimBLE host task, 802.15.4 ISR) / single-consumer (loop) ring buffer for
-// captured frames. Allocated from the heap only while a capture runs (~32 KB), so it costs nothing otherwise.
+// captured frames. Allocated from the heap only while a capture runs, so it costs nothing otherwise: ~32 KB in
+// Wi-Fi modes, ~2.8 KB in BLE / 802.15.4, whose frames never exceed kCapSmallLen (capSlotRoom per ring).
 CapFrame* capRing = nullptr;
 int capSlots = 0;
+namespace {
+uint16_t capSlotRoom = 0;         // payload bytes per slot of the live ring (kCapMaxLen or kCapSmallLen)
+size_t capStride = 0;             // bytes per slot: sizeof(CapFrame) header + capSlotRoom, word-aligned
+inline CapFrame* capSlotAt(int i) {
+    return reinterpret_cast<CapFrame*>(reinterpret_cast<uint8_t*>(capRing) + static_cast<size_t>(i) * capStride);
+}
+} // namespace
 volatile uint8_t capHead = 0;     // next slot the producer writes
 volatile uint8_t capTail = 0;     // next slot the consumer reads
 bool trackAddr1 = true;           // tier-1 receiver-side sightings (see trackWifiDevice)
@@ -31,17 +39,26 @@ const char kB64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456
 bool ensureCapRing() {
     if (capRing) return true;
     capDropped = 0; capSent = 0; capHead = 0; capTail = 0;
+    // Slot size follows the radio that is up now. Every mode change releases the ring (setBandMode ->
+    // releaseCapture), so a ring never outlives the mode it was sized for; producers clamp to the room
+    // capReserve() reports regardless, so a mismatch could only truncate a frame, never overrun a slot.
+    const uint16_t room = wifiMode() ? kCapMaxLen : kCapSmallLen;
+    const size_t stride = (sizeof(CapFrame) + room + 3u) & ~static_cast<size_t>(3u);
     const uint32_t freeHeap = ESP.getMaxAllocHeap();
-    int slots = (freeHeap > kCapHeapReserve) ? static_cast<int>((freeHeap - kCapHeapReserve) / sizeof(CapFrame)) : 0;
+    int slots = (freeHeap > kCapHeapReserve) ? static_cast<int>((freeHeap - kCapHeapReserve) / stride) : 0;
     if (slots > kCapSlotsMax) slots = kCapSlotsMax;
     // Also leave the floor below standing - plus what stepping to the heaviest LCD page would take, or a
     // capture started on a light page goes under it on the next BOOT tap. A smaller ring beats refusing.
     const uint32_t totalFree = ESP.getFreeHeap();
     const uint32_t keep = kMinFreeHeapB + lcdPageHeadroomB();
-    const int floorSlots = (totalFree > keep) ? static_cast<int>((totalFree - keep) / sizeof(CapFrame)) : 0;
+    const int floorSlots = (totalFree > keep) ? static_cast<int>((totalFree - keep) / stride) : 0;
     if (slots > floorSlots) slots = floorSlots;
     if (slots >= kCapSlotsMin) {
-        capRing = static_cast<CapFrame*>(malloc(sizeof(CapFrame) * slots));
+        // capActive is false whenever capRing is null (releaseCapture / refitCapRing clear it first), so no
+        // producer can see the new pointer before room and stride are set.
+        capSlotRoom = room;
+        capStride = stride;
+        capRing = static_cast<CapFrame*>(malloc(stride * slots));
         capSlots = capRing ? slots : 0;
     }
     if (!capRing) {
@@ -69,6 +86,15 @@ bool ensureCapRing() {
 namespace {
 // Free only the buffer; the sink flags are the caller's business. Clear capActive first so no producer
 // reserves a slot in it.
+//
+// Freeing under live producers (Wi-Fi task, NimBLE host task, 802.15.4 ISR doing capReserve -> memcpy ->
+// capCommit) is safe only because of three facts; break one and this becomes a use-after-free mid-copy, or a
+// divide by zero in capReserve's "% capSlots":
+//   1. every producer runs above the loop task (Wi-Fi p23, NimBLE p21, ISR vs loop p1) on this single core, so
+//      the loop - the only caller - can never be scheduled while a producer is between reserve and commit;
+//   2. no producer blocks or yields between capReserve() and capCommit();
+//   3. callers clear capActive before calling this, and the stores below go capRing = nullptr first, then
+//      capSlots = 0, so a producer that passes capReserve's checks always sees a live ring and capSlots > 0.
 void freeCapRing() {
     if (!capRing) return;
     CapFrame* r = capRing;
@@ -112,8 +138,9 @@ void syncCapActive() {
 
 // The one ring-access discipline for all three producers (Wi-Fi task, NimBLE host task, 802.15.4 ISR):
 // reserve a slot, fill it, commit so the tail only advances on commit. A slow consumer sees a full ring;
-// we count the drop and keep the radio going.
-CapFrame* capReserve(uint8_t& nextHead) {
+// we count the drop and keep the radio going. Safe against freeCapRing() only under the three facts listed
+// there. room = how many payload bytes this slot holds: the producer clamps capLen to it.
+CapFrame* capReserve(uint8_t& nextHead, uint16_t& room) {
     if (!capActive || !capRing) return nullptr;
     const uint8_t head = capHead;
     nextHead = static_cast<uint8_t>((head + 1) % capSlots);
@@ -121,7 +148,9 @@ CapFrame* capReserve(uint8_t& nextHead) {
         capDropped = capDropped + 1;   // consumer too slow: drop, but count it
         return nullptr;
     }
-    return &capRing[head];
+    room = capSlotRoom;
+    // Open-coded rather than capSlotAt(): this runs from IRAM, and a helper GCC chose not to inline would be in flash.
+    return reinterpret_cast<CapFrame*>(reinterpret_cast<uint8_t*>(capRing) + static_cast<size_t>(head) * capStride);
 }
 
 void capCommit(uint8_t nextHead) {
@@ -159,7 +188,7 @@ void drainCapture() {
     int budget = 8;
     const uint32_t started = micros();
     while (capRing && capTail != capHead && budget-- > 0) {
-        const CapFrame& f = capRing[capTail];
+        const CapFrame& f = *capSlotAt(capTail);
         const bool usbWant = captureEnabled;
         const bool usbRoom = serialRoom((f.capLen * 4) / 3 + 40);
         if (usbWant && !usbRoom && !sd.capEnabled) return;   // USB-only: stall rather than lose the frame
@@ -172,7 +201,7 @@ void drainCapture() {
             capDropped = capDropped + 1;                    // SD is recording: never block the card on USB
         }
         // A failed card write (pulled card, usually) is reported and closed once, in sdServiceFlush() below.
-        if (sd.capEnabled && !sd.ioFailed && !sdWriteFrame(f)) { sd.dropped++; sd.ioFailed = true; }
+        if (sd.capEnabled && !sd.ioFailed && !sdWriteFrame(f)) sd.ioFailed = true;
         capTail = (capTail + 1) % capSlots;
         // SD writes can stall for tens of ms on card GC; hopIfNeeded() shares this task, so cap the time.
         if (sd.capEnabled && (micros() - started) > kSdBudgetUs) break;

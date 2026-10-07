@@ -9,7 +9,6 @@
 
 ProbeEvt g_probeQ[kProbeQ];
 volatile uint8_t probeHead = 0, probeTail = 0;
-volatile uint32_t probeDropped = 0;
 
 namespace {
 
@@ -29,7 +28,6 @@ typedef struct {
 
 typedef struct {
     wifi_ieee80211_mac_hdr_t hdr;
-    uint8_t payload[0];
 } wifi_ieee80211_packet_t;
 
 inline uint16_t macHash(const uint8_t* mac) {
@@ -70,6 +68,8 @@ void IRAM_ATTR parseBeaconIes(WifiDev& d, const uint8_t* payload, uint16_t sigLe
                 break;
             case 191: phy |= 4; break;                      // VHT capabilities -> 802.11ac
             case 192:                                       // VHT operation: channel width
+                // Width 0 means "20 or 40 MHz" (the HT operation IE above decides which), so it leaves bw alone.
+                // HE (ax) operation is not parsed for width: an ax AP shows what its HT/VHT IEs said.
                 if (len >= 3) {
                     if (v[0] == 1) bw = (v[2] != 0) ? 16 : 8;
                     else if (v[0] == 2 || v[0] == 3) bw = 16;
@@ -145,7 +145,9 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
     if (fresh) {
         memset(&d, 0, sizeof(d));
         memcpy(d.mac, mac, 6);
-        d.maxRssi = rssi;
+        // A tier-1 slot has never been heard: rssi is the *sender's* (§15), so it must not seed maxRssi. -128
+        // (not 0) so the device's own first frame still raises it.
+        d.maxRssi = destOnly ? INT8_MIN : rssi;
         d.surv = survLookup(mac);
         if (destOnly) d.flags |= 4;
         eventFlag(mac, rssi, currentChannelNum, d.surv, destOnly ? EVF_TIER1 : 0);   // C4: no-op unless events on
@@ -187,7 +189,7 @@ void IRAM_ATTR queueProbe(const uint8_t* p, uint16_t sigLen, int8_t rssi) {
     if (tag != 0 || len == 0 || len > 32 || 26 + len > sigLen - 4) return;
     const uint8_t head = probeHead;
     const uint8_t next = static_cast<uint8_t>((head + 1) % kProbeQ);
-    if (next == probeTail) { probeDropped = probeDropped + 1; return; }
+    if (next == probeTail) return;   // queue full: the client repeats its probe within seconds anyway
     ProbeEvt& e = g_probeQ[head];
     memcpy(e.mac, p + 10, 6);   // addr2: the probing client
     e.rssi = rssi;
@@ -253,11 +255,12 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (type == WIFI_PKT_MGMT && pkt->payload[0] == 0x40) queueProbe(pkt->payload, sigLen, pkt->rx_ctrl.rssi);   // C1
 
     uint8_t nh;
-    CapFrame* slot = capReserve(nh);
+    uint16_t room;
+    CapFrame* slot = capReserve(nh, room);
     if (slot) {
         uint16_t n = sigLen;
         if (n > capSnapLen) n = capSnapLen;
-        if (n > kCapMaxLen) n = kCapMaxLen;
+        if (n > room) n = room;
         slot->ts_us = pkt->rx_ctrl.timestamp;
         slot->len = sigLen;
         slot->capLen = n;
@@ -287,7 +290,10 @@ void startWifi() {
     WiFi.persistent(false);
     WiFi.mode(WIFI_STA);     // esp_wifi_init + esp_wifi_start
     WiFi.setSleep(false);
-    (void)esp_wifi_set_max_tx_power(82);   // explicit TX power for raw injection (like Marauder's attack profile)
+    // Explicit TX power for raw injection (like Marauder's attack profile). Units are 0.25 dBm (range 8-84), so
+    // 82 = 20.5 dBm, next to the radio's maximum - not a quiet level. Sniffing never transmits; this only
+    // matters to deauth and the txtest diagnostic.
+    (void)esp_wifi_set_max_tx_power(82);
     wifi_tx_rate_config_t txcfg = { .phymode = WIFI_PHY_MODE_HT20, .rate = WIFI_PHY_RATE_MCS0_LGI, .ersu = false, .dcm = false };
     (void)esp_wifi_config_80211_tx(WIFI_IF_STA, &txcfg);   // raw mgmt-frame rate: 6 Mbps OFDM, works on both bands
 

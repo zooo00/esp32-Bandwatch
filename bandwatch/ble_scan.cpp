@@ -173,8 +173,9 @@ int bleGapEvent(struct ble_gap_event* event, void* arg) {
         bleScan.advSeen = bleScan.advSeen + 1;
 
         uint8_t nh;                                  // same single-producer discipline as the Wi-Fi path
-        CapFrame* slot = capReserve(nh);
-        if (slot) {
+        uint16_t room;
+        CapFrame* slot = capReserve(nh, room);
+        if (slot && room >= 72) {                    // the largest legacy LL record buildBleLlFrame makes (4+2+6+57+3)
             const uint16_t n = buildBleLlFrame(slot->data, d.addr.val, d.addr.type, pdu,
                                                d.data, d.length_data);
             slot->ts_us = micros();

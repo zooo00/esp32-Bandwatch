@@ -1,13 +1,51 @@
 // Host protocol for Bandwatch: one JSON object per line over USB serial; captured frames stream as
 // "P ..." base64 lines (the host merges them into a pcap). Line shapes must stay in sync with
 // handle_line/merge_* in host/bandwatch_host.py and docs/DEVELOPER.md. Every send checks serialRoom()
-// first so a slow or absent host drops whole lines, never half of one.
+// first so a slow or absent host drops whole lines, never half of one (rule 6): streamed lines against a
+// worst-case budget derived next to them, short ack/err lines through sendLinef().
 #include "bandwatch_core.h"
 #include "LVGL_Driver.h"   // LCD_WIDTH/LCD_HEIGHT for the mirror ack
-#include <WiFi.h>
 #include <esp_wifi.h>   // C API for the txtest branch (promiscuous on/off, channel)
 #include <SD.h>     // the sdinfo branch reports card size while mounted
+#include <stdarg.h>
 #include <string.h>
+
+bool sendLinef(const char* fmt, ...) {
+    char buf[320];   // the longest ack is sdread's with a fully escaped 40-char path (~300 B)
+    va_list ap;
+    va_start(ap, fmt);
+    const int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    if (n <= 0 || static_cast<size_t>(n) >= sizeof(buf) || !serialRoom(static_cast<size_t>(n))) return false;
+    Serial.write(reinterpret_cast<const uint8_t*>(buf), static_cast<size_t>(n));
+    return true;
+}
+
+// Escaped size of one character inside a JSON string: \" and \\ take 2, other control bytes a 6-byte \u escape.
+static inline size_t jsonCharLen(unsigned char c) { return (c == '"' || c == '\\') ? 2 : (c < 0x20) ? 6 : 1; }
+
+size_t jsonStrLen(const char* s) {
+    size_t n = 2;   // the quotes
+    for (; *s; s++) n += jsonCharLen(static_cast<unsigned char>(*s));
+    return n;
+}
+
+bool jsonQuote(char* out, size_t n, const char* s) {
+    if (!n) return false;
+    out[0] = 0;
+    if (jsonStrLen(s) + 1 > n) return false;
+    size_t o = 0;
+    out[o++] = '"';
+    for (; *s; s++) {
+        const unsigned char c = static_cast<unsigned char>(*s);
+        if (c == '"' || c == '\\') { out[o++] = '\\'; out[o++] = static_cast<char>(c); }
+        else if (c < 0x20) { snprintf(out + o, 7, "\\u%04x", c); o += 6; }
+        else out[o++] = static_cast<char>(c);
+    }
+    out[o++] = '"';
+    out[o] = 0;
+    return true;
+}
 
 void fmtMac(char* out, size_t n, const uint8_t* m) {
     snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x", m[0], m[1], m[2], m[3], m[4], m[5]);
@@ -54,10 +92,16 @@ void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px, bool last)
 
 namespace {
 
+// The whole argument must be the address: %n records where the match ended and anything after it is rejected.
+// Without that, an 8-byte 802.15.4 id "aa:..:ff:00:11" parsed here as a 6-byte MAC and the key hunt never ran.
 bool parseMac(const char* s, uint8_t* out) {
     unsigned v[6];
-    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6 &&
-        sscanf(s, "%2x-%2x-%2x-%2x-%2x-%2x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5]) != 6) return false;
+    int end = 0;
+    const bool colon = sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x%n", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &end) == 6 && !s[end];
+    if (!colon) {
+        end = 0;
+        if (sscanf(s, "%2x-%2x-%2x-%2x-%2x-%2x%n", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &end) != 6 || s[end]) return false;
+    }
     for (int i = 0; i < 6; i++) out[i] = static_cast<uint8_t>(v[i]);
     return true;
 }
@@ -67,7 +111,9 @@ void fmtKey154(char* out, size_t n, const Dev154& d) {
     else snprintf(out, n, "%04x/%04x", d.pan, d.shortAddr);
 }
 
-// Write a JSON string literal (quoted, escaped) to Serial.
+} // namespace
+
+// Write a JSON string literal (quoted, escaped) to Serial: exactly jsonStrLen(s) bytes.
 void printJsonStr(const char* s) {
     Serial.write('"');
     for (; *s; s++) {
@@ -78,6 +124,8 @@ void printJsonStr(const char* s) {
     }
     Serial.write('"');
 }
+
+namespace {
 
 // C4 event-log state, as one JSON object body (~150 B): armed, card usable, baseline in RAM / in the file, rows
 // written / waiting, surveillance and new-device counts, rows dropped, card errors, novelty checks skipped for
@@ -132,10 +180,16 @@ void huntIdText(char* out, size_t n) {
 }
 
 void sendHello() {
-    // 900, not 780: "both" mode (38 channels) + an active hunt + a targeted deauth + an SD path summed to
-    // ~790, and a line that passes the check and then overruns is truncated mid-JSON, which is exactly what
-    // the drop-whole-lines rule exists to prevent.
-    if (!serialRoom(920)) return;   // +20 for "alerts" (v1.19)
+    // Worst case, from the format strings below with every field at its widest: 132 B of literal text in the
+    // first printf + ver/dwell/step/band (16) + the channel list (kChannelCount x 4, "165,") + the park..hunt
+    // printf (119, incl. a 23-char 15.4 hunt id) + "h" (32) + a targeted "deauth" (74) + "sd" (166, incl. a 47-char
+    // path) + mir/alerts (20) + "ev" (189) + "}\n" = 750 + 152 = 902, plus the four esp_err_to_name() strings,
+    // measured at run time because their length is the one part not bounded here. A line that passes the check
+    // and then overruns is truncated mid-JSON, which is exactly what the drop-whole-lines rule exists to prevent.
+    constexpr size_t kHelloFixed = 750 + kChannelCount * 4;
+    const size_t errLen = strlen(esp_err_to_name(errCountry)) + strlen(esp_err_to_name(errBand)) +
+                          strlen(esp_err_to_name(errProto)) + strlen(esp_err_to_name(errPromisc));
+    if (!serialRoom(kHelloFixed + errLen)) return;
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"spec_step\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(dwellMs()), static_cast<unsigned>(specStepMhz), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
@@ -213,9 +267,10 @@ void sendDwell(int idx) {
 void sendSweep() {
     if (modeSpec()) {
         // Fine spectrum: one message per full sweep, all bins, as [edMin, edMean, edMax, edSamples] in order.
-        // Frequency is lo + i*step (not sent per bin). Up to 84 bins (~1.7 kB) — dropped whole if no room.
+        // Frequency is lo + i*step (not sent per bin). Up to 84 bins (~2 kB) — dropped whole if no room.
+        // Budget: 84 B of header + tail with the counters at their widest, 23 B per bin (",[-128,-128,-128,65535]").
         const int nb = specBinCount();
-        if (!serialRoom(static_cast<size_t>(nb) * 22 + 80)) return;
+        if (!serialRoom(static_cast<size_t>(nb) * 23 + 84)) return;
         Serial.printf("{\"t\":\"fs\",\"n\":%lu,\"step\":%u,\"lo\":%d,\"count\":%d,\"bins\":[",
                       static_cast<unsigned long>(sweepCount), specStepMhz, kSpecLoMhz, nb);
         for (int i = 0; i < nb; i++) {
@@ -225,7 +280,10 @@ void sendSweep() {
         Serial.printf("],\"heap\":%u}\n", static_cast<unsigned>(ESP.getFreeHeap()));
         return;
     }
-    if (!serialRoom(1500)) return;
+    // Budget: 54 B of prefix and 51 B of tail with the counters at their widest, plus 48 B per channel
+    // (",[165,100.0,<frames 10>,<bytes 10>,65535,65535,2]"). "both" (38 channels) comes to 1,929 B; the old flat
+    // 1500 could pass the check and then overrun on a busy channel set.
+    if (!serialRoom(105 + static_cast<size_t>(enabledCount()) * 48)) return;
     Serial.printf("{\"t\":\"s\",\"n\":%lu,\"g\":%.1f,\"band\":\"%s\",\"ch\":[", static_cast<unsigned long>(sweepCount),
                   globalActivityMax(), kBandName[bandMode]);
     bool first = true;
@@ -248,7 +306,7 @@ void sendBleStatus() {
     int n = 0;
     const uint32_t now = millis();
     portENTER_CRITICAL(&g_devMux);
-    for (int i = 0; i < kBleDevSlots; i++) if (bleDevs[i].lastMs && now - bleDevs[i].lastMs <= kDevFreshMs) n++;
+    for (int i = 0; i < kBleDevSlots; i++) if (devFresh(bleDevs[i].lastMs, now, kDevFreshMs)) n++;
     portEXIT_CRITICAL(&g_devMux);
     Serial.printf("{\"t\":\"ble\",\"devs\":%d,\"cycles\":%lu,\"heap\":%u,\"adv\":%lu,\"scan\":\"%s\",\"running\":\"%s\",\"switches\":%lu,"
                   "\"cap\":%d,\"drop\":%lu,\"sdc\":%d,\"sdf\":%lu,\"sdb\":%lu,",
@@ -269,7 +327,7 @@ void sendDevices() {
     DevRef* refs = g_devRefs;
     if (mode154()) {
         const int n = collect154Refs(refs, kDev154Slots, kDevFreshMs);
-        if (!serialRoom(40 + n * 80)) return;
+        if (!serialRoom(40 + n * 84)) return;   // a row at its widest (extended id, every number maxed) is 83 B
         // [id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]
         Serial.print("{\"t\":\"z\",\"dev\":[");
         int emitted = 0;
@@ -278,7 +336,7 @@ void sendDevices() {
             if (!fetch154Dev(refs[i], d, kDevFreshMs)) continue;   // slot reused/evicted since collect: skip
             fmtKey154(mac, sizeof(mac), d);
             Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,%u,%u,%u,%u]", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
-                          static_cast<unsigned long>(now - d.lastMs), d.ch, d.pan, d.shortAddr, d.proto, d.flags, d.lqi);
+                          static_cast<unsigned long>(ageMs(now, d.lastMs)), d.ch, d.pan, d.shortAddr, d.proto, d.flags, d.lqi);
         }
         Serial.print("]}\n");
         return;
@@ -286,21 +344,36 @@ void sendDevices() {
     if (wifiMode()) {
         const int n = collectWifiRefs(refs, kWifiDevSlots, kDevFreshMs);
         // Sent in chunks of kWifiRowsPerLine rows, loudest first: a full 96-slot table (~12 kB) cannot fit the 8 KB
-        // TX buffer as one line. Each chunk is budgeted on its own (+8 per row: the association suffix field added
-        // in 1.5.5), and the host merges rows by MAC, so a chunk that does not fit this cycle (the quietest
-        // devices, last in RSSI order) just waits for the next one. Every chunk is a complete "w" line.
+        // TX buffer as one line. Each chunk is budgeted on its own, and the host merges rows by MAC, so a chunk that
+        // does not fit this cycle (the quietest devices, last in RSSI order) just waits for the next one. Every
+        // chunk is a complete "w" line.
+        //
+        // Budget per row = kWifiRowFixed (every number at its widest, the "aabbcc" suffix and the punctuation) + the
+        // real escaped length of ssid and cc: off-air strings keep '"' and '\\', which escape to 2 bytes, so a
+        // 32-char SSID can take 66. A first pass sums that over the chunk; the emitting pass re-fetches each row and
+        // skips (whole) any row that has grown past what is left, e.g. a beacon re-parsed in between.
         constexpr int kWifiRowsPerLine = 24;
+        constexpr size_t kWifiRowFixed = 98;
         for (int base = 0; base < n || (base == 0 && n == 0); base += kWifiRowsPerLine) {
             const int end = LV_MIN(n, base + kWifiRowsPerLine);
-            if (!serialRoom(40 + (end - base) * 126)) return;
+            size_t budget = 0;
+            for (int i = base; i < end; i++) {
+                WifiDev d;
+                if (fetchWifiDev(refs[i], d, kDevFreshMs))
+                    budget += kWifiRowFixed + jsonStrLen(d.ssid) + jsonStrLen(d.cc[0] ? d.cc : "");
+            }
+            if (!serialRoom(40 + budget)) return;
             Serial.print("{\"t\":\"w\",\"dev\":[");
             int emitted = 0;
             for (int i = base; i < end; i++) {
                 WifiDev d;
                 if (!fetchWifiDev(refs[i], d, kDevFreshMs)) continue;
+                const size_t rowLen = kWifiRowFixed + jsonStrLen(d.ssid) + jsonStrLen(d.cc[0] ? d.cc : "");
+                if (rowLen > budget) continue;
+                budget -= rowLen;
                 fmtMac(mac, sizeof(mac), d.mac);
                 Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
-                              static_cast<unsigned long>(now - d.lastMs), d.ch, d.flags);
+                              static_cast<unsigned long>(ageMs(now, d.lastMs)), d.ch, d.flags);
                 printJsonStr(d.ssid);
                 Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
                 printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
@@ -316,17 +389,28 @@ void sendDevices() {
         }
     } else {
         const int n = collectBleRefs(refs, kBleDevSlots, kDevFreshMs);
-        // A maxed row is ~110 B (int8 -128s, uint16 65535s, a 20-char name) plus escapes in the name; an
-        // under-budget row truncates the line mid-write instead of dropping it whole. 48 x 116 + 40 = 5.6 kB.
-        if (!serialRoom(40 + n * 116)) return;
+        // Budgeted like the Wi-Fi chunks: kBleRowFixed is a row with every number at its widest (int8 -128s,
+        // uint16 65535s, a 10-digit age) and the punctuation, plus the real escaped length of the name (a
+        // 20-char name of '"' is 42 B). An under-budget row would truncate the line mid-write instead of
+        // dropping it whole. Worst case 48 x (95 + 42) + 40 = 6.6 kB, under the 8 KB TX buffer.
+        constexpr size_t kBleRowFixed = 95;
+        size_t budget = 0;
+        for (int i = 0; i < n; i++) {
+            BleDev d;
+            if (fetchBleDev(refs[i], d, kDevFreshMs)) budget += kBleRowFixed + jsonStrLen(d.name);
+        }
+        if (!serialRoom(40 + budget)) return;
         Serial.print("{\"t\":\"b\",\"dev\":[");
         int emitted = 0;
         for (int i = 0; i < n; i++) {
             BleDev d;
             if (!fetchBleDev(refs[i], d, kDevFreshMs)) continue;
+            const size_t rowLen = kBleRowFixed + jsonStrLen(d.name);
+            if (rowLen > budget) continue;   // renamed since the first pass and no longer fits: skip it whole
+            budget -= rowLen;
             fmtMac(mac, sizeof(mac), d.mac);
             Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.adv,
-                          static_cast<unsigned long>(now - d.lastMs), d.addrType, d.company);
+                          static_cast<unsigned long>(ageMs(now, d.lastMs)), d.addrType, d.company);
             printJsonStr(d.name);
             Serial.printf(",%u,%d,%u,%u,%u,%u,%u]", d.appearance, d.txPower, d.svc, d.svcData, d.appleType,
                           d.flags, d.surv);
@@ -338,14 +422,17 @@ void sendDevices() {
 namespace {
 
 // Parse "aa:bb:cc:dd:ee:ff:00:11" (extended address) or "pan/short" (hex) into an 802.15.4 key.
+// Like parseMac, the whole argument must match (%n + end check).
 bool parseKey154(const char* s, uint8_t* key) {
     unsigned v[8];
-    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x:%2x:%2x", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7]) == 8) {
+    int end = 0;
+    if (sscanf(s, "%2x:%2x:%2x:%2x:%2x:%2x:%2x:%2x%n", &v[0], &v[1], &v[2], &v[3], &v[4], &v[5], &v[6], &v[7], &end) == 8 && !s[end]) {
         for (int i = 0; i < 8; i++) key[i] = static_cast<uint8_t>(v[i]);
         return true;
     }
     unsigned pan, sh;
-    if (sscanf(s, "%4x/%4x", &pan, &sh) == 2) {
+    end = 0;
+    if (sscanf(s, "%4x/%4x%n", &pan, &sh, &end) == 2 && !s[end]) {
         key[0] = 0xFF; key[1] = 0xFE; key[2] = pan & 0xFF; key[3] = (pan >> 8) & 0xFF;
         key[4] = sh & 0xFF; key[5] = (sh >> 8) & 0xFF; key[6] = 0; key[7] = 0;
         return true;
@@ -354,9 +441,8 @@ bool parseKey154(const char* s, uint8_t* key) {
 }
 
 void handleCommand(char* line) {
-    // Commands: "cap 0|1", "snap N", "park <ch>|0", "band 5g|2.4g|both|ble", "hunt <mac> [ch]" | "hunt 0",
-    //           "deauth <bssid>" | "deauth 0" (Wi-Fi modes only, kicks every station),
-    //           "dca <client_mac> <ap_bssid>" | "dca 0" (targeted: one station), "info"
+    // One command per line; the full list and each reply's shape are in docs/DEVELOPER.md (and CLAUDE.md).
+    // Every ack/err/log reply goes through sendLinef(), so a full TX buffer drops the reply whole (rule 6).
     char* sp = strchr(line, ' ');
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
@@ -366,49 +452,49 @@ void handleCommand(char* line) {
         const bool on = want && !modeSpec() && ensureCapRing();
         captureEnabled = on;
         syncCapActive();
-        if (want && modeSpec()) Serial.printf("{\"t\":\"log\",\"msg\":\"cap: no RX armed in spec mode\"}\n");
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"cap\",\"cap\":%d}\n", captureEnabled ? 1 : 0);
+        if (want && modeSpec()) sendLinef("{\"t\":\"log\",\"msg\":\"cap: no RX armed in spec mode\"}\n");
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"cap\",\"cap\":%d}\n", captureEnabled ? 1 : 0);
     } else if (!strcmp(line, "sdcap")) {
         const bool want = atoi(arg) != 0;
         if (want && modeSpec() && !sd.capEnabled) {   // no RX armed in spec: the file would never grow
-            Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: no RX armed in spec mode\"}\n");
+            sendLinef("{\"t\":\"err\",\"msg\":\"sdcap: no RX armed in spec mode\"}\n");
         } else if (want && !sd.capEnabled) {
             // Open the file first: mounting FATFS costs ~30 KB, and the ring must be sized against what is
             // left afterwards or kCapHeapReserve is not actually reserved. A ring that "cap 1" already made
             // was sized before the mount, so refit re-sizes it if the mount pushed heap under the floor.
             if (!sdOpenCapture()) {
-                Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: %s\"}\n",
-                              sd.mounted ? "could not open file on card" : "no SD card (check it is inserted)");
+                sendLinef("{\"t\":\"err\",\"msg\":\"sdcap: %s\"}\n",
+                          sd.mounted ? "could not open file on card" : "no SD card (check it is inserted)");
             } else if (!refitCapRing()) {
-                Serial.print("{\"t\":\"err\",\"msg\":\"sdcap: no capture ring\"}\n");
+                sendLinef("{\"t\":\"err\",\"msg\":\"sdcap: no capture ring\"}\n");
                 sdCloseCapture();
             } else if (serialRoom(140)) {
-                Serial.printf("{\"t\":\"log\",\"msg\":\"sd capture -> %s\"}\n", sd.path);
+                sendLinef("{\"t\":\"log\",\"msg\":\"sd capture -> %s\"}\n", sd.path);
             }
         } else if (!want) {
             sdCloseCapture();
         }
         syncCapActive();
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdcap\",\"sdcap\":%d,\"file\":\"%s\"}\n",
-                      sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "");
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"sdcap\",\"sdcap\":%d,\"file\":\"%s\"}\n",
+                  sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "");
     } else if (!strcmp(line, "sdinfo")) {
         const bool m = sdMount();
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdinfo\",\"sd\":%d,\"mb\":%lu,\"used_mb\":%lu,\"cap\":%d,\"file\":\"%s\","
-                      "\"frames\":%lu,\"bytes\":%lu,\"err\":%lu}\n",
-                      m ? 1 : 0, m ? static_cast<unsigned long>(SD.cardSize() / (1024 * 1024)) : 0UL,
-                      m ? static_cast<unsigned long>(SD.usedBytes() / (1024 * 1024)) : 0UL,
-                      sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
-                      static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
-                      static_cast<unsigned long>(sd.errors));
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"sdinfo\",\"sd\":%d,\"mb\":%lu,\"used_mb\":%lu,\"cap\":%d,\"file\":\"%s\","
+                  "\"frames\":%lu,\"bytes\":%lu,\"err\":%lu}\n",
+                  m ? 1 : 0, m ? static_cast<unsigned long>(SD.cardSize() / (1024 * 1024)) : 0UL,
+                  m ? static_cast<unsigned long>(SD.usedBytes() / (1024 * 1024)) : 0UL,
+                  sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
+                  static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
+                  static_cast<unsigned long>(sd.errors));
         sdUnmount();   // sdinfo is a probe, not a mount: it used to leave FATFS (~30 KB) mounted until the next
                        // capture or sdread came along. sdUnmount() keeps it when a capture/sdread owns the card.
     } else if (!strcmp(line, "sdface")) {    // diagnostic: show the card-out (0) / card-in (1) face without touching the card
         showSdFace(atoi(arg) != 0, "test");
-        Serial.print("{\"t\":\"ack\",\"cmd\":\"sdface\"}\n");
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"sdface\"}\n");
     } else if (!strcmp(line, "sdprobe")) {   // diagnostic: raw CMD0 reply of the presence probe (idle card only)
         const bool idle = !sd.mounted && !sd.capEnabled && !sd.readActive;
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdprobe\",\"r1\":%d,\"present\":%d}\n",
-                      idle ? sdProbeR1() : -1, sd.cardPresent ? 1 : 0);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"sdprobe\",\"r1\":%d,\"present\":%d}\n",
+                  idle ? sdProbeR1() : -1, sd.cardPresent ? 1 : 0);
     } else if (!strcmp(line, "sdls")) {
         sdListFiles();
     } else if (!strcmp(line, "sdread")) {
@@ -417,54 +503,57 @@ void handleCommand(char* line) {
         sdRemoveFile(arg);   // acks {"cmd":"sdrm","file","ok"}; refusals are "sdrm: ..." err lines
     } else if (!strcmp(line, "events")) {
         // C4: arm/disarm the SD event log (persisted). Arming works with no card: it retries the mount.
-        if (atoi(arg) != 0) { if (!eventsEnable()) Serial.print("{\"t\":\"err\",\"msg\":\"events: not enough free heap\"}\n"); }
+        if (atoi(arg) != 0) { if (!eventsEnable()) sendLinef("{\"t\":\"err\",\"msg\":\"events: not enough free heap\"}\n"); }
         else eventsDisable();
         saveSettings();
-        if (serialRoom(220)) { Serial.print("{\"t\":\"ack\",\"cmd\":\"events\","); printEvents(); Serial.print("}\n"); }
+        if (serialRoom(220)) { Serial.print("{\"t\":\"ack\",\"cmd\":\"events\","); printEvents(); Serial.print("}\n"); }   // 217 B at its widest
     } else if (!strcmp(line, "alerts")) {
         // D1: LED alert blips (surveillance / permit-join / new device), persisted. Never affects the deauth blink.
         g_ledAlerts = atoi(arg) != 0;
         saveSettings();
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"alerts\",\"alerts\":%d}\n", g_ledAlerts ? 1 : 0);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"alerts\",\"alerts\":%d}\n", g_ledAlerts ? 1 : 0);
     } else if (!strcmp(line, "ledtest")) {
         // Diagnostic: draw one blip now (bypasses the rate limit and the alerts switch; not over an active deauth).
         const LedAlertKind k = !strcmp(arg, "surv") ? LED_ALERT_SURV : !strcmp(arg, "join") ? LED_ALERT_JOIN
                              : !strcmp(arg, "new") ? LED_ALERT_NEW : LED_ALERT_NONE;
         if (k == LED_ALERT_NONE) {
-            Serial.print("{\"t\":\"err\",\"msg\":\"ledtest: surv|new|join\"}\n");
+            sendLinef("{\"t\":\"err\",\"msg\":\"ledtest: surv|new|join\"}\n");
         } else {
             ledAlertTest(k);
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"ledtest\",\"kind\":\"%s\",\"shown\":%d}\n", arg, ledBlipActive() ? 1 : 0);
+            sendLinef("{\"t\":\"ack\",\"cmd\":\"ledtest\",\"kind\":\"%s\",\"shown\":%d}\n", arg, ledBlipActive() ? 1 : 0);
         }
     } else if (!strcmp(line, "addr1")) {
         trackAddr1 = atoi(arg) != 0;
         saveSettings();
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"addr1\",\"addr1\":%d}\n", trackAddr1 ? 1 : 0);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"addr1\",\"addr1\":%d}\n", trackAddr1 ? 1 : 0);
     } else if (!strcmp(line, "blescan")) {
         if (!strcmp(arg, "active"))       bleScan.mode = BLE_SCAN_ACTIVE;
         else if (!strcmp(arg, "passive")) bleScan.mode = BLE_SCAN_PASSIVE;
         else if (!strcmp(arg, "auto"))    bleScan.mode = BLE_SCAN_AUTO;
         bleScan.lastSwitchMs = 0;   // apply the new policy on the next serviceBle() without waiting out the limit
         saveSettings();
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"blescan\",\"mode\":\"%s\",\"running\":\"%s\"}\n",
-                      bleScanModeName(), bleScan.active ? "active" : "passive");
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"blescan\",\"mode\":\"%s\",\"running\":\"%s\"}\n",
+                  bleScanModeName(), bleScan.active ? "active" : "passive");
     } else if (!strcmp(line, "time")) {
+        // ok = this value was applied. An out-of-range value leaves the clock as it was and acks ok 0, even
+        // when an earlier "time" already set it (the ack used to echo epochValid, which read as "applied").
         const uint32_t e = strtoul(arg, nullptr, 10);
-        if (e > 1600000000UL) { epochBase = e; epochBaseMs = millis(); epochValid = true; }
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"time\",\"epoch\":%lu,\"ok\":%d}\n",
-                      static_cast<unsigned long>(e), epochValid ? 1 : 0);
+        const bool applied = e > 1600000000UL;
+        if (applied) { epochBase = e; epochBaseMs = millis(); epochValid = true; }
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"time\",\"epoch\":%lu,\"ok\":%d}\n",
+                  static_cast<unsigned long>(e), applied ? 1 : 0);
     } else if (!strcmp(line, "snap")) {
         int n = atoi(arg);
         if (n < 32) n = 32;
         if (n > kCapMaxLen) n = kCapMaxLen;
         capSnapLen = n;
         saveSettings();
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"snap\",\"snap\":%d}\n", n);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"snap\",\"snap\":%d}\n", n);
     } else if (!strcmp(line, "park")) {
         const int ch = atoi(arg);
         const int idx = (ch > 0) ? indexOfChannel(ch) : -1;
         setPark((idx >= 0 && chanEnabled(idx)) ? idx : -1);
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"park\",\"park\":%d}\n", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"park\",\"park\":%d}\n", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
     } else if (!strcmp(line, "band")) {
         const BandMode prev = bandMode;
         if (!strcmp(arg, "5g")) setBandMode(BAND_5G);
@@ -477,7 +566,7 @@ void handleCommand(char* line) {
         else if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
         if (bandMode != prev) showBandSplash(bandMode, kSplashShowMs);   // name the new mode before its scan page
         if (bandMode != prev) saveSettings();   // persist the new mode (C3); park is intentionally not saved
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
         sendHello();
     } else if (!strcmp(line, "hunt")) {
         uint8_t mac[6];
@@ -486,12 +575,16 @@ void handleCommand(char* line) {
         if (sp2) { *sp2 = 0; ch = atoi(sp2 + 1); }
         uint8_t key[8];
         if (parseMac(arg, mac)) startHunt(mac, ch);
-        else if (parseKey154(arg, key)) { startHunt154(key); if (ch > 0) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); hunt.parked = true; } } }
+        else if (parseKey154(arg, key)) {
+            startHunt154(key);
+            // Park only where the 15.4 channel set is what is hopping: in a Wi-Fi mode its index is not a channel.
+            if (ch > 0 && mode154()) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); hunt.parked = true; } }
+        }
         else stopHunt();
         char m[26];
         huntIdText(m, sizeof(m));
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":%s%s%s,\"park\":%d}\n", hunt.active ? "\"" : "null",
-                      hunt.active ? m : "", hunt.active ? "\"" : "", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":%s%s%s,\"park\":%d}\n", hunt.active ? "\"" : "null",
+                  hunt.active ? m : "", hunt.active ? "\"" : "", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
         if (hunt.active && hunt.kind == 1 && mode154()) {
             // park on the channel the node was last seen on
             portENTER_CRITICAL(&g_devMux);
@@ -511,12 +604,10 @@ void handleCommand(char* line) {
         // "fc" is the FC byte0 now in force on the internal kick path: startDeauth resets the "kickfc"
         // diagnostic override, and echoing it here is the only place the host can see that it happened.
         if (deauth.active)
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":[\"%s\",%d,0,0],\"park\":%d,\"fc\":\"0x%02x\"}\n",
-                          m, ch, ch, kickFc);
+            sendLinef("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":[\"%s\",%d,0,0],\"park\":%d,\"fc\":\"0x%02x\"}\n",
+                      m, ch, ch, kickFc);
         else
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
-        if (deauth.active && serialRoom(140))   // DIAGNOSTIC: hmac slot used by the internal path + its state byte (picks the DA/SA mapping)
-            Serial.printf("{\"t\":\"log\",\"msg\":\"deauth slot %lx hstate %d\"}\n", *(const uint32_t*)deauth.slotPad, deauth.hstate);
+            sendLinef("{\"t\":\"ack\",\"cmd\":\"deauth\",\"deauth\":null,\"park\":%d}\n", ch);
     } else if (!strcmp(line, "dca")) {
         // "dca <client_mac> <ap_bssid>": kick one station off one AP. Anything unparseable, a missing second
         // argument or a non-Wi-Fi mode stops the attack rather than starting a broadcast one by accident.
@@ -530,10 +621,10 @@ void handleCommand(char* line) {
         fmtMac(a, sizeof(a), deauth.bssid);
         const int ch = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;   // startDeauthTargeted parks before this ack
         if (deauth.active)
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d,\"fc\":\"0x%02x\"}\n",
-                          c, a, deauth.targeted ? 1 : 0, ch, kickFc);
+            sendLinef("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":[\"%s\",\"%s\",%d,0,0],\"park\":%d,\"fc\":\"0x%02x\"}\n",
+                      c, a, deauth.targeted ? 1 : 0, ch, kickFc);
         else
-            Serial.printf("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
+            sendLinef("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
     } else if (!strcmp(line, "kickfc")) {
         // DIAGNOSTIC (§11): override the FC byte0 the internal kick path writes. "kickfc 80" sends a
         // beacon down the deauth descriptor path, so an external monitor can tell whether that path
@@ -544,12 +635,12 @@ void handleCommand(char* line) {
         // force, so a refused write is visible rather than silent.
         const uint8_t v = static_cast<uint8_t>(strtoul(arg, nullptr, 16));
         if (v) kickFc = v;
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"kickfc\",\"fc\":\"0x%02x\"}\n", kickFc);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"kickfc\",\"fc\":\"0x%02x\"}\n", kickFc);
     } else if (!strcmp(line, "kickpath")) {
         // 0 (default) = raw esp_wifi_80211_tx, the only path measured to reach the air (§11).
         // 1 = driver-internal slot, which transmits nothing for any subtype; kept for §9 offset work.
         useInternalKick = atoi(arg) != 0;
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"kickpath\",\"internal\":%d}\n", useInternalKick ? 1 : 0);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"kickpath\",\"internal\":%d}\n", useInternalKick ? 1 : 0);
     } else if (!strcmp(line, "txtest")) {
         // 0 = off, 1 = beacon with promiscuous RX still on, 2 = beacon with promiscuous RX turned off.
         // Mode 2 tests whether promiscuous mode is what stops the PHY from transmitting.
@@ -559,11 +650,11 @@ void handleCommand(char* line) {
         esp_err_t pr = ESP_OK;
         if (mode == 2)      pr = esp_wifi_set_promiscuous(false);
         else if (mode <= 0) pr = esp_wifi_set_promiscuous(true);
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"txtest\",\"txtest\":%d,\"mode\":%d,\"promisc_call\":\"%s\",\"ch\":%u}\n",
-                      txTestActive ? 1 : 0, mode, esp_err_to_name(pr), currentChannelNum);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"txtest\",\"txtest\":%d,\"mode\":%d,\"promisc_call\":\"%s\",\"ch\":%u}\n",
+                  txTestActive ? 1 : 0, mode, esp_err_to_name(pr), currentChannelNum);
     } else if (!strcmp(line, "txstat")) {
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"txstat\",\"sent\":%lu,\"fail\":%lu,\"ch\":%u}\n",
-                      static_cast<unsigned long>(txTestSent), static_cast<unsigned long>(txTestFail), currentChannelNum);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"txstat\",\"sent\":%lu,\"fail\":%lu,\"ch\":%u}\n",
+                  static_cast<unsigned long>(txTestSent), static_cast<unsigned long>(txTestFail), currentChannelNum);
     } else if (!strcmp(line, "specstep")) {
         const int st = atoi(arg);
         if (st == 1 || st == 2 || st == 5) {
@@ -571,17 +662,17 @@ void handleCommand(char* line) {
             if (modeSpec()) { resetChannelStats(); currentIdx = -1; monitorReady = advanceChannel(); }
             saveSettings();
         }
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"specstep\",\"step\":%u}\n", specStepMhz);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"specstep\",\"step\":%u}\n", specStepMhz);
     } else if (!strcmp(line, "mirror")) {
         g_mirror = (atoi(arg) != 0);
         if (g_mirror) mirrorRequestFull();   // push a full frame now (paced across the next loops)
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"mirror\",\"mirror\":%d,\"w\":%d,\"h\":%d}\n",
-                      g_mirror ? 1 : 0, LCD_WIDTH, LCD_HEIGHT);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"mirror\",\"mirror\":%d,\"w\":%d,\"h\":%d}\n",
+                  g_mirror ? 1 : 0, LCD_WIDTH, LCD_HEIGHT);
     } else if (!strcmp(line, "page")) {
         stepPage(!strcmp(arg, "prev") ? -1 : 1);   // "next"/empty = forward, like a BOOT tap
-        Serial.printf("{\"t\":\"ack\",\"cmd\":\"page\",\"page\":%d}\n", currentPage);
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"page\",\"page\":%d}\n", currentPage);
     } else if (!strcmp(line, "reboot")) {
-        Serial.print("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);
         ESP.restart();
     } else if (!strcmp(line, "info")) {
@@ -589,7 +680,7 @@ void handleCommand(char* line) {
         if (hopMode()) sendSweep();
         sendDevices();
     } else {
-        Serial.printf("{\"t\":\"err\",\"msg\":\"unknown command\"}\n");
+        sendLinef("{\"t\":\"err\",\"msg\":\"unknown command\"}\n");
     }
 }
 
@@ -654,7 +745,7 @@ void sendEventStatus() {
     static uint32_t lastMs = 0;
     if (!g_eventsOn) return;
     const uint32_t now = millis();
-    if (now - lastMs < 5000 || !serialRoom(200)) return;
+    if (now - lastMs < 5000 || !serialRoom(210)) return;   // 201 B with every counter at its widest
     lastMs = now;
     Serial.print("{\"t\":\"ev\",");
     printEvents();

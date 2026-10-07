@@ -37,7 +37,9 @@ before 1.6. Its loud failure was shadowed by the silent one.
 
 This is the part worth internalising. A silent failure in front of a loud one doesn't just hide itself;
 it hides the diagnostic you would have gotten for free. The first thing 1.6 did that earlier attempts
-did not was simply *run the other path* (`kickpath 1`), and it immediately printed the answer:
+did not was simply *run the other path* (the raw path - `kickpath 1` in the 1.6 diagnostics build, where 1
+forced raw TX; the meaning was later flipped, and today `kickpath 0` is raw and the default while `kickpath 1` selects
+the dead internal slot), and it immediately printed the answer:
 `ESP_ERR_INVALID_ARG`, 304 times out of 304.
 
 ## 3. There was no oracle, and the obvious one was blind

@@ -75,7 +75,7 @@ struct Dev154 {
     uint8_t ch;
     uint8_t lqi;
     uint8_t proto;       // 0 unknown, 1 Zigbee, 2 Zigbee Green Power, 3 Thread / 6LoWPAN, 4 MAC-secured (likely Thread)
-    uint8_t flags;       // bit0 extended address known, bit1 sends beacons (coordinator/router), bit2 permit-join, bit3 MAC security, bit4 data seen, bit5 ack seen
+    uint8_t flags;       // bit0 extended address known, bit1 sends beacons (coordinator/router), bit2 permit-join, bit3 MAC security, bit4 data seen
 };
 static_assert(sizeof(Dev154) == 24, "Dev154 must stay 24 bytes: repack before growing it");
 

@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.19.2";
+constexpr const char* kVersion = "1.19.3";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -37,7 +37,8 @@ constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not r
 constexpr uint32_t kDevLcdFreshMs = 20000;  // ... nor shown on the LCD
 constexpr uint32_t kBleActiveWindowMs = 4000;   // how long to scan actively after a new scannable device
 constexpr uint32_t kBleSwitchMinMs = 2000;      // never flip the scan mode more often than this
-constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table; we never transmit.
+constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table (sniffing never transmits; deauth and
+                                            // the BLE active window do - see DEVELOPER.md).
 constexpr uint32_t kDeauthMaxMs = 5UL * 60UL * 1000UL;  // Dead-man's switch: auto-stop a deauth attack after this long
                                                           // even if the host/serial link drops mid-attack.
 constexpr uint32_t kSdBudgetUs = 8000;       // max time per loop spent writing SD, so channel hopping keeps time
@@ -112,6 +113,22 @@ inline void putLE32(uint8_t* p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v 
 // block. To avoid half-written lines when the host is slow or absent, every line checks for room first and
 // is dropped whole.
 inline bool serialRoom(size_t n) { return static_cast<size_t>(Serial.availableForWrite()) >= n; }
+// One complete line (the caller ends fmt with "\n"), formatted into a stack buffer first and written only when it
+// fits both that buffer and the TX buffer: an ack/err line is dropped whole, never truncated (rule 6). host_proto.cpp.
+bool sendLinef(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+// JSON string helpers (host_proto.cpp): jsonStrLen() is the exact length printJsonStr()/jsonQuote() emit for s,
+// quotes included, so a line budget can use the real escaped size of an off-air or card-supplied string.
+// jsonQuote() writes that quoted, escaped string into out; false (out = "") if it does not fit.
+size_t jsonStrLen(const char* s);
+void printJsonStr(const char* s);   // streams the quoted, escaped string straight to Serial
+bool jsonQuote(char* out, size_t n, const char* s);
+
+// Age of a timestamp the radio tasks may have refreshed after the caller sampled millis(): now - lastMs would then
+// wrap to ~4.29e9 ms, so clamp it at 0. devFresh() is the "slot in use and seen within freshMs" test built on it.
+inline uint32_t ageMs(uint32_t now, uint32_t lastMs) {
+    return static_cast<int32_t>(now - lastMs) < 0 ? 0 : now - lastMs;
+}
+inline bool devFresh(uint32_t lastMs, uint32_t now, uint32_t freshMs) { return lastMs && ageMs(now, lastMs) <= freshMs; }
 
 // Replace control characters in a string captured off the air (SSID, BLE name, country code) with '.'.
 // Bytes >= 0x80 are left alone so UTF-8 names survive. Without this a hostile or corrupt beacon can put
@@ -142,7 +159,10 @@ inline void setLedColor(const RgbColor& c, uint8_t brightness = 60) {
 // Frame capture: streamed to the host over USB serial as base64 lines; the SD sink mirrors the same frames.
 constexpr int kCapSlotsMax = 20;
 constexpr int kCapSlotsMin = 4;
-constexpr uint16_t kCapMaxLen = 1600;
+constexpr uint16_t kCapMaxLen = 1600;      // Wi-Fi slot payload (and the snap-length ceiling)
+// BLE and 802.15.4 slot payload: a legacy BLE LL record is at most 72 B (buildBleLlFrame) and an 802.15.4 PSDU at
+// most 125 B without its FCS, so their rings use this instead of kCapMaxLen (~2.8 KB instead of ~32 KB of heap).
+constexpr uint16_t kCapSmallLen = 128;
 
 // Per-dwell metrics: accumulated by the RX paths under g_accumMux, consumed at dwell end.
 struct Accum {
@@ -169,10 +189,6 @@ struct ChannelState {
     ChannelMetrics metrics;
     float busyCurrent = 0.0f;  // Last dwell busy score (0–100)
     float busyEma = 0.0f;      // Smoothed busy score (0–100)
-    int8_t edMin = 0;          // Spectrum mode (BAND_SPEC): raw energy over the dwell, in dBm
-    int8_t edMax = -128;
-    int8_t edMean = 0;
-    uint16_t edSamples = 0;    // energy-detect samples folded in this dwell (0 = none)
     bool hasData = false;
     bool unavailable = false;  // Driver rejected esp_wifi_set_channel for this channel
 };
@@ -190,14 +206,16 @@ extern int currentSpecMhz;                                  // frequency the fin
 inline int specBinCount() { return (kSpecHiMhz - kSpecLoMhz) / specStepMhz + 1; }
 inline int specBinMhz(int i) { return kSpecLoMhz + i * specStepMhz; }
 
-// One captured frame, as it lands in the ring before either sink streams it out.
+// One captured frame, as it lands in the ring before either sink streams it out. data is a flexible array: the
+// ring's slot stride is sizeof(CapFrame) + its per-radio payload size (capture.cpp), so a CapFrame is only ever
+// reached through capReserve()/the ring, never declared or copied by value.
 struct CapFrame {
     uint32_t ts_us;
     uint16_t len;      // original MPDU length (sig_len)
-    uint16_t capLen;   // bytes stored
+    uint16_t capLen;   // bytes stored, <= the room capReserve() reported
     int8_t rssi;
     uint8_t channel;
-    uint8_t data[kCapMaxLen];
+    uint8_t data[];
 };
 
 // Hunt target, tracked from all three radios. mac = 6-byte MAC (Wi-Fi/BLE); key = 802.15.4 key
@@ -228,11 +246,11 @@ struct Deauth {
     bool parked = false;          // like hunt.parked: we hold the park on the target's channel
     volatile uint32_t sent = 0, txFail = 0;
     uint32_t startMs = 0;         // millis() when the current attack started; serviceDeauth enforces kDeauthMaxMs
-    bool dumped = false;          // DIAGNOSTIC: dump the built frame once per attack
     // Driver-internal path (deauth_diag): word passed as arg0, holding the STA hmac pointer (g_ic+16). Padded so
     // the driver's seq counter — which send_setup increments at &flag+210 — lands in our own memory instead
-    // of a random neighbor.
-    uint8_t slotPad[256];
+    // of a random neighbor. Zero until that path latches it (only with "kickpath 1"); the driver reads it as a
+    // word, hence the alignment.
+    alignas(4) uint8_t slotPad[256];
     uint8_t hstate = 0xFF;        // *hmac+312: picks the DA/SA/BSSID mapping inside send_setup (0 / 1 / 3)
 };
 
@@ -263,7 +281,7 @@ struct SdSink {
     File file;
     uint8_t* buf = nullptr;
     size_t bufLen = 0;
-    uint32_t frames = 0, bytes = 0, dropped = 0, lastFlushMs = 0, errors = 0;
+    uint32_t frames = 0, bytes = 0, lastFlushMs = 0, errors = 0;
     bool ioFailed = false;        // a capture write failed (card pulled?): sdServiceFlush closes the capture
     char path[48] = "";
 };
@@ -319,7 +337,7 @@ extern int currentIdx;                // index into kChannels (-1 = not placed y
 extern int parkedIdx;                 // >= 0: stay on this channel instead of hopping
 extern uint32_t sweepCount;
 extern bool monitorReady;             // the radio is sitting on a usable channel
-extern bool wifiRunning;              // Wi-Fi driver up (also true in 15.4 mode? no — one radio, see setBandMode)
+extern bool wifiRunning;              // Wi-Fi driver up (Wi-Fi modes only: one radio, see setBandMode)
 extern bool r154Running;              // 802.15.4 driver up (instance in ieee154.cpp)
 extern bool specRunning;              // energy-detect spectrum sweep up (15.4 radio, no RX armed; ieee154.cpp)
 // A sweep mode is actually running on its radio (gates channel advance / dwell hopping).
@@ -334,6 +352,8 @@ extern volatile bool captureEnabled;   // USB sink
 extern volatile bool capActive;        // either sink wants frames: the RX paths gate on this
 extern bool trackAddr1;              // tier-1 receiver-side sightings (set by the "addr1" command)
 extern volatile uint16_t capSnapLen;
+// Telemetry counters like capDropped (producers + loop) and bleScan.advSeen are plain load/add/store, not atomic:
+// a preempted update can be lost, so they may under-count by a few. Fine for a display; do not treat them as exact.
 extern volatile uint32_t capDropped;
 extern uint32_t capSent;             // frames streamed to the USB sink since the ring was allocated
 
@@ -390,7 +410,8 @@ void resetAccum();
 void setPark(int idx);                // >= 0: hold this channel instead of hopping; -1: resume
 
 // Capture ring (capture.cpp): reserve a slot, fill it, commit. nullptr when full: drop already counted.
-CapFrame* IRAM_ATTR capReserve(uint8_t& nextHead);
+// room = the slot's payload size (kCapMaxLen or kCapSmallLen): clamp capLen to it.
+CapFrame* IRAM_ATTR capReserve(uint8_t& nextHead, uint16_t& room);
 void IRAM_ATTR capCommit(uint8_t nextHead);
 bool ensureCapRing();
 bool refitCapRing();
@@ -444,8 +465,7 @@ void serviceDeauth();
 struct ProbeEvt { uint8_t mac[6]; int8_t rssi; uint8_t ch; char ssid[33]; };
 constexpr int kProbeQ = 8;
 extern ProbeEvt g_probeQ[kProbeQ];
-extern volatile uint8_t probeHead, probeTail;   // single producer (Wi-Fi task) / single consumer (loop)
-extern volatile uint32_t probeDropped;
+extern volatile uint8_t probeHead, probeTail;   // single producer (Wi-Fi task) / single consumer (loop); full = drop
 void serviceProbes();
 
 // C4 event log (events.cpp): radio paths call eventFlag() under g_devMux when they create a device slot;

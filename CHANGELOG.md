@@ -3,6 +3,73 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.19.3
+
+Combined review pass: fixes from four independent code reviews, merged into one plan. Compiled and offline-tested
+(host 111, firmware 3). **Not yet run on hardware.**
+
+- **Security (host + dashboard).**
+  - Dashboard XSS closed: a crafted SSID, security string or vendor in the deauth bar ran script on the dashboard
+    origin. Every off-air value is now escaped, and `esc()` also escapes `'`.
+  - `POST /api/cmd` now requires `Content-Type: application/json` and a same-origin `Origin`. `Host` is validated on
+    every request (DNS-rebinding guard).
+  - Every response carries anti-framing headers (`X-Frame-Options`, CSP `frame-ancestors`) and `nosniff`.
+  - A non-loopback `--bind` prints a warning.
+  - Request bodies: `Content-Length` must be numeric (400) and at most 64 KB (413), and a JSON body must be an object.
+  - Errors are non-2xx `{"ok":false,"error"}`. Device commands get 503 when no board is connected, and no empty pcap is
+    created.
+- **Dashboard.**
+  - BACKLOG B1: the hunt and deauth bars show at the same time, each with its own Stop.
+  - BACKLOG B2: the deauth row buttons no longer stick on "…" after an attack stops.
+  - Commands: refused commands toast their error, and the state poll has a timeout.
+  - Tables: sort/filter work while hovering a table or while paused.
+  - Keyboard: Space no longer pauses when a control has focus.
+  - Layout: the deauth client picker is no longer clipped, and the black `.hit` columns are gone from the charts.
+  - Dest-only Wi-Fi rows show "–" instead of 0 dBm.
+  - Wording: "now ago" now reads "just now"; toast colours, `aria-live`, keyboard device-card headers, one "Wi-Fi"
+    spelling.
+- **Host.**
+  - Concurrency: one state lock with `snapshot()` copying under it, which fixes "deque mutated during iteration".
+    Capture start/stop is race-free, same-second captures get `-N` names, and `snaplen` is validated before the file
+    opens.
+  - Serial: writes time out after 1 s, and the line buffer is bounded.
+  - Bounds: device tables are capped at 1024 entries, and probe SSIDs at 32 per MAC.
+  - `sdread`: a pull is checked against its size, so a short one is reported failed and not saved.
+  - Spectrum: `spec_hist` clears on a step change. `explain` always clears its active flag.
+  - Files: `/file` streams and only serves safe `.pcap`/`.csv` names.
+  - pcap: the writer flushes every second, and SIGTERM closes it cleanly.
+  - Dest-only Wi-Fi rows report `rssi`/`max` as null.
+- **Firmware.**
+  - Rule 6 now holds for every line, acks and errors included. `sendLinef()` and `jsonStrLen()` replace the estimated
+    budgets, Wi-Fi and BLE row budgets use the real escaped SSID/name lengths, and the sweep, z, spectrum-bin and hello
+    budgets are derived worst cases. `sdread_done` waits for room instead of being lost.
+  - Hunt: the 8-byte 802.15.4 extended-address hunt works. `parseMac` accepted it as a 6-byte MAC; it now rejects
+    trailing characters. A key hunt only parks in 15.4 mode.
+  - `age_ms` no longer underflows to ~4.29e9 for a device heard during a snapshot.
+  - Deauth:
+    - Serial output moved out of the `g_devMux` critical sections.
+    - The default raw path no longer reads the hard-coded `libnet80211` offsets; only `kickpath 1` latches the
+      internal slot.
+    - TX power: values are in 0.25 dBm units. 82 = 20.5 dBm, not the "8.2 dBm" the comments claimed. The attack now
+      sets 84 (the maximum) instead of an out-of-range 160.
+  - Capture ring slots are sized per radio: 128 B in BLE/15.4 instead of 1600 B, about 2.8 KB of heap instead of
+    about 32 KB (unmeasured on the board).
+  - SD:
+    - `sdread` paths and `sdls` names are JSON-escaped.
+    - The pcap name search fails instead of truncating `-9999`.
+    - The sdread failure path uses `sdUnmount()` (it no longer unmounts under a running `sdcap`).
+  - Smaller fixes:
+    - The `time` ack's `ok` means "applied".
+    - `/surveil.csv` lines must end cleanly.
+    - Fresh tier-1 slots no longer seed `maxRssi` from the sender.
+    - The logo timer is wrap-safe.
+  - Dead code removed (`ChannelState.ed*`, `Deauth.dumped`, `probeDropped`, `sd.dropped`). Static RAM 77,392 →
+    **77,184 B**; the ceiling is restamped to 77,696 B.
+- **Docs.**
+  - `CLAUDE.md`: the leaked instruction fragments are now real sections.
+  - README, DEVELOPER, BACKLOG, ROADMAP, RAM-AUDIT, WHY-DEAUTH and the tests README are aligned with the code: modes,
+    pages, HTTP API, budgets, TX power units, RAM figures, and the 3 MB app partition.
+
 ## v1.19.2
 
 Docs and housekeeping: `CHANGELOG.md` created (history moved out of `CLAUDE.md`), `kVersion` brought in line with the release (it still said 1.19 at v1.19.1), stale notes fixed (RAM-check wording, static-RAM figure, classic-dashboard wording, backlog I1). No behaviour change.

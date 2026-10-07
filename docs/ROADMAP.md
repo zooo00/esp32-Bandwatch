@@ -1,9 +1,9 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.19.1** (v1.12 boot photos, v1.13-1.14 LCD mirror,
+Planned work, open questions and known gaps. Release history is in [`CHANGELOG.md`](../CHANGELOG.md); as of v1.19.3 (v1.12 boot photos, v1.13-1.14 LCD mirror,
 v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
 removal hardening, v1.18.x mirror frames + regression suite, v1.19 LED alerts / classic retired / card-file
-management, v1.19.1 grouped card-file view + exclusive serial port). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
+management, v1.19.1 grouped card-file view + exclusive serial port, v1.19.3 review fixes). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
 C10 + 1.6.1 LED alert blips (v1.19, D1); C2/C5/C7/C9/C11 still candidates, C12 the exit ramp.
 
 **Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
@@ -22,7 +22,7 @@ of being assumed.
 
 **How to analyze.** Rank by value-for-effort against this project's identity (portable Wi‑Fi/BLE/15.4
 surveillance + interference tool; one time-shared radio). Check the RAM math in the preamble — static
-is under 3 kB below the line since v1.18 (77,392 B at v1.19), and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
+is under 3 kB below the line since v1.18 (77,184 B at v1.19.3), and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
 `merge_*` in `bandwatch_host.py` ↔ the §4 table in DEVELOPER.md); UI-only candidates skip that cost.
 The quick hits (C6–C11) are cheap enough to batch; the big ones each justify their own release.
 
@@ -39,9 +39,9 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   probe + LCD card faces) to 77,272 B, and v1.19's LED alerts to **77,392 B** (measured from the build; `tests/firmware` gates it at 77,800 B).
   Peak load measured at v1.19 - event log armed + USB + SD capture, every LCD page - left **25,172 B** free (floor
   24,576 B). The C4 log also holds ~12.6 kB of *heap* while
-  armed (DEVELOPER §16/§20), not yet measured at peak load. Free heap at runtime (`both`, v1.15.4) depends on the LCD page: Overview ≈87.6 kB
-  (now the heaviest), Devices ≈91, System ≈102, Channels ≈106; BLE ≈88 kB. USB + SD capture bottoms out at
-  **~30.8 kB** on any page: `ensureCapRing()` sizes the ring to leave `kMinFreeHeapB` = 24 kB *plus*
+  armed (DEVELOPER §16/§20), included in the peak figure above. Free heap at runtime (`both`, v1.15.5) depends on the
+  LCD page: Overview ≈98.9 kB (the heaviest), System ≈102.3, Devices ≈106.4, Channels ≈106.4; BLE ≈88 kB (v1.15.2).
+  USB + SD capture bottoms out at ~27.8 kB on any page (v1.15.5): `ensureCapRing()` sizes the ring to leave `kMinFreeHeapB` = 24 kB *plus*
   `lcdPageHeadroomB()` (the step to the heaviest page), and `sdcap` re-fits a ring `cap 1` made before the
   FATFS mount (`refitCapRing()`). `WifiDev` is packed to exactly 64 B behind a `static_assert` (`devices.h`) in
   one 96-slot array (64 until v1.17), so +1 byte of *padding* costs 384 B static. For reference: `BleDev` = 48 B × 48 slots (repacked from 56 in v1.16.1,
@@ -53,13 +53,15 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   `ieee154.cpp`, `bleScan.activeUntilMs`).
 - **Serial never blocks.** 8 kB TX buffer, `setTxTimeoutMs(0)`, every line checks `serialRoom()` and is
   dropped whole *if its budget is honest* - a line that passes the check and then outgrows its budget is
-  truncated mid-JSON. Current budgets: hello 900 (measured), dwell 420, sweep 1500, fine-spectrum `fs`
-  80 + 22/bin (~1.9 kB at 1 MHz), device rows Wi‑Fi `40 + n·126` per line, sent in chunks of ≤24 rows since v1.17 (a 96-row table would not fit 8 kB as one line),
-  BLE `40 + n·116`, 15.4 `40 + n·80`. New per-line fields grow these.
+  truncated mid-JSON. Since v1.19.3 every line, acks and errors included, budgets from the real JSON-escaped
+  string lengths (or a derived true worst case) instead of estimates; read `host_proto.cpp` for the current
+  numbers rather than copying them here. Wi‑Fi device rows go in chunks of ≤24 rows since v1.17 (a 96-row table
+  would not fit 8 kB as one line). New per-line fields grow these.
 - **No RTC.** Timestamps come from the host's `time <epoch>`; without it, uptime-based times and counter-named
   files. Anything persisting to SD inherits this.
 - **Anything that transmits needs a dead-man's switch** (`kDeauthMaxMs` = 5 min auto-stop) — there is no other
-  way for the board to stop itself. Attacks also raise TX power (82 → 160, i.e. 8.2 → 16 dBm).
+  way for the board to stop itself. TX power values are in 0.25 dBm units (82 = 20.5 dBm; DEVELOPER §9,
+  corrected v1.19.3).
 - **LED priority in `driveLed()`** (`lcd_ui.cpp`): deauth blink > *alert blip* > hunt distance > record pulse >
   busy score. Since v1.19 (D1) alerts are transient blips (`led_alert.cpp`, DEVELOPER §21) that win the LED for
   300-500 ms and yield back, rate-limited to one per 2 s; they never override a deauth. A new *permanent* state still
@@ -89,7 +91,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 8-slot Wi-Fi-task queue); (2) host-expire after 15 min, no stop lines; (3) one line per SSID - in practice a probe
 request carries a single SSID IE, so only the first is parsed; (4) host-only for v1, no LCD. First on-air run: 5
 directed probes in 90 s, every one from a **randomized MAC** (new per burst), so the host groups by SSID ("Networks
-being sought" card, both dashboards) and also hangs `seeking` on any device row with a matching MAC.
+being sought" card, the dashboard) and also hangs `seeking` on any device row with a matching MAC.
 
 **What.** A probe request is a client announcing which network(s) it wants: source MAC plus up to ~3
 SSID IEs. Bandwatch already *counts* them in `promiscuousCb()` but never parses them (only beacons get
@@ -134,7 +136,7 @@ beacons from an unassociated, promiscuous STA (323 witnessed at −45 dBm), and 
 only does in the push direction.
 
 **How (sketch).** Stage 1: `ghost <ssid>` / `ghost 0`; while active, reuse the park machinery (`setPark`, same
-last-writer-wins dance as hunt/deauth), raise TX power to 160 like `startDeauth()`, and re-send a beacon from the
+last-writer-wins dance as hunt/deauth), raise TX power to the maximum (84 = 21 dBm) like `startDeauth()`, and re-send a beacon from the
 loop task at ~10 Hz — an extended `sendTestBeacon` with a configurable SSID (≤32 B) and a fixed ghost MAC (the
 txtest SA `{0x02,0xBA,0xAD,0xBE,0xEF,0x01}` is a fine default). Count our echoes vs probe requests mentioning us;
 report `gh` counters in the dwell line like `da`. Stage 2: in `promiscuousCb()`, when `fc0 == 0x40` and ghost is
@@ -216,8 +218,9 @@ not the probe); pull the card gently. **Verified (v1.19.1, from the card's `/eve
 `new` rows (8) come from the first pull test, before the fix; none after, across a later pull. The LED blip shipped in v1.19 (DEVELOPER §21). **D4 follow-up (card-file management):** every
 card file (pcaps, `events.csv`/`.old`, `seen.csv`/`.old`, `surveil.csv`) is downloadable *and deletable* from dashboard
 v2 (`sdrm <name>`, refused for the file being recorded, during an `sdread` or mid-flush; deleting `seen.csv` while
-armed restarts novelty; DEVELOPER §12), and `/seen.csv` rotates as above. Written and compiled, hardware run
-pending. Original entry below.
+armed restarts novelty; DEVELOPER §12), and `/seen.csv` rotates as above. `sdrm` passed on the board in the v1.19
+tier-3 run (`T11SdRm`, 26/26, `tests/device/RESULTS.md`); the rotation's timing on hardware is still open
+(BACKLOG V5). Original entry below.
 
 **What.** One append-only `/events.csv` on the card: `epoch_ms, kind, id, rssi, ch, extra`. v1 kinds: surveillance
 hits (category + tier) and **novelty** — a MAC not present in a `/seen.csv` baseline dropped on the same card. The
@@ -276,7 +279,7 @@ delta before/after each hand-off stays within a few hundred bytes (the capture-r
 **Status (shipped, verified on-device).** `Accum` gained `bestMac[6]`/`bestRssi` (+8 B, one instance). `promiscuousCb`
 tracks the loudest frame's transmitter; `sendDwell` reads it from `g_accum` (still live — `resetAccum` runs after)
 into `"top"`/`"trssi"` on the `d` line, so no per-channel storage (would have been ~430 B across 54 channels). Serial
-budget bumped 380→420. Host merges `top`/`trssi` (and keeps them across `s` sweep rows); both dashboards show a "Top
+budget bumped 380→420. Host merges `top`/`trssi` (and keeps them across `s` sweep rows); the dashboard show a "Top
 talker" column joined to the device table. **Verified:** parked on ch6, `top` was a stable MAC at −46 dBm each dwell.
 
 **What.** The dwell already counts *how many* transmitters; name the loudest one. The `d` line gains `"top"`
@@ -288,7 +291,7 @@ dwells: skip (its 1 s heartbeat could carry it later). Host joins against the de
 it on channel rows.
 
 **Cost & constraints.** Serial budget: the dwell line grows ~25 B, so bump `serialRoom(380)` accordingly — hello's
-900 was measured for exactly this reason (a line that passes the check then overruns is truncated mid-JSON). Everything
+budget was measured (900 then, 920 since v1.19) for exactly this reason (a line that passes the check then overruns is truncated mid-JSON). Everything
 else happens inside locks already held per frame.
 
 **Open questions.** (1) Top by peak RSSI in the dwell vs a smoothed value? Peak is cheaper and matches "who is on top now."
@@ -317,7 +320,7 @@ A name that matches nothing → zero hits but no crash (the empty state).
 ### C8 — Least-busy readout  ✅ SHIPPED v1.11
 
 **Status (shipped).** `quietestChannel()` (firmware, 0 static) picks the lowest `busyEma` among enabled/swept/non-rejected
-channels; LCD Overview footer shows `quiet chNN N` (capture-off, where the line has width). Both dashboards gained a
+channels; LCD Overview footer shows `quiet chNN N` (capture-off, where the line has width). The dashboard gained a
 "Quietest channel" tile/slot, with an "nothing is quiet right now" caveat when even the minimum ≥ 50 (open question 1).
 UI-only, no protocol change.
 
@@ -503,7 +506,8 @@ novelty rows. Original entry:
 Untethered means nobody is watching the dashboard, so hits must persist: MAC, category, tier, RSSI, channel,
 timestamp, appended to a file on the card. This is the actual deliverable of a walk-around.
 
-No longer RAM-blocked: static is ~74 kB (v1.15.4), ~6 kB under the line, so a ~512 B in-RAM ring fits. The
+No longer RAM-blocked: static was ~74 kB at v1.15.4, ~6 kB under the line, so a ~512 B in-RAM ring fit (77,392 B
+and under 3 kB of headroom since v1.19). The
 concrete design is candidate C4 (events.csv + novelty baseline).
 
 ### 1.6.3 Control without a host
@@ -538,16 +542,18 @@ line stuck. **It is an empirical heuristic, not a derived limit, and nobody has 
 
 The mechanism behind it is real: static allocations and the heap share one 320 KB DRAM pool, so every static
 byte costs a heap byte 1:1. Note the build output is actively misleading here — it reports *"leaving 248104
-bytes for local variables"*, but measured free heap at runtime is ~88-106 kB in Wi-Fi depending on the LCD page, because the Wi-Fi/BLE driver stacks
+bytes for local variables"*, but measured free heap at runtime is ~99-106 kB in `both` depending on the LCD page (v1.15.5) and ~88 kB in BLE, because the Wi-Fi/BLE driver stacks
 and FreeRTOS task stacks take the rest.
 
 What actually binds is **free heap at peak concurrent load**. Measured on hardware:
 
 | state | free heap |
 | --- | --- |
-| idle, Wi-Fi `both` (v1.15.4: Overview / Devices / System / Channels) | 87.6 / 91 / 102 / 106 kB |
-| idle, BLE | ~88 kB |
-| USB + SD capture, any page, any order (v1.15.4) | **~30.8 kB** (worst on Overview; 11 ring slots) |
+| idle, Wi-Fi `both` (v1.15.5: Overview / System / Devices / Channels) | 98.9 / 102.3 / 106.4 / 106.4 kB |
+| idle, BLE (v1.15.2, 2026-10 audit) | ~88 kB |
+| event log armed + USB + SD capture, every page (v1.19) | **25.2 kB** (Overview; floor 24 kB) |
+| USB + SD capture, any page (v1.15.5) | ~27.8 kB (worst on Overview; full 20-slot ring) |
+| USB + SD capture, any page, any order (v1.15.4) | ~30.8 kB (worst on Overview; 11 ring slots) |
 | `cap 1` then `sdcap 1` before 1.15.3 | 16.1 kB |
 | capture started on Channels, then step to Overview (1.15.3, before page headroom) | 16.4 kB |
 | BLE + SD capture (pre-1.11, not re-measured) | 32.3 kB |
@@ -562,9 +568,9 @@ floor instead of refusing, and `sdcap` re-fits a ring that `cap 1` made before t
 since 1.15.4 the floor also includes `lcdPageHeadroomB()` - each page records the heap it took to build, and the
 ring leaves room to step to the heaviest page available in the current mode.
 
-Current static usage is **74,032 B** (v1.15.4; it was 79,592 B at 1.5.5 and 80,544 B at 1.10 before the v1.11
-reclaim - smaller LVGL buffer + DevRef listing path). About 6 kB under the line, which is still an unverified
-budget, not a wall.
+Current static usage is **77,184 B** (v1.19.3; 77,392 B at v1.19; 74,032 B at v1.15.4, 79,592 B at 1.5.5 and 80,544 B at 1.10 before
+the v1.11 reclaim - smaller LVGL buffer + DevRef listing path). Under 3 kB below the line, which is still an
+unverified budget, not a wall; `tests/firmware/static_ram_ceiling.json` gates it.
 
 1.5.4 is a worked example of the squeeze it causes: adding a station's BSSID to `WifiDev` should have been
 6 bytes, but that struct is in two `kWifiDevSlots` arrays and would have rounded 64 → 68, i.e. 512 B, which

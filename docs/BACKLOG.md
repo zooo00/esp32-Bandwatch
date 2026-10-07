@@ -2,7 +2,7 @@
 
 The one list of open work. `ROADMAP.md` keeps the design write-ups and history; this file says **what is left, where
 it lives, and when it is done**. Pick an item, do it, delete its row (or move it to "Done" with the version), and
-note the release in `CLAUDE.md`'s version history as usual.
+note the release in `CHANGELOG.md` as usual.
 
 Every item has a **Done when** line, and wherever possible a test to add, so work lands with a regression check
 (`tests/README.md`: tier 1 host, tier 2 firmware build, tier 3 on the board).
@@ -10,75 +10,11 @@ Every item has a **Done when** line, and wherever possible a test to add, so wor
 Priority: **P1** wrong or misleading behaviour today · **P2** gap a user will notice · **P3** improvement / decision.
 Type: bug · verify (built, not proven on hardware) · decision (needs a call before code) · feature.
 
-State as of **v1.19.1** (2026-10-07). Finished items move to **Done** at the end, with the evidence.
+State as of **v1.19.3** (2026-10-07). Finished items move to **Done** at the end, with the evidence.
 
 ---
 
 ## Bugs
-
-### B1 · Dashboard v2 hides a running deauth while a hunt is active — P1, bug
-**Symptom.** With a hunt and a deauth running at the same time, the v2 action bar shows only the hunt. The deauth's
-frame counter, the "rejected by the driver" count and the unpatched-image warning are hidden, and the bar's single
-Stop button stops the hunt only. A running transmit is then invisible in the default UI. The retired classic
-dashboard showed both (`#huntCard` + `#deauthCard`, `renderHunt()` / `renderDeauth()` in `host/dashboard.html`): use
-it as the reference - `git show v1.18.2:host/dashboard.html`.
-
-**Where (host/dashboard2.html, v1.18.2 line numbers):**
-- Markup: `<section class="card actbar" id="actBar">` (~line 259). One status block (`#actTitle`, `#actNum`,
-  `#actUnit`, `#actMeter`, `#actSub`), one middle block (`#actMeta`, `#actTrend`, `#actWarn`) and one `#actStop`
-  button.
-- Render: `renderAct(s)` (~line 776). `actMode = h ? 'hunt' : k ? 'deauth' : ''` picks one mode and fills the shared
-  elements, with an `if (h) {...} else {...}` per mode.
-- Stop: the `#actStop` click handler (~line 525) branches on `actMode`.
-- Styles: `.actbar` (~line 67, grid of 3 columns; ~line 170 for the narrow layout). `[hidden]` already forces
-  `display: none` (~line 148).
-
-**Steps:**
-1. **Markup:** turn the one bar into two independent bars with the same inner layout, e.g. `#huntBar` and
-   `#deauthBar`. Give each its own title/number/unit/meter/sub/meta/stop elements, with ids prefixed per bar
-   (`#huntNum`, `#deauthNum`, ...). Only the hunt bar needs the trend `<svg>`; only the deauth bar needs the warning
-   `<div>`. Reuse the `.actbar` class for both so the styles apply unchanged.
-2. **Render:** split `renderAct(s)` into `renderHuntBar(s)` and `renderDeauthBar(s)`. Each shows or hides its own bar
-   from its own field (`s.hunt`, `s.deauth`). Move the existing two branches into them as they are, retargeted to the
-   new ids. Drop the global `actMode`.
-3. **Stop buttons:** give each bar its own handler. The hunt one posts `{cmd:'hunt', mac:null}`. The deauth one keeps
-   the existing `armPending('deauth', <button>, 'Stopping…')` + `{cmd:'deauth', mac:null}`.
-4. **Call sites:** replace the `renderAct(s)` call in `render()` with the two calls. Grep for `renderAct` and
-   `actMode` to catch every reference.
-5. **Order:** put the deauth bar first (above the hunt). A transmit in progress should be the most prominent thing on
-   the page.
-
-**Done when:**
-- With `s.hunt` and `s.deauth` both set, both bars are visible with their own numbers, and each Stop stops only its
-  own activity.
-- With only one set, the page looks as it does today.
-- The narrow (mobile) layout still stacks cleanly.
-
-**Test:** add a tier-1 render test in `tests/host/`. It can load `dashboard2.html`'s script under a small stub DOM, or
-assert on the HTML string a render produces. Feed a snapshot with both `hunt` and `deauth` set, and assert both bars
-exist and neither is hidden. Add a second case with only `hunt` set.
-
-### B2 · Deauth table buttons can stay stuck on "…" after an attack stops — P2, bug
-**Symptom.** Click Deauth on a table row, then stop the attack, and every row's Deauth button can keep showing a
-disabled "…" until the page reloads.
-
-**Why:** `deauthBtn()` (~line 1132) renders "…" while `pending.deauth` is set. The only code that clears it is inside
-`renderAct()`'s deauth branch (~line 806), which runs only *while a deauth is active*. So when the attack ends
-before the latch is released (or a hunt is active, B1), nothing ever clears it.
-
-**Steps:**
-1. Move the latch release out of the deauth-only branch into code that runs on every render. The current condition is
-   right: release after 6 s, or when the reported on/off state (`!!s.deauth`) differs from `prev.deauthOn`.
-   `prev.deauthOn = !!s.deauth` must also update on every render, active or not.
-2. Re-enable whichever Stop button `armPending` disabled. After B1 that is the deauth bar's Stop.
-3. Do B1 first. B2's fix lands naturally in the new `renderDeauthBar()`, as long as the release runs before its
-   "hidden when no deauth" early return.
-
-**Done when:** start a deauth from a row, stop it from the bar or the row, and the row buttons return to "Deauth"
-within one poll (1 s).
-
-**Test:** a tier-1 render test that sets `pending.deauth`, renders a snapshot with `deauth: null`, and asserts the row
-button is no longer "…".
 
 ### B4 · USB serial went silent while the firmware kept running — P2, bug (likely a second reader; confirm)
 - **Seen once, 2026-10-07, v1.19:** right after the full tier-3 suite finished (26/26, `T99NoReboot` passed), the next
@@ -188,12 +124,10 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 | C5 | Patrol mode (auto round-robin) | Keeps the spectrum's "explained" sources fresh; covers the 1.7 time-separation gap |
 | C7 | Hunt by SSID | Small; reuses the hunt ack shape |
 | C9 | Deauth refinements (rate, auto-stop) | Read the corrected EAPOL detection in ROADMAP C9 first |
-| C10 | Permit-join LED blip | Blocked on D1 |
 | C11 | Host CSV export | Host-only |
 | C12 | ESP-IDF port | The exit ramp: BLE extended advertising, the fixed ~59 kB stack |
-| 1.6.1 | Alerting | Blocked on D1 |
 | 1.6.3 | Control without a host | Needs a button mapping for sdcap/events; the hold gesture is taken by the mode walk |
-| 1.9 | SD pull stops at download | v2 can pull and download, but cannot delete or rename on the card |
+| 1.9 | SD card file management | The dashboard can pull, download and delete (`sdrm`, D4); renaming on the card is not possible |
 | 1.10 | Mode splash is fire-and-forget | The splash does not reflect a radio that failed to start |
 
 ## Known limits (documented, no action planned)
@@ -207,6 +141,9 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 
 | Item | Version | Evidence |
 | --- | --- | --- |
+| **B1** dashboard hid a running deauth while a hunt was active | v1.19.3 | `dashboard2.html` renders the hunt and deauth bars independently, so both show at once, each with its own Stop. Code review only; not yet watched on hardware with both running |
+| **B2** deauth row buttons stuck on "…" | v1.19.3 | the `pending.deauth` latch is released on every render whenever no deauth is running, not only inside the active-deauth branch. Code review only (the render harness in I2 is still to do) |
+| **C10 + 1.6.1** permit-join LED blip / alerting | v1.19 | shipped as D1 (§21) |
 | **I3** tier-3 baseline recorded | v1.19.1 | `tests/device/RESULTS.md` (19/19 at v1.18.2, 26/26 at v1.19) |
 | **V3** event-log heap at peak load | v1.19 | `events 1` + `cap 1` + `sdcap 1`, `both` band, walking every LCD page: minimum **25,172 B** free (Overview), floor 24,576 B. Holds by design - the capture ring shrinks to keep the floor - but the margin is thin (~0.6 kB); DEVELOPER §16/§20 |
 | **V2** SD faces on the LCD during a real pull | v1.18 | Watched on the panel 2026-10-07 through a real pull and re-insert: user reported the LCD behaviour "good" (no defects noted). Log showed `sd card removed` at 14:58:37; the monitor's 3-minute window did not capture the `inserted` line, so that half rests on the observation alone |

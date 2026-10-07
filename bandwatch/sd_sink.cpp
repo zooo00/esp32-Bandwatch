@@ -160,15 +160,15 @@ bool sdOpenCapture() {
     if (!sdMount()) return false;
     sd.buf = static_cast<uint8_t*>(malloc(kSdBufSize));
     if (!sd.buf) { sdUnmount(); return false; }
-    sd.bufLen = 0; sd.frames = 0; sd.bytes = 0; sd.dropped = 0; sd.errors = 0; sd.ioFailed = false;
-    const bool is154 = mode154();
+    sd.bufLen = 0; sd.frames = 0; sd.bytes = 0; sd.errors = 0; sd.ioFailed = false;
+    const bool zb = mode154();
     const bool isBle = (bandMode == BAND_BLE);
     if (epochValid) {   // host gave us a clock: name the file after it, like the host tool does
         uint32_t s, us; nowEpoch(s, us);
         const time_t t = static_cast<time_t>(s);
         struct tm tmv; gmtime_r(&t, &tmv);
         snprintf(sd.path, sizeof(sd.path), "/bandwatch-%s-%04d%02d%02d-%02d%02d%02d.pcap",
-                 is154 ? "802154" : isBle ? "ble" : "wifi", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                 zb ? "802154" : isBle ? "ble" : "wifi", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
                  tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
     } else {            // no clock: fall back to a counter so files never collide
         // Resume from the last index used this session instead of rescanning from 1: on a card with many
@@ -176,8 +176,13 @@ bool sdOpenCapture() {
         static int nextSeq = 1;
         int i = nextSeq;
         for (; i < 10000; i++) {
-            snprintf(sd.path, sizeof(sd.path), "/bandwatch-%s-%04d.pcap", is154 ? "802154" : isBle ? "ble" : "wifi", i);
+            snprintf(sd.path, sizeof(sd.path), "/bandwatch-%s-%04d.pcap", zb ? "802154" : isBle ? "ble" : "wifi", i);
             if (!SD.exists(sd.path)) break;
+        }
+        if (i >= 10000) {   // every numbered name is taken: refuse rather than reopen (and truncate) -9999
+            sd.path[0] = 0;
+            free(sd.buf); sd.buf = nullptr; sdUnmount();
+            return false;
         }
         nextSeq = i + 1;
     }
@@ -186,7 +191,7 @@ bool sdOpenCapture() {
     uint8_t gh[24];                                  // pcap global header, little endian
     putLE32(gh + 0, 0xA1B2C3D4); putLE16(gh + 4, 2); putLE16(gh + 6, 4);
     putLE32(gh + 8, 0); putLE32(gh + 12, 0); putLE32(gh + 16, 65535);
-    putLE32(gh + 20, is154 ? 283 : isBle ? 256 : 127);   // 802.15.4-TAP / BLE LL w/ phdr / radiotap
+    putLE32(gh + 20, zb ? 283 : isBle ? 256 : 127);   // 802.15.4-TAP / BLE LL w/ phdr / radiotap
     if (!sdBufPut(gh, sizeof(gh))) { sdCloseCapture(); return false; }
     sd.capEnabled = true;
     sd.lastFlushMs = millis();
@@ -197,9 +202,9 @@ bool sdOpenCapture() {
 bool sdWriteFrame(const CapFrame& f) {
     uint8_t hdr[16 + 28];
     uint32_t sec, usec; nowEpoch(sec, usec);
-    const bool is154 = mode154();
+    const bool zb = mode154();
     const bool isBle = (bandMode == BAND_BLE);
-    const uint16_t rtLen = is154 ? 28 : isBle ? 10 : 24;
+    const uint16_t rtLen = zb ? 28 : isBle ? 10 : 24;
     uint8_t* rt = hdr + 16;
     if (isBle) {
         // LINKTYPE_BLUETOOTH_LE_LL_WITH_PHDR pseudo-header. Flags: dewhitened | signal-power-valid |
@@ -212,7 +217,7 @@ bool sdWriteFrame(const CapFrame& f) {
         putLE32(rt + 4, kAdvAccessAddr);
         // RSSI 127 is the HCI "not available" sentinel: do not assert a fabricated reading as valid.
         putLE16(rt + 8, static_cast<uint16_t>(f.rssi == 127 ? 0x0011 : 0x0013));
-    } else if (is154) {
+    } else if (zb) {
         putLE16(rt + 0, 0); putLE16(rt + 2, 28);                       // version/pad, total length
         putLE16(rt + 4, 0); putLE16(rt + 6, 1); rt[8] = 0; rt[9] = rt[10] = rt[11] = 0;   // FCS type: none
         putLE16(rt + 12, 1); putLE16(rt + 14, 4);                      // RSS TLV, float dBm
@@ -247,23 +252,32 @@ uint32_t sdReadSent = 0, sdReadTotal = 0;
 
 } // namespace
 
-void sdReadAbort() {
+static void sdReadAbort() {
     if (!sd.readActive) return;
     sd.readActive = false;
     if (sdReadFh) sdReadFh.close();
     sdUnmount();
 }
 
+// The path comes from the host and is echoed back, so it is JSON-escaped (jsonQuote) like any untrusted string.
 void sdReadFile(const char* path) {
     sdReadAbort();
-    if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdread: no card\"}\n"); return; }
+    char q[256];   // a command line holds <= 40 path chars: <= 242 B escaped and quoted
+    if (!jsonQuote(q, sizeof(q), path)) { sendLinef("{\"t\":\"err\",\"msg\":\"sdread: path too long\"}\n"); return; }
+    if (!sdMount()) { sendLinef("{\"t\":\"err\",\"msg\":\"sdread: no card\"}\n"); return; }
     sdReadFh = SD.open(path, FILE_READ);
-    if (!sdReadFh) { Serial.printf("{\"t\":\"err\",\"msg\":\"sdread: cannot open %s\"}\n", path); sdUnmount(); return; }
+    if (!sdReadFh) {   // q without its quotes, inside the msg string
+        sendLinef("{\"t\":\"err\",\"msg\":\"sdread: cannot open %.*s\"}\n", static_cast<int>(strlen(q)) - 2, q + 1);
+        sdUnmount();
+        return;
+    }
     sdReadTotal = sdReadFh.size();
     sdReadSent = 0;
     sd.readActive = true;
-    Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread\",\"file\":\"%s\",\"bytes\":%lu}\n", path,
-                  static_cast<unsigned long>(sdReadTotal));
+    // No ack, no transfer: the host keys the S lines off this ack, so stream nothing it would not expect.
+    if (!sendLinef("{\"t\":\"ack\",\"cmd\":\"sdread\",\"file\":%s,\"bytes\":%lu}\n", q,
+                   static_cast<unsigned long>(sdReadTotal)))
+        sdReadAbort();
 }
 
 // Called every loop: emit what fits in the TX buffer, then yield so hopping and the UI keep running.
@@ -277,13 +291,14 @@ void serviceSdRead() {
         const int n = sdReadFh.read(chunk, sizeof(chunk));
         if (n <= 0) {
             // Short of the size we announced: the card went away (or the file is damaged). Say so, rather than
-            // sending sdread_done and letting the host save a truncated file as if it were complete.
-            Serial.printf("{\"t\":\"err\",\"msg\":\"sdread: read failed at %lu of %lu bytes (card removed?)\"}\n",
-                          static_cast<unsigned long>(sdReadSent), static_cast<unsigned long>(sdReadTotal));
+            // sending sdread_done and letting the host save a truncated file as if it were complete. There is room
+            // for the err line: the loop only reads after checking for a whole chunk's worth (~280 B).
+            sendLinef("{\"t\":\"err\",\"msg\":\"sdread: read failed at %lu of %lu bytes (card removed?)\"}\n",
+                      static_cast<unsigned long>(sdReadSent), static_cast<unsigned long>(sdReadTotal));
             sd.readActive = false;
             sdReadFh.close();
-            SD.end(); sd.mounted = false;
-            sdSetPresent(false, "file pull stopped");
+            sdUnmount();   // not a bare SD.end(): an sdcap recording on the same card keeps its mount
+            if (!sd.mounted) sdSetPresent(false, "file pull stopped");
             return;
         }
         Serial.printf("S %d ", n);
@@ -291,26 +306,35 @@ void serviceSdRead() {
         Serial.write('\n');
         sdReadSent += n;
     }
-    Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdread_done\",\"sent\":%lu}\n",
-                  static_cast<unsigned long>(sdReadSent));
+    // Wait for room rather than drop it: the host only saves the file on this line, and readActive is cleared
+    // right after, so a dropped sdread_done would never be retried.
+    if (!sendLinef("{\"t\":\"ack\",\"cmd\":\"sdread_done\",\"sent\":%lu}\n", static_cast<unsigned long>(sdReadSent)))
+        return;
     sd.readActive = false;
     sdReadFh.close();
     sdUnmount();
 }
 
 void sdListFiles() {
-    if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: no card\"}\n"); return; }
+    if (!sdMount()) { sendLinef("{\"t\":\"err\",\"msg\":\"sdls: no card\"}\n"); return; }
     File root = SD.open("/");
-    if (!root) { Serial.print("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); sdUnmount(); return; }
+    if (!root) { sendLinef("{\"t\":\"err\",\"msg\":\"sdls: cannot open /\"}\n"); sdUnmount(); return; }
     // "sent" < "total": the serial buffer filled up mid-list (host slow or absent), so entries were dropped.
-    // The host shows what arrived and knows there is more on the card.
+    // The host shows what arrived and knows there is more on the card. The tail is reserved up front and every
+    // entry is checked against its real size plus that reserve, so the line always closes. Names come off the
+    // card (long names, any characters) and are JSON-escaped.
+    constexpr size_t kTail = 48;   // "],\"total\":<int>,\"sent\":<int>}\n" at its widest
+    if (!serialRoom(22 + kTail)) { root.close(); sdUnmount(); return; }   // drop the whole listing, never half
     int total = 0, sent = 0;
     Serial.print("{\"t\":\"sdls\",\"files\":[");
     for (File e = root.openNextFile(); e; e = root.openNextFile()) {
         if (!e.isDirectory()) {
             total++;
-            if (serialRoom(120)) {
-                Serial.printf("%s[\"%s\",%lu]", sent ? "," : "", e.name(), static_cast<unsigned long>(e.size()));
+            const char* name = e.name();
+            if (serialRoom(jsonStrLen(name) + 14 + kTail)) {   // ",[<name>,<size 10>]"
+                Serial.print(sent ? ",[" : "[");
+                printJsonStr(name);
+                Serial.printf(",%lu]", static_cast<unsigned long>(e.size()));
                 sent++;
             }
         }
@@ -336,23 +360,23 @@ void sdRemoveFile(const char* arg) {
         const char c = name[i];
         okName = isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '_' || c == '-';
     }
-    if (!okName) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: bad file name (card root only, <= 39 chars)\"}\n"); return; }
+    if (!okName) { sendLinef("{\"t\":\"err\",\"msg\":\"sdrm: bad file name (card root only, <= 39 chars)\"}\n"); return; }
     char path[48];
     snprintf(path, sizeof(path), "/%s", name);
-    if (sd.readActive) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: busy - a file is being pulled (sdread)\"}\n"); return; }
+    if (sd.readActive) { sendLinef("{\"t\":\"err\",\"msg\":\"sdrm: busy - a file is being pulled (sdread)\"}\n"); return; }
     if (sd.capEnabled && !strcmp(sd.path, path)) {
-        Serial.printf("{\"t\":\"err\",\"msg\":\"sdrm: %s is being recorded - stop sdcap first\"}\n", path);
+        sendLinef("{\"t\":\"err\",\"msg\":\"sdrm: %s is being recorded - stop sdcap first\"}\n", path);
         return;
     }
-    if (eventsFlushing()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: busy - the event log is writing to the card\"}\n"); return; }
-    if (!sdMount()) { Serial.print("{\"t\":\"err\",\"msg\":\"sdrm: no card\"}\n"); return; }
+    if (eventsFlushing()) { sendLinef("{\"t\":\"err\",\"msg\":\"sdrm: busy - the event log is writing to the card\"}\n"); return; }
+    if (!sdMount()) { sendLinef("{\"t\":\"err\",\"msg\":\"sdrm: no card\"}\n"); return; }
     const char* why = "";
     bool ok = false;
     if (!SD.exists(path)) why = "no such file";
     else if (!(ok = SD.remove(path))) why = "remove failed";
     if (ok) eventsFileRemoved(path);   // card still mounted: a /seen.csv reset reads the (now absent) file
-    if (ok) Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdrm\",\"file\":\"%s\",\"ok\":1}\n", path);
-    else Serial.printf("{\"t\":\"ack\",\"cmd\":\"sdrm\",\"file\":\"%s\",\"ok\":0,\"msg\":\"%s\"}\n", path, why);
+    if (ok) sendLinef("{\"t\":\"ack\",\"cmd\":\"sdrm\",\"file\":\"%s\",\"ok\":1}\n", path);
+    else sendLinef("{\"t\":\"ack\",\"cmd\":\"sdrm\",\"file\":\"%s\",\"ok\":0,\"msg\":\"%s\"}\n", path, why);
     sdUnmount();
 }
 
@@ -363,9 +387,8 @@ void sdServiceFlush() {
             Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: write failed after %lu frames (card removed?) - recording stopped\"}\n",
                           static_cast<unsigned long>(sd.frames));
         sd.ioFailed = false;
-        sdCloseCapture();
-        SD.end(); sd.mounted = false;
-        sdSetPresent(false, "recording stopped");
+        sdCloseCapture();   // unmounts too, unless an sdread still holds the card (it learns from its own I/O error)
+        if (!sd.mounted) sdSetPresent(false, "recording stopped");
         syncCapActive();   // the ring goes back to the heap if the USB sink is not using it
         return;
     }

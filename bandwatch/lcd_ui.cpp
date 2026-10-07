@@ -968,9 +968,9 @@ void refreshOverview(float global) {
 
     // "APs" is a Wi-Fi concept (beacon senders); in 802.15.4 there are no APs - count live nodes instead, so
     // the footer stops reading a misleading "APs 0" in Zigbee/Thread mode.
-    const bool is154 = mode154();
-    const char* entL = is154 ? "nodes" : "APs";
-    const unsigned entN = is154 ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen;
+    const bool zb = mode154();
+    const char* entL = zb ? "nodes" : "APs";
+    const unsigned entN = zb ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen;
     if (captureEnabled) {
         snprintf(buf, sizeof(buf), "%s %u  " LV_SYMBOL_DOWNLOAD " %lu  drop %lu", entL, entN,
                  static_cast<unsigned long>(capSent), static_cast<unsigned long>(capDropped));
@@ -1009,9 +1009,9 @@ void refreshChannels(float global) {
     }
     for (int i = slot; i < chanCellCount; i++) { chanCellArea(i, a); lv_obj_invalidate_area(chanGrid, &a); }   // rows gone
     chanCellCount = slot;
-    const bool is154 = mode154();   // "APs" is Wi-Fi-only; show live node count in 802.15.4
+    const bool zb = mode154();   // "APs" is Wi-Fi-only; show live node count in 802.15.4
     snprintf(buf, sizeof(buf), "max %.0f  sweep %lu  %s %u", global, static_cast<unsigned long>(sweepCount),
-             is154 ? "nodes" : "APs", is154 ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen);
+             zb ? "nodes" : "APs", zb ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen);
     lv_label_set_text(listFoot, buf);
 }
 
@@ -1166,7 +1166,7 @@ void refreshSystem(float global) {
         int devs = 0;
         const uint32_t now = millis();
         portENTER_CRITICAL(&g_devMux);
-        for (int i = 0; i < kBleDevSlots; i++) if (bleDevs[i].lastMs && now - bleDevs[i].lastMs <= kDevFreshMs) devs++;
+        for (int i = 0; i < kBleDevSlots; i++) if (devFresh(bleDevs[i].lastMs, now, kDevFreshMs)) devs++;
         portEXIT_CRITICAL(&g_devMux);
         snprintf(buf, sizeof(buf), "BLE mode: %d devices (60 s)", devs);
         lv_label_set_text(sysLines[n++], buf);
@@ -1318,7 +1318,7 @@ void refreshUi() {
     }
 
     if (logoActive()) {                          // picture: owns the screen until its timer runs out
-        if (millis() < logoSplashUntilMs) return;
+        if (static_cast<int32_t>(millis() - logoSplashUntilMs) < 0) return;   // wrap-safe, like every other deadline
         lv_obj_add_flag(logoSplash, LV_OBJ_FLAG_HIDDEN);
         if (logoThenModeCard) {                     // boot only: name the mode while Wi-Fi is still coming up
             logoThenModeCard = false;

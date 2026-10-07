@@ -22,13 +22,26 @@ serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
   `surv_ouis.h` = surveillance-OUI table. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h` = display glue (from
   the upstream C6 project, pins changed); `boot_logos.h` = generated boot-photo arrays (`tools/img2c.py` from
   `bootlogo/`).
-- `host/bandwatch_host.py` — serial reader, HTTP API, pcap writer, OUI/vendor lookup. `host/dashboard2.html` —
+- `host/bandwatch_host.py` — serial reader, HTTP API (loopback by default; `POST /api/cmd` needs
+  `Content-Type: application/json`, a same-origin `Origin` and a known `Host` - DEVELOPER §5), pcap writer, OUI/vendor lookup. `host/dashboard2.html` —
   the single-page UI at `/` and `/v2` (no build step, no dependencies). The classic `host/dashboard.html` was removed
   in v1.19 (git tag `v1.18.2` has the last copy); `/classic` 301-redirects to `/`, `--ui` is accepted and ignored.
 - `build.sh` (compile/flash via arduino-cli), `setup.sh` (install toolchain), `tools/ctags/` (Apple-Silicon
   workaround), `tools/witness/` (RX-only ESP32-S3 monitor + `verify.py`, the on-air oracle for §11),
   `tools/deauth/patch_raw_tx.py` (post-build raw-TX patch), `docs/` (developer docs), `captures/` (pcaps,
   git-ignored).
+
+## Hardware Debugging Checklist
+Before blaming code or changing pins, clocks, or radio config, rule out the basics:
+1. Confirm power: is the board on a powered port or hub?
+2. Confirm the chip ID matches the bootloader (`esptool.py chip_id`). esptool resets the board (rule 3), so stop
+   the host tool first and do this on purpose, not as a way to reboot.
+3. Confirm the console UART routing (this board's console is the native USB-Serial-JTAG, `CDCOnBoot=cdc` in
+   `build.sh`; there is no external UART bridge).
+4. Erase NVS if a previous config change may have persisted (`settings.cpp` restores band mode, `addr1`,
+   `blescan`, `specstep`, `snap`, `events` and `alerts` at boot).
+
+Change one variable at a time. State the hypothesis before flashing.
 
 ## Build / flash / run (all from repo root)
 ```
@@ -44,36 +57,6 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
 Install the push guard once per machine: `cp tools/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push`
 (see `AGENTS.md`).
 
-Add as a new ## Hardware Debugging section near the top of CLAUDE.md.\n\n## Hardware Debugging Checklist
-Before blaming code or changing pins, clocks, or radio config, rule out the basics:
-1. Confirm power: is the board on a powered port or hub?
-2. Confirm the chip ID matches the bootloader (`esptool.py chip_id`).
-3. Confirm the console UART routing.
-4. Erase NVS if a previous config change may have persisted.
-
-Change one variable at a time. State the hypothesis before flashing.
-Add under a ## Firmware Constraints section.\n\n## RAM Safety
-This firmware is RAM-constrained.
-- After any firmware change, run `tests/run_offline.sh` (the firmware tier compiles and gates static RAM against `tests/firmware/static_ram_ceiling.json`) and report the static-RAM delta against the previous build. This is an arduino-cli build; `idf.py` is not used.
-- Prefer variable-size buffers only with explicit bounds checks.
-- Verify that serial TX buffers cannot overrun silently. Detect and recover from drops at any point in a scan, not just at boundaries.
-Add under a ## Git & Releases section.\n\n## Release Workflow
-A release means all of these steps, in order:
-1. Bump the version in firmware, host and dashboard.
-2. Build and flash, then smoke-test on the device.
-3. Commit.
-4. Create the tag `vX.Y.Z` and verify it points at the right commit (`git show vX.Y.Z --stat`).
-5. Push the branch AND the tags.
-6. Update the README and CHANGELOG.
-
-Never leave a commit unpushed without explicitly telling the user. Force-pushes and retags must be handed to the user, with the exact command to run.
-Add under a ## Preferences section.\n\n## Working Style
-- When I say 'plan and build', give a short plan (bullets) and start implementing. Skip extended opinion unless I ask.
-- For visual and dashboard changes, describe the expected look and keep the existing encoding (e.g., waterfall = energy heatmap) unless told otherwise.
-- In zsh, quote globs like `/dev/cu.*` or use `ls /dev/cu.* 2>/dev/null`.
-
-
-
 ## Hard-won rules for this board (do not relearn these)
 1. **DTR/RTS edges reset the chip.** The C5's USB-Serial-JTAG maps DTR/RTS to BOOT/EN. Opening the port with
    pyserial `dtr=False, rts=False` reboots the board; `dtr=True, rts=True` (the macOS default on open) is safe.
@@ -85,11 +68,13 @@ Add under a ## Preferences section.\n\n## Working Style
    repeatedly and reboot the board over and over.
 4. **RAM (320 KB, no PSRAM) is the constraint.** Static usage must stay well under ~80 KB — an empirical
    line from 1.2, not a hardware limit; what actually binds is free heap at peak load (`DEVELOPER.md` §16).
-   The build's "leaving 248104 bytes" is the linker's arithmetic, not reality: measured free heap is ~83 kB. Only the visible LCD
-   page exists as LVGL widgets; the capture ring is malloc'ed per capture; LVGL uses `LV_STDLIB_CLIB`; the BLE
-   BLE keeps no result cache (we drive NimBLE directly), so BLE idles ~88 kB free. The LCD page swings free heap
-   by ~20 kB (Overview heaviest, Channels lightest since it is custom-drawn); the capture ring reserves that
-   swing (`lcdPageHeadroomB()`), so a new page must be built in `showPage()` like the others or its cost goes unseen. Out-of-memory shows up as
+   The build's "leaving 248104 bytes" is the linker's arithmetic, not reality: measured free heap at idle in `both`
+   is ~99-106 kB depending on the LCD page (measured in v1.15.5, §16; static RAM has grown ~3.4 kB since). Only the
+   visible LCD page exists as LVGL widgets; the capture ring is malloc'ed per capture; LVGL uses `LV_STDLIB_CLIB`;
+   BLE keeps no result cache (we drive NimBLE directly), so BLE idles ~88 kB free (measured in the 2026-10 audit,
+   v1.15.2). The LCD page swings free heap by ~7.5 kB (Overview heaviest; Channels, Devices and the Spectrum bars
+   are custom-drawn); the capture ring reserves that swing (`lcdPageHeadroomB()`), so a new page must be built in
+   `showPage()` like the others or its cost goes unseen. Out-of-memory shows up as
    `abort() ... lock_init_generic` or a store fault in `lv_obj_class_create_obj`.
    **`WifiDev` is field-ordered to pack to exactly 64 bytes** and a `static_assert` in `devices.h` holds it
    there: it lives in a `kWifiDevSlots` (96) array, so one added byte costs 96 and one added byte of *padding*
@@ -97,10 +82,12 @@ Add under a ## Preferences section.\n\n## Working Style
 5. **One radio.** Wi-Fi bands, BLE, 802.15.4 and the `spec` energy sweep are exclusive modes; `setBandMode()`
    tears one down and starts the next. `spec` reuses the 15.4 radio (and its channel 11-26 set) but arms no RX
    — it only runs `esp_ieee802154_energy_detect()` per channel, so it has no device table and no capture.
-   Every mode change calls `releaseCapture()`: capture off *and* the ~32 KB ring returned to the heap
+   Every mode change calls `releaseCapture()`: capture off *and* the ring (~32 KB in Wi-Fi, ~2.8 KB in BLE/15.4) returned to the heap
    (pcap link type differs per radio, and BLE mode needs that RAM). Only free the ring from the loop task.
-6. **Serial output never blocks** (`setTxTimeoutMs(0)`, 8 KB TX buffer) and every line first checks
-   `Serial.availableForWrite()` so lines are dropped whole, never truncated.
+6. **Serial output never blocks** (`setTxTimeoutMs(0)`, 8 KB TX buffer) and every line - acks and errors
+   included - first checks `serialRoom()` (`Serial.availableForWrite()`) against a budget built from the real
+   JSON-escaped string lengths, so lines are dropped whole, never truncated (v1.19.3). A budget that
+   underestimates its line truncates mid-JSON instead, so keep budgets exact when adding fields.
 7. **The prebuilt Arduino core cannot be reconfigured** (sdkconfig is fixed): BLE extended advertising is off,
    802.15.4 is on, 5 GHz Wi-Fi is on. Changing that means switching to ESP-IDF.
 8. **Do not bump the core casually.** The deauth path pokes hard-coded offsets inside the prebuilt
@@ -135,6 +122,17 @@ Add under a ## Preferences section.\n\n## Working Style
    when Rosetta is present (the wrapper exits if it cannot find it). arduino-cli caches prototype generation —
    `rm -rf build` after touching the wrapper.
 
+## Firmware Constraints
+
+### RAM Safety
+This firmware is RAM-constrained (rule 4, `docs/DEVELOPER.md` §16).
+- After any firmware change, run `tests/run_offline.sh` (the firmware tier compiles and gates static RAM against
+  `tests/firmware/static_ram_ceiling.json`) and report the static-RAM delta against the previous build. This is an
+  arduino-cli build; `idf.py` is not used.
+- Prefer variable-size buffers only with explicit bounds checks.
+- Verify that serial TX buffers cannot overrun silently (rule 6). Detect and recover from drops at any point in a
+  scan, not just at boundaries.
+
 ## Where to change things
 - Surveillance OUIs: `kSurvOuis` in `surv_ouis.h` (firmware matches so the LCD can flag), names in
   `SURV_CAT`/`SURV_KIND` in the host. A match is evidence, not proof - keep the UI wording honest.
@@ -165,8 +163,6 @@ Add under a ## Preferences section.\n\n## Working Style
   looks dead. `.capinfo` also carries `.control`, which is `display:grid` — override to block or inline
   content lands on separate rows.
 
-
-
 ## Testing without the LCD
 Regression suite in `tests/` (`tests/README.md`): `tests/run_offline.sh` runs the host + firmware tiers (no board;
 the firmware tier compiles and gates static RAM); `BANDWATCH_PORT=<port> python3 -m unittest discover -s tests/device`
@@ -174,7 +170,8 @@ runs the hardware tier against a live board (stop the host tool first).
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`,
-`snap <32..1600>` (capture snap length), `blescan active|passive|auto` (BLE scan policy; default `auto` stays
+`snap <32..1600>` (capture snap length), `addr1 1|0` (also track Wi-Fi devices seen only as a frame destination,
+tier 1, §15; persisted), `blescan active|passive|auto` (BLE scan policy; default `auto` stays
 passive and opens a short active window when a new scannable device has no name), `specstep 1|2|5` (fine-spectrum
 step in MHz; spec mode only), `mirror 1|0` (stream the LCD to the host over serial; default off, §19), `page next|prev` (step the LCD like a BOOT tap, §19), `reboot`.
 microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>` (delete one
@@ -192,6 +189,30 @@ default and the only path that reaches the air; 1 = the dead internal slot, for 
 radiates nothing from an unassociated STA — was disproven by the witness).
 Crash text is printed to USB before the reboot but the port re-enumerates, so keep a reader attached; decode
 addresses with `riscv32-esp-elf-addr2line -pfiaC -e build/bandwatch.ino.elf <addr>`.
+
+## Git & Releases
+
+### Release Workflow
+A release means all of these steps, in order:
+1. Bump the version: `kVersion` in `bandwatch/bandwatch_core.h` is the only version string (the host and the
+   dashboard show the device's `hello.ver`).
+2. Update the README (if anything user-visible changed) and add the `CHANGELOG.md` entry, so the tag points at
+   current docs.
+3. Build and flash, then smoke-test on the device.
+4. Commit.
+5. Create the tag `vX.Y.Z` and verify it points at the right commit (`git show vX.Y.Z --stat`).
+6. Push the branch AND the tags.
+
+Never leave a commit unpushed without explicitly telling the user. Force-pushes and retags must be handed to the
+user, with the exact command to run.
+
+## Preferences
+
+### Working Style
+- When I say 'plan and build', give a short plan (bullets) and start implementing. Skip extended opinion unless I ask.
+- For visual and dashboard changes, describe the expected look and keep the existing encoding (e.g., waterfall =
+  energy heatmap) unless told otherwise.
+- In zsh, quote globs like `/dev/cu.*` or use `ls /dev/cu.* 2>/dev/null`.
 
 ## Version history
 See `CHANGELOG.md` (newest first). Add an entry there for every release; keep this file for orientation only.

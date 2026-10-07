@@ -1,6 +1,6 @@
 {
-  "global_bytes_ceiling": 77800,
-  "measured_bytes": 77288,
-  "measured_at": "main 270fa04 (v1.18 + LCD mirror MF markers), arduino-cli compile via ./build.sh, 2026-10-07",
+  "global_bytes_ceiling": 77696,
+  "measured_bytes": 77184,
+  "measured_at": "v1.19.3 (review fixes: ChannelState.ed*/Deauth.dumped/probeDropped removed), arduino-cli compile via ./build.sh, 2026-10-07",
   "note": "Ceiling = measured + 512 B. 'Global variables use N bytes' from the arduino-cli link summary. Raise it deliberately (and say why in the commit) when a feature is worth the RAM; see CLAUDE.md rule 4 and docs/DEVELOPER.md section 16 - free heap at peak is what binds."
 }

@@ -38,6 +38,12 @@ records what `send()` would write), feeds it protocol lines through `handle_line
   (download + traversal), and every `/api/cmd` mapped to its exact device string; bad input (bad MACs, newline
   injection, unknown values, `sdread` names outside `CARD_TEXT_FILES` / the pcap pattern, path traversal, > 39
   chars) answered 400 with nothing sent.
+- `test_security.py` (v1.19.3): the HTTP hardening - anti-framing headers on every response, the `Host` allowlist
+  (and the wildcard-bind warning), `POST /api/cmd` Content-Type / Origin / Content-Length (400/413/415) / non-object
+  bodies, the `{"ok":false,"error"}` error shape, 503 when not connected with no empty pcap, `dest_only` rows with
+  `rssi`/`max` null, and the robustness fixes (bounded line splitter, capped device tables and probe SSIDs,
+  `spec_hist` cleared on a step change, `explain` always clearing `active`, unique same-second capture names, pcap
+  `orig_len`, a short `sdread` not saved, `/file` name rules).
 - `test_sdrm.py`: deleting a card file - `card_file_name()` (the guard `sdread` and `sdrm` share: pcaps and
   `CARD_TEXT_FILES` incl. `seen.old.csv`, 39-char edge; traversal, nested paths, `//`, 40 chars, other files,
   non-strings rejected), `POST sdrm` mapping and 400s, the `sdrm` ack (ok drops the file from the cached listing,
@@ -47,8 +53,9 @@ records what `send()` would write), feeds it protocol lines through `handle_line
 ## 2. Firmware (`tests/firmware/`) - offline, no board
 
 - `test_build_static_ram` runs `./build.sh` (compile only, never `--upload`) and fails if `Global variables use N
-  bytes` exceeds `global_bytes_ceiling` in `static_ram_ceiling.json` (measured 77,288 B on 270fa04; ceiling
-  77,800 = +512 B). Raise the ceiling deliberately, in the same commit as the change that needs it.
+  bytes` exceeds `global_bytes_ceiling` in `static_ram_ceiling.json` (ceiling 77,696 B = 77,184 B measured at v1.19.3 + 512 B;
+  restamp the JSON's `measured_*` fields at the next release that moves static RAM). Raise the ceiling deliberately, in the same commit as the
+  change that needs it.
   `BANDWATCH_BUILD_LOG=<file>` parses an existing build log instead of compiling.
 - The `static_assert`s in `bandwatch/devices.h` (`WifiDev` 64 B, `BleDev` 48 B, `Dev154` 24 B) and the channel
   table assert in `bandwatch_core.h` are covered by the compile itself: if one fires, `./build.sh` fails and so

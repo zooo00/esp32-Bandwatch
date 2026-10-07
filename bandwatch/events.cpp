@@ -189,7 +189,9 @@ void addRow(const char* kind, const EvtPending& e, const char* extra) {
     }
     const int n = snprintf(row, sizeof(row), "%s,%lu,%s,%s,%d,%u,%s,%s\n", ep, static_cast<unsigned long>(up), kind, mac,
                            e.rssi, e.ch, (e.flags & EVF_BLE) ? "ble" : "wifi", extra);
-    if (n <= 0 || ev.rowsLen + n > kRowBuf) { g_evStats.dropped++; return; }
+    // n is the length snprintf *wanted*: a row it had to cut short (n >= sizeof(row)) is dropped, not copied past
+    // the end of row. Today's rows are well under 128 B; this keeps the memcpy honest if a field ever grows.
+    if (n <= 0 || n >= static_cast<int>(sizeof(row)) || ev.rowsLen + n > kRowBuf) { g_evStats.dropped++; return; }
     memcpy(ev.rows + ev.rowsLen, row, n);
     ev.rowsLen += n;
     ev.rowsN++;
@@ -396,7 +398,10 @@ void loadSurvExtra() {
         const size_t n = f.readBytesUntil('\n', line, sizeof(line) - 1);
         line[n] = 0;
         unsigned a, b, c, cat;
-        if (sscanf(line, "%2x:%2x:%2x,%u", &a, &b, &c, &cat) != 4 || cat == 0 || cat >= kSurvNames) continue;
+        int end = 0;
+        if (sscanf(line, "%2x:%2x:%2x,%u%n", &a, &b, &c, &cat, &end) != 4 || cat == 0 || cat >= kSurvNames) continue;
+        while (line[end] == ' ' || line[end] == '\t' || line[end] == '\r') end++;   // CRLF files and trailing blanks are fine
+        if (line[end]) continue;                   // anything else after the category: not a line we wrote the format for
         g_survExtra[g_survExtraN++] = SurvOui{{static_cast<uint8_t>(a), static_cast<uint8_t>(b), static_cast<uint8_t>(c)},
                                               static_cast<uint8_t>(cat)};
     }

@@ -18,11 +18,11 @@ static volatile uint16_t s_edN = 0;
 static volatile bool s_edReady = false;   // one ED finished; re-arm from the loop task, not the ISR
 
 namespace {   // locals; closed before the driver callback because it needs C linkage
-// No globals needed here — all counting goes through g_accum in capture.cpp
+// Per-dwell counting goes through g_accum (bandwatch.cpp); nodes go into devs154.
 
-// Classify the MAC payload: Zigbee NWK header, Zigbee Green Power, or 6LoWPAN (Thread).
-inline uint8_t IRAM_ATTR classify154(const uint8_t* pl, uint16_t n, bool macSecured) {
-    if (macSecured) return 4;                       // encrypted at MAC level: Thread does this, Zigbee does not
+// Classify an unsecured MAC payload: Zigbee NWK header, Zigbee Green Power, or 6LoWPAN (Thread). MAC-secured
+// frames (proto 4, likely Thread) are tagged by the caller, which has the security bit.
+inline uint8_t IRAM_ATTR classify154(const uint8_t* pl, uint16_t n) {
     if (n < 2) return 0;
     const uint8_t b = pl[0];
     if ((b & 0xE0) == 0x60 || (b & 0xF8) == 0xC0 || (b & 0xF8) == 0xE0 || (b & 0xC0) == 0x80 || b == 0x41) return 3; // 6LoWPAN IPHC / FRAG / mesh / IPv6
@@ -88,6 +88,9 @@ extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t* frame, esp_ieee80
         uint16_t dstPan = 0xFFFF, srcPan = 0xFFFF, shortAddr = 0xFFFF;
         uint8_t key[8];
         bool haveSrc = false, hasExt = false;
+        // Only 2003/2006 frames (version 0/1) are address-parsed into the node table. 2015+ frames (version 2)
+        // can omit PAN ids and carry IEs, so this layout would misread them: they still count toward the
+        // channel and are captured, but get no node row, beacon info or LQI. Most Zigbee/Thread traffic is v0/v1.
         if (ver <= 1) {
             if (dstMode) { if (off + 2 <= n) { dstPan = p[off] | (p[off + 1] << 8); } off += 2; off += (dstMode == 2) ? 2 : 8; }
             if (srcMode) {
@@ -131,7 +134,7 @@ extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t* frame, esp_ieee80
                     }
                 } else if (ftype == 1) {                // data
                     flagBits |= 16;
-                    if (!secured && off < n) proto = classify154(p + off, n - off, false);
+                    if (!secured && off < n) proto = classify154(p + off, n - off);
                     else if (secured) { proto = 4; flagBits |= 8; }
                 } else if (ftype == 3) {                // MAC command
                     if (secured) flagBits |= 8;
@@ -141,11 +144,12 @@ extern "C" void IRAM_ATTR esp_ieee802154_receive_done(uint8_t* frame, esp_ieee80
         }
 
         uint8_t nh;
-        CapFrame* slot = capReserve(nh);
+        uint16_t room;
+        CapFrame* slot = capReserve(nh, room);
         if (slot) {
             uint16_t c = n;
             if (c > capSnapLen) c = capSnapLen;
-            if (c > kCapMaxLen) c = kCapMaxLen;
+            if (c > room) c = room;
             slot->ts_us = static_cast<uint32_t>(info->timestamp);
             slot->len = n;
             slot->capLen = c;
@@ -194,7 +198,7 @@ void edSetFreqMhz(int mhz) { ieee802154_ll_set_freq(static_cast<uint8_t>(mhz - 2
 
 // Re-arm the next energy-detect window from the loop task. Arming is not safe from the done callback (ISR)
 // — doing it there yields exactly one sample per dwell — so the callback only flags completion and the loop
-// kicks the next one. Bandwatch_Loop() runs every ~2 ms, giving ~100 samples per 220 ms dwell.
+// kicks the next one. Each window is ~2 ms (kEdDurationSym), so a kEdDwellMs (60 ms) dwell folds in ~25 samples.
 void serviceSpectrum() {
     if (specRunning && s_edReady) {
         s_edReady = false;

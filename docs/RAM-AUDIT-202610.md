@@ -1,15 +1,17 @@
 # Bandwatch RAM & leak audit — findings + implementation plan (2026-10)
 
 > **Status (v1.15.3):** F1, F2 (option a), F3 (BLE only), F4 comment, F5 note and the F6 indev removal shipped in
-> 1.15.3 — see `CLAUDE.md` history and `DEVELOPER.md` §16. Two corrections from review: F1's suggested
+> 1.15.3 — see `CHANGELOG.md` and `DEVELOPER.md` §16. Two corrections from review: F1's suggested
 > `releaseCapture()` would also close the SD file and stop USB capture (shipped as `refitCapRing()` instead), and
 > F3's Wi-Fi bump to 140 would exceed the 8 KB TX buffer at 64 rows (left at 126). F3's "drops whole" is also
 > wrong: an under-budget line truncates mid-write. v1.15.4 then custom-drew the Channels page (+50 kB
 > on that page) and added page-switch headroom to the ring sizing; the rest of F6 is parked in `ROADMAP.md` under
-> *Memory budget*.
+> *Memory budget*. This file is a historical record: its findings and `file:line` references are pinned to commit
+> `c0b2bd7` and have drifted since; `host/dashboard.html` (the "v1" it mentions) was removed in v1.19. Current
+> memory figures live in `DEVELOPER.md` §16.
 
 Audit of the firmware (`bandwatch/`) plus host tool, focused on memory leaks and RAM savings. All findings are
-**verified against commit `c0b2bd7` (v1.15.2)** on a plugged-in Waveshare ESP32-C5-LCD-1.47; no fixes implemented yet.
+**verified against commit `c0b2bd7` (v1.15.2)** on a plugged-in Waveshare ESP32-C5-LCD-1.47; no fixes had been implemented when it was written (see the status note above).
 Anything measured is quoted with its number; anything assumed is labelled as such. Written so an implementer who has
 not seen the code can act on it.
 
@@ -150,7 +152,7 @@ Take as needed, each is independent:
 | `specFine[84]` (`bandwatch_core.h:188`) | **504 B** (`.data`, initialized) | only used in spec mode → heap it at `startSpectrum()` / free at `stopSpectrum()`. Cleanest win. |
 | LVGL draw buffer `buf1` (`LVGL_Driver.cpp:13`; len = `W×H/21`) | **5,240 B** → ~3,670 at `/30` | saves ~1.6 kB; the SPI flush is synchronous (single buffer already), so smaller just means more flush passes per page rebuild — needs a UI feel-check. |
 | `Deauth.slotPad[256]` (`bandwatch_core.h:235`) | 256 of the 288 B struct | only the dead internal-kick path (`kickpath 1`) writes it, and its comment says the driver touches `&flag+210`: shrink to ~224 saves 32 B, or lazy-alloc on kickpath=1 saves ~250 B. Keep whatever you pick working with the §9 offset work in mind. |
-| Orphaned POINTER indev (`LVGL_Driver.cpp:54`) | ~200–300 B heap (estimated) | created with an empty read callback ("No touch input"); the BOOT button is a GPIO handled at `lcd_ui.cpp:1063`. Nothing else references it — removable if no LVGL feature needs *an* indev to exist. |
+| ~~Orphaned POINTER indev (`LVGL_Driver.cpp:54`)~~ **removed in 1.15.3** | ~200–300 B heap (estimated) | created with an empty read callback ("No touch input"); the BOOT button is a GPIO handled at `lcd_ui.cpp:1063`. Nothing else references it — removable if no LVGL feature needs *an* indev to exist. |
 
 ---
 

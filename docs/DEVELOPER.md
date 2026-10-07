@@ -13,7 +13,7 @@ where the authoritative specifications live.
 | Display | 1.47" IPS, ST7789, 172×320, RGB565, SPI | ST7789 init sequence in `Display_ST7789.cpp` (from Waveshare's C6 demo) |
 | LED | 1× WS2812B on **GPIO8** | Arduino core `rgbLedWrite()` (RMT) |
 | Buttons | BOOT on **GPIO28** (strapping pin; used as input after boot), RESET | |
-| microSD | SPI, CS **GPIO4** (shares SCLK/MOSI with the LCD; unused so far) | |
+| microSD | SPI, CS **GPIO4** (shares SCLK/MOSI/MISO with the LCD; pcap recording §12, event log §20) | |
 
 Display pins: SCLK **7**, MOSI **6**, MISO **5**, LCD CS **23**, DC **24**, RST **26**, backlight **10** (LEDC PWM).
 Panel gap X = 34, Y = 0. SPI clock 40 MHz (the SPI2 source clock on the C5 is 40 MHz; the upstream "80 MHz"
@@ -43,10 +43,11 @@ USB: the board's USB-C goes to the chip's native **USB-Serial-JTAG** (no externa
   version is **pinned** there (`ESP32_CORE_VERSION`, default 3.3.11) because of the deauth offsets in §9.
   On arm64 it also installs universal-ctags unconditionally: `build.sh` always routes ctags through
   `tools/ctags/ctags`, which fails if universal-ctags is missing, whether or not Rosetta is available.
-- Reference build (core 3.3.11, lvgl 9.3.0, **v1.6**): 0 errors, 0 warnings, **1 880 889 B flash (59 % of the
-  3 MB app partition)** and **79 592 B static RAM (24 %)** — that static figure is ~400 B under the ~80 KB
-  ceiling in `CLAUDE.md` rule 4, so watch it when adding globals, and see §17 for how `apSuffix` was added
-  without moving it at all.
+- Reference build (core 3.3.11, lvgl 9.3.0): at **v1.6** it was 0 errors, 0 warnings, 1 880 889 B flash (59 % of
+  the 3 MB app partition; the v1.12 boot photos took it to ~2.77 MB) and 79 592 B static RAM. Static RAM is now
+  **77,184 B** (v1.19.3; 77,392 B at v1.19), under 3 kB below the ~80 KB line in `CLAUDE.md` rule 4, and `tests/firmware` gates it
+  against `tests/firmware/static_ram_ceiling.json`. Watch it when adding globals; §16 has the history and §17 how
+  `apSuffix` was added without moving it at all.
 - The core's `sdkconfig` is fixed (prebuilt). Relevant values: `CONFIG_SOC_WIFI_SUPPORT_5G=y`,
   `CONFIG_BT_NIMBLE_ENABLED=y`, `CONFIG_BT_NIMBLE_EXT_ADV` **not set** (no BLE 5 extended advertising),
   `CONFIG_IEEE802154_ENABLED=y`, `CONFIG_IEEE802154_RX_BUFFER_SIZE=20`, `CONFIG_SPIRAM=y` (harmless
@@ -77,7 +78,7 @@ type (plus extern) that more than one file touches — everything here that land
 file-local helpers live in an anonymous namespace.
 
 - `bandwatch_core.h` — dwell (220 ms) and other tunables, `kChannels[]` / `kChanBand[]` (13 × 2.4 GHz,
-  25 × 5 GHz, 16 × 802.15.4), `BandMode` enum (`5g`, `2.4g`, `both`, `ble`, `154`), capture ring limits, LCD
+  25 × 5 GHz, 16 × 802.15.4), `BandMode` enum (`5g`, `2.4g`, `both`, `ble`, `154`, `spec`; `kBandModes` = 6), capture ring limits, LCD
   page enum; shared structs (`Accum`, `ChannelState`, `CapFrame`, `Hunt`, `Deauth`, `BleState`, `SdSink`,
   `DevSnap`) and state externs; `serialRoom()` / `sanitizeText()` / `putLE16/32`; cross-module decls.
 - `bandwatch.cpp` — the core: channel control (`applyChannelIdx()`, `advanceChannel()` skipping
@@ -123,9 +124,11 @@ file-local helpers live in an anonymous namespace.
   `handleCommand()` / `pollSerial()`. All output goes through `serialRoom()` so a line is either written whole
   or skipped.
 - `lcd_ui.cpp` — LVGL 9, 172×320 portrait: `showPage()` deletes the current page's widgets and builds the new
-  one (`buildOverviewPage`, `buildChannelsPage`, `buildDevicesPage`, `buildHuntPage`, `buildSystemPage`);
-  `refreshUi()` updates only the visible page and drives the LED (`driveLed()`, which yields to an alert blip, §21). `pollButton()` = tap → next page, hold 0.7 s →
-  next mode (or stop hunt on the Hunt page).
+  one (`buildOverviewPage`, `buildChannelsPage`, `buildSpectrumPage`, `buildDevicesPage`, `buildHuntPage`,
+  `buildSystemPage`; `pageAvailable()` hides the pages a mode has no use for);
+  `refreshUi()` updates only the visible page and drives the LED (`driveLed()`, which yields to an alert blip, §21). `pollButton()` = tap → next page, hold → walk the
+  mode cards every 0.7 s (then a boot-photo stop after Spectrum), release picks (on the Hunt page the hold stops the
+  hunt first).
 - `devices.h` — device-table structs + open-addressing hash; `surv_ouis.h` — the surveillance-OUI table
   (matched in firmware so the LCD can flag without a host); `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h`
   — display glue.
@@ -134,8 +137,9 @@ Tasks and contexts: Arduino `loop` task (LVGL + everything in `Bandwatch_Loop`),
 callback), NimBLE host task (advert callback), 802.15.4 ISR. Shared data is protected with the two spinlocks;
 never call anything that allocates or blocks inside them.
 
-Memory budget (measured, v1.2): static ≈ 79 KB; free heap ≈ 100 KB in Wi‑Fi modes, 60–100 KB in BLE mode,
-≈ 120 KB in 802.15.4 mode; capture ring = up to 20 × 1.6 KB allocated on `cap 1`.
+Memory budget: see §16 for current measured figures (static 77,184 B at v1.19.3; free heap ~99–106 kB in `both`
+depending on the LCD page, measured in v1.15.5; BLE ~88 kB, measured in v1.15.2); capture ring allocated on `cap 1` (up to 20 slots: ~1.6 KB each in Wi‑Fi modes, 128 B payload in BLE/802.15.4
+since v1.19.3, §16).
 
 ## 4. Serial protocol (USB CDC, 115200, newline-delimited)
 
@@ -143,7 +147,7 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21) |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `spec_step` (fine-spectrum step in MHz), `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes, **in chunks of ≤24 rows** (v1.17; loudest first, each chunk a complete line; the host merges by MAC, so a chunk dropped for TX room just waits a cycle) | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv, apSuffix]`; `apSuffix` = last 3 bytes of the BSSID this device was heard associated with, lower-case hex, `""` if never seen on a BSS (§17); flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
@@ -158,8 +162,10 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"sdls","files":[[name, bytes], ...],"total":N,"sent":M}` | after `sdls` | files in the card root; `sent < total` = the serial buffer filled mid-list (host slow or absent) and whole entries were dropped |
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
 
-Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
-`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0`, 
+Host → device commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
+`hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0` (the 8-byte 802.15.4 extended address
+works since v1.19.3: `parseMac` used to accept its first 6 bytes as a Wi‑Fi MAC; a key hunt parks only in 802.15.4
+mode),
 `deauth <bssid>` (Wi‑Fi modes only — broadcast deauth to all clients of that AP; stops itself after `kDeauthMaxMs`,
 5 min) / `deauth 0`, 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one specific station — both MACs colon-separated, the
@@ -179,6 +185,12 @@ reply of the presence probe; `r1` is -1 when the card is mounted or busy and the
 over an active deauth; ack `{"t":"ack","cmd":"ledtest","kind":"surv","shown":0|1}` - `shown` 0 means a deauth owns
 the LED; any other kind gives `{"t":"err","msg":"ledtest: surv|new|join"}`).
 
+Settings and views (ack `{"t":"ack","cmd":...}`): `specstep 1|2|5` (fine-spectrum step in MHz, spec mode; persisted),
+`blescan passive|active|auto` (BLE scan policy, §13; persisted; frozen while recording), `addr1 0|1` (tier-1
+destination-only Wi‑Fi tracking, §15; persisted), `mirror 0|1` (LCD mirror, §19; not persisted), `page next|prev`
+(step the LCD like a BOOT tap, §19). Deauth diagnostics (§9, §11): `kickpath 0|1`, `kickfc <hex>`, `txtest 0|1|2`,
+`txstat`.
+
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
 instead of killing the reader thread (an exception there closes the serial port and silently ends a capture).
@@ -186,9 +198,8 @@ instead of killing the reader thread (an exception there closes the serial port 
 ## 5. Host tool (`host/`)
 
 `bandwatch_host.py`: a reader thread parses lines into a state dict (channels, history, device tables with
-per-device RSSI history, hunt state), an HTTP server exposes `GET /api/state` (everything, JSON) and
-`POST /api/cmd` (`{"cmd":"band"|"park"|"capture"|"hunt"|"deauth"|"dca"|"info", ...}`), and `PcapWriter` writes radiotap pcaps
-for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Files are named `bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` /
+per-device RSSI history, hunt state), an HTTP server exposes the API below, and `PcapWriter` writes radiotap pcaps
+for Wi‑Fi, 802.15.4‑TAP pcaps for 802.15.4 and BLE LL pcaps for BLE (§13). Files are named `bandwatch-wifi-YYYYmmdd-HHMMSS.pcap` /
 `bandwatch-802154-…` in `--captures` (default `./captures`).
 
 `captures/` is **git-ignored** — it holds your recorded pcaps, not source, so it is the one thing a fresh
@@ -196,11 +207,34 @@ for Wi‑Fi and 802.15.4‑TAP pcaps for 802.15.4. Files are named `bandwatch-wi
 the toolchain from `./setup.sh`, `~/.cache/bandwatch/oui.csv` on first host run); the recordings do not. Copy
 them by hand if you want them on the other machine.
 
-The deauth command starts a broadcast deauth attack (`cmd: "deauth", bssid: "XX:XX..."`), while the dca command 
-starts a targeted attack on one client (`cmd: "dca", client_mac: "...", ap_bssid: "..."`).
+HTTP API:
+
+- `GET /api/state` — everything, JSON. Wi‑Fi rows with `dest_only` (tier 1, seen only as a frame destination,
+  §15) carry `rssi`/`max` as `null` since v1.19.3: the device has no RSSI of their own (the frame's RSSI is the
+  sender's), and the dashboard shows "–" for them.
+- `GET /api/screen` (mirror status) and `GET /screen.bin` (raw RGB565-LE framebuffer, 172×320; §19).
+- `GET /file?name=<basename>` — a file in `--captures` (an `sdread` pull or a host pcap) as a download; plain
+  basenames only, anything else is 404.
+- `POST /api/cmd` — a JSON object `{"cmd": ..., ...}`. Commands: `band` (`value` 5g|2.4g|both|ble|154|spec),
+  `specstep` (`value` 1|2|5), `park` (`value` = channel, 0 = hop), `capture` (truthy `value` starts, optional `snaplen`), `hunt` (`mac` = any hunt id, `ch`),
+  `deauth` (`mac` = the AP's BSSID, empty stops; broadcast to every client of that AP), `dca` (`client_mac`, `ap_bssid`; one station), and the
+  on/off switches `sdcap`, `events`, `alerts`, `mirror`, `addr1` (truthy `value`), plus `ledtest` (`value` surv|new|join), `page` (`value` next|prev), `blescan`
+  (`value` passive|active|auto), `sdinfo`, `sdls`, `sdread` / `sdrm` (`path`, a card-root name checked by
+  `card_file_name()`), `info`, and the host-only `explain` (`value` full|current|clear: leave spec mode, re-decode
+  Wi‑Fi/BLE/15.4 — all of it, or only the legs covering the frequencies flagged unexplained right now — so the
+  unexplained-energy comparison (§18) has fresh known devices, then return to spec; `clear` forgets sticky
+  explanations; 409 if one is already running). Read `do_POST` in `bandwatch_host.py` for the exact field names.
+  Errors are a non-2xx status with `{"ok": false, "error": "..."}` (400 bad argument or body, 413 body too large,
+  503 `not connected` when no device is attached — no empty pcap is opened then).
 
 `/api/cmd` has **no authentication**, and one of its commands starts a deauth attack, so the server binds to
-`127.0.0.1` by default; `--bind 0.0.0.0` hands that to anyone who can reach the port. Values that reach the
+`127.0.0.1` by default and, since v1.19.3, defends that against other web pages the browser has open: a POST must
+be `Content-Type: application/json` (a cross-site form or a "simple" fetch cannot send that without a preflight);
+a POST with a foreign `Origin` is refused; every request's `Host` header must name the bind address, `localhost`,
+`127.0.0.1` or `[::1]` (blocks DNS rebinding); and responses carry `X-Frame-Options: DENY`,
+`X-Content-Type-Options: nosniff` and a CSP `frame-ancestors 'none'` (no clickjacking). None of this is
+authentication: `--bind 0.0.0.0` (the host prints a warning for any non-loopback bind) hands deauth to anyone who
+can reach the port. Values that reach the
 serial line have embedded CR/LF stripped in `Bandwatch.send()` so a crafted field cannot append a second
 command to the line. The pcap writer is touched from both the reader thread and the HTTP thread, so
 `handle_frame()` takes a local reference and tolerates the file being closed underneath it.
@@ -296,12 +330,18 @@ real deauth frame-control bytes. That means **hard-coded byte offsets into drive
 These were derived against **core 3.3.11 / ESP-IDF 5.5.5** and nothing checks them at runtime, so a core
 whose structs moved will silently corrupt memory instead of failing. A `#warning` in `deauth_diag.cpp` fires if
 the core is not 3.3.x — treat it as "re-verify every offset in the table above", not as noise. `setup.sh`
-installs the newest `esp32:esp32`, so pin the version there if you need a reproducible build.
+pins `esp32:esp32` 3.3.11 (`ESP32_CORE_VERSION`) for exactly this reason; do not override it casually.
 
 Guards that are in place: a null `desc` and a null ebuf pointer `P` both count a TX failure and return rather
 than dereferencing; `serviceDeauth()` stops the attack after `kDeauthMaxMs` so a dead host or unplugged USB
-cable cannot leave it transmitting; `stopDeauth()` restores the 8.2 dBm sniffing TX power that `startDeauth()`
-raised to 16 dBm. Failures are visible as `df` in `d` lines and the 4th element of `deauth` in `hello`.
+cable cannot leave it transmitting. Failures are visible as `df` in `d` lines and the 4th element of `deauth` in
+`hello` (and prove nothing about the air - §11).
+
+**TX power units.** `esp_wifi_set_max_tx_power()` takes **0.25 dBm** units (valid range 8-84, i.e. 2-21 dBm), so
+`startWifi()`'s 82 is 20.5 dBm, not the "8.2 dBm" earlier comments and this section claimed (corrected v1.19.3).
+Since v1.19.3 the attack sets 84 (21 dBm, the API maximum; it used to pass an out-of-range 160) and `stopDeauth()`
+restores 82. The `wifi_country_t` that `startWifi()` sets carries `max_tx_power = 20`, which may cap both at 20 dBm -
+unmeasured.
 
 ## 10. Concurrency notes (what may touch what)
 
@@ -334,9 +374,12 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
   `serviceEvents()` on the loop task under the same lock. Everything else in the event log — classification,
   baseline, CSV buffer, every SD access — is loop-task only. A full queue drops the event and counts it.
 - Strings captured off the air (SSID, BLE name, country code) are stripped of control characters at ingest
-  (`sanitizeText`) so `printJsonStr` cannot expand them into `\u00xx` escapes that overshoot the `serialRoom()`
-  budget for a line. The budgets (`40 + n*126` Wi‑Fi, `40 + n*102` BLE) are estimates, not exact lengths: a full
-  64-device table already needs ~7 KB of the 8 KB TX buffer, so raising them is not free.
+  (`sanitizeText`), and JSON-escaped on output (`printJsonStr`). Since v1.19.3 every serial line - device rows,
+  `hello`, the spec bin, and every `ack`/`err`/`sdls`/`sdread`/`sdrm` reply - checks `serialRoom()` against a
+  budget built from the strings' real *escaped* lengths (or a derived true worst case), not an estimate, so a
+  quote- or backslash-heavy SSID cannot outgrow its budget and truncate the line mid-JSON; `sdread_done` waits for
+  room rather than being dropped. A full Wi‑Fi chunk (24 rows) or BLE table still needs several KB of the 8 KB TX
+  buffer, so new per-row fields are not free.
 
 ## 11. Deauth: why it did not work, and what fixed it (resolved 1.6)
 
@@ -478,7 +521,8 @@ at the epoch.
 **Memory — the part that constrains the design.** Mounting FATFS costs about 30 KB of heap, and BLE mode
 needs headroom. So the card is mounted **only while in use**:
 probed once at boot (`sdProbeAtBoot()` records `sdCardPresent`/`sdCardMb`, then unmounts), mounted again by
-`sdcap`/`sdinfo`/`sdls`/`sdread`, and released by `sdUnmount()` when done. Measured on hardware:
+`sdcap`/`sdinfo`/`sdls`/`sdread`, and released by `sdUnmount()` when done. Measured on hardware in v1.3 (before
+the v1.11 reclaim and the v1.15 custom-drawn pages; §16 has current figures):
 
 | state | free heap |
 | --- | --- |
@@ -488,7 +532,8 @@ probed once at boot (`sdProbeAtBoot()` records `sdCardPresent`/`sdCardMb`, then 
 | BLE mode (floor is 28 kB) | 57.8 kB |
 
 `sdcap` opens the file **before** sizing the capture ring, so `kCapHeapReserve` is reserved against
-post-mount heap. The ring therefore gets fewer slots while recording to SD (8 rather than 20) — expect a
+post-mount heap. The ring therefore gets fewer slots while recording to SD (§16: 11 slots after `cap 1` then
+`sdcap 1`, 9 with `sdcap` first, measured in v1.15.4; v1.15.5's lighter Overview page let USB + SD keep all 20) — expect a
 higher `drop` count on a busy channel than with USB capture alone. An earlier ordering left only 12.5 kB
 free, which is inside the range where LVGL page rebuilds fail (`CLAUDE.md` rule 4); keep the current order.
 
@@ -604,7 +649,8 @@ parses AD structures itself (`parseAdStructures`). Approach borrowed from
 [shermanatoor/ouispy-blesniff](https://github.com/shermanatoor/ouispy-blesniff).
 
 Side benefits: no library result cache, so the heap-floor dance `serviceBle()` used to do is gone and BLE
-mode now idles at ~95 kB free instead of ~58 kB, and the device table sees slightly more devices.
+mode idled at ~95 kB free instead of ~58 kB (measured in v1.4; ~88 kB in the 2026-10 audit at v1.15.2, after
+static RAM grew - §16), and the device table sees slightly more devices.
 
 **Record layout** — 10-byte pseudo-header written by the pcap writers from `f.channel`/`f.rssi`, then the
 reconstructed LL packet built by `buildBleLlFrame()`:
@@ -700,6 +746,8 @@ Rules that keep tier 1 from polluting the table, all in `trackWifiDevice(..., de
 - a tier-1 sighting **never evicts** a slot holding a device we have actually heard;
 - it never writes `rssi`, `maxRssi`, `ch` or beacon IEs — that signal belongs to whoever *sent* the frame,
   not to the device being addressed. Only `frames` and `lastMs` advance;
+  a fresh tier-1 slot does not seed `maxRssi` from the sender either (fixed in v1.19.3), and the host reports
+  `rssi`/`max` as `null` for `dest_only` rows, which the dashboard shows as "–";
 - the first `addr2` sighting clears bit2 and promotes the entry to tier 2, permanently;
 - broadcast/multicast destinations and frames where `addr1 == addr2` are skipped.
 
@@ -761,20 +809,24 @@ Global variables use 79576 bytes (24%) of dynamic memory, leaving 248104 bytes f
 ```
 
 That "leaving 248104 bytes" is the linker's arithmetic, not reality. Measured free heap at runtime is
-**~83 kB**, because the Wi-Fi/BLE driver stacks and the FreeRTOS task stacks claim the rest once the radio
+**~99-106 kB** in `both` depending on the LCD page (v1.15.5; it was ~83 kB before the v1.11 reclaim), because the Wi-Fi/BLE driver stacks and the FreeRTOS task stacks claim the rest once the radio
 comes up. Reading the linker figure literally suggests roughly 3× more room than exists, which is a good way
 to talk yourself into a change that then crashes in the field.
 
 ### What actually binds: free heap at peak concurrent load
 
-Measured on hardware (read `heap` from `hello`, or the dashboard):
+Measured on hardware (read `heap` from `hello`, or the dashboard). Each row names the release it was measured
+in; static RAM has grown since some of them (74,032 B at v1.15.4 → 77,392 B at v1.19), so treat older rows as
+upper bounds:
 
 | state | free heap |
 | --- | --- |
-| idle, Wi-Fi | ~83 kB |
-| idle, BLE | ~95 kB |
-| SD capture — the tightest normal state | **31.9 kB** |
-| BLE + SD capture | 32.3 kB |
+| idle, Wi-Fi `both` (v1.15.5: Overview / System / Devices / Channels) | ~98.9 / 102.3 / 106.4 / 106.4 kB |
+| idle, BLE (v1.15.2, 2026-10 audit) | ~88 kB |
+| peak: event log armed + USB + SD capture, every LCD page (v1.19) | **25.2 kB** (floor 24 kB) |
+| USB + SD capture, 20-slot ring, worst page Overview (v1.15.5) | ~27.8 kB |
+| SD capture (v1.3) | 31.9 kB |
+| BLE + SD capture (pre-1.11) | 32.3 kB |
 | SD capture with the pre-1.3 ring ordering | 12.5 kB — where LVGL page rebuilds start failing |
 
 The worst case is the capture ring (up to 32 kB), FATFS (~30 kB) and an LVGL page rebuild all landing
@@ -814,8 +866,8 @@ Montserrat 12/14/20 are built without U+00B7 and the dashes: LCD strings must st
 12.6 KB, malloc'ed by `events 1` (refused with an error if it will not fit) and freed by `events 0`. It mounts
 FATFS only for the length of a flush and never alongside a capture (flushes wait while `sdcap` records), so the
 FATFS cost does not stack on the SD-capture worst case above — but the 12.6 KB are gone from *every* state while
-armed, BLE and capture included, and arming is persisted. Free heap at peak load with the log armed has **not**
-been measured. Static cost of the 1.18 work (event log + presence probe + faces): 76,816 → **77,272 B** (the
+armed, BLE and capture included, and arming is persisted. Free heap at peak load with the log armed was
+measured in v1.19: **25,172 B** (event log + USB + SD capture, every LCD page; §20). Static cost of the 1.18 work (event log + presence probe + faces): 76,816 → **77,272 B** (the
 16-entry radio queue is 160 B of it). A `/surveil.csv` on the card adds up to 64 × 4 B = 256 B of heap, loaded
 once at boot.
 
@@ -828,7 +880,7 @@ floor standing (it shrinks toward `kCapSlotsMin` instead of being refused), and 
 a ring that `cap 1` made before the FATFS mount was floor-checked against the pre-mount heap, so `cap 1` then
 `sdcap 1` used to land at **16.1 kB** free (measured). Refit re-sizes it against the post-mount heap without
 touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order gives 9 slots, 33.8 kB). It guards only the one biggest allocation (plus the page-switch
-headroom above), so rule 4 still keeps the rest honest: current static usage is 77,392 B (v1.19.1; 77,272 B at v1.18; 74,032 B at v1.15.4), under 3 kB
+headroom above), so rule 4 still keeps the rest honest: current static usage is 77,184 B (v1.19.3; 77,392 B at v1.19.1; 77,272 B at v1.18; 74,032 B at v1.15.4), under 3 kB
 below the line, and that headroom is the edge of an unverified budget rather than a wall.
 
 ### Where the static RAM went (symbol-level, v1.5.5 -> v1.10 -> v1.19.1)
@@ -927,7 +979,8 @@ mode exactly like `r154Running` gates 15.4 (`advanceChannel`/`hopIfNeeded`/`setB
 ### Serial
 `sendSweep()` appends four energy fields to each row **only in `spec` mode**:
 `[ch, score, frames, bytes, strong, unique, state, edMin, edMean, edMax, edSamples]` (all dBm except the
-sample count). Only 16 channels sweep here, so the longer rows stay well inside the `serialRoom(1500)` budget;
+sample count). (Historical: the per-row energy fields were later superseded by the fine-spectrum `fs` line, and the sweep budget is
+derived per channel since v1.19.3.) Only 16 channels sweep here, so the longer rows stayed inside the budget;
 Wi-Fi/154 rows are byte-for-byte unchanged. `edSamples` doubles as a confidence indicator.
 
 `sendDwell()` also appends `"e":[edMin,edMean,edMax,edSamples]` per dwell **only in `spec` mode**, so the
@@ -975,9 +1028,9 @@ says so.
 
 ### UI
 LCD: `PAGE_SPECTRUM` (`buildSpectrumPage`/`refreshSpectrum` in `lcd_ui.cpp`), one bar per 15.4 bin scaled
-from `edMax` via `edDbmToScore()`, available only in `spec` mode (`pageAvailable`). Dashboard: a Spectrum tab
-with a dBm bar chart, a client-side waterfall (`<canvas>`, one row per completed sweep), and the
-unexplained-energy list from `s.unidentified`.
+from `edMax` via `edDbmToScore()`, available only in `spec` mode (`pageAvailable`). Dashboard: the spectrum views
+in the main column (a dBm bar chart, a client-side waterfall (`<canvas>`, one row per completed sweep), and the
+unexplained-energy list from `s.unidentified`), plus the `explain` control (§5).
 
 ## 19. Live LCD mirror over serial (1.13)
 
@@ -1003,7 +1056,7 @@ so reading `px_map` after the panel write is safe.
 
 ### Pacing, frames and repair (1.18.1; replaces the 1.13 full re-scan)
 All dirty regions in one `lv_timer_handler()` flush **synchronously** back-to-back, and `Serial` is non-blocking with
-an 8 KB TX buffer (`setTxTimeoutMs(0)`, §6) - it never drains mid-handler. Three mechanisms keep the host's copy
+an 8 KB TX buffer (`setTxTimeoutMs(0)`, `CLAUDE.md` rule 6) - it never drains mid-handler. Three mechanisms keep the host's copy
 honest:
 
 1. **Row slices.** `mirrorOnFlush()` sends each flushed region as `M` lines of <= ~2 KB base64 (as many rows as fit
@@ -1116,7 +1169,7 @@ and rows keep buffering meanwhile.
 
 ### Status line
 `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}` (§4) rides on `hello`, the `events`
-ack, and a `{"t":"ev"}` line every 5 s while armed, in every mode. Both dashboards show it with an arm/disarm
+ack, and a `{"t":"ev"}` line every 5 s while armed, in every mode. The dashboard shows it with an arm/disarm
 control; the card's file list (§12) offers download and delete for every file. The host's `sdread`/`sdrm` guard
 accepts the card's text files (`CARD_TEXT_FILES`: `events.csv`, `events.old.csv`, `seen.csv`, `seen.old.csv`,
 `surveil.csv`) besides the pcap naming scheme. Deleting `seen.csv` while armed starts novelty over (§12).

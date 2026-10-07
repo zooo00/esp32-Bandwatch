@@ -156,7 +156,6 @@ void resetChannelStats() {
         channels[i].hasData = false;
         channels[i].busyEma = channels[i].busyCurrent = 0.0f;
         channels[i].metrics = ChannelMetrics{};
-        channels[i].edMin = 0; channels[i].edMax = -128; channels[i].edMean = 0; channels[i].edSamples = 0;
     }
     for (int i = 0; i < kSpecMaxBins; i++) specFine[i] = SpecBin{};
     sweepCount = 0;
@@ -266,7 +265,7 @@ int collectWifiRefs(DevRef* refs, int maxN, uint32_t freshMs) {
     int n = 0;
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kWifiDevSlots && n < maxN; i++) {
-        if (wifiDevs[i].lastMs && (now - wifiDevs[i].lastMs) <= freshMs) {
+        if (devFresh(wifiDevs[i].lastMs, now, freshMs)) {
             // Sort key only. A tier-1 (destination-only) sighting has never been heard, so it carries rssi 0;
             // left as is it would sort above every real transmitter and push them off the LCD's 12 rows.
             refs[n].rssi = (wifiDevs[i].flags & 4) ? INT8_MIN : wifiDevs[i].rssi;
@@ -284,7 +283,7 @@ int collectBleRefs(DevRef* refs, int maxN, uint32_t freshMs) {
     int n = 0;
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kBleDevSlots && n < maxN; i++) {
-        if (bleDevs[i].lastMs && (now - bleDevs[i].lastMs) <= freshMs) {
+        if (devFresh(bleDevs[i].lastMs, now, freshMs)) {
             refs[n].rssi = bleDevs[i].rssi;
             refs[n].idx = static_cast<uint8_t>(i);
             memcpy(refs[n].key, bleDevs[i].mac, 6);
@@ -300,7 +299,7 @@ int collect154Refs(DevRef* refs, int maxN, uint32_t freshMs) {
     int n = 0;
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kDev154Slots && n < maxN; i++) {
-        if (devs154[i].lastMs && (now - devs154[i].lastMs) <= freshMs) {
+        if (devFresh(devs154[i].lastMs, now, freshMs)) {
             refs[n].rssi = devs154[i].rssi;
             refs[n].idx = static_cast<uint8_t>(i);
             memcpy(refs[n].key, devs154[i].key, 8);
@@ -319,7 +318,7 @@ bool fetchWifiDev(const DevRef& r, WifiDev& out, uint32_t freshMs) {
     bool ok = false;
     portENTER_CRITICAL(&g_devMux);
     const WifiDev& d = wifiDevs[r.idx];
-    if (d.lastMs && (now - d.lastMs) <= freshMs && macEq(d.mac, r.key)) { out = d; ok = true; }
+    if (devFresh(d.lastMs, now, freshMs) && macEq(d.mac, r.key)) { out = d; ok = true; }
     portEXIT_CRITICAL(&g_devMux);
     return ok;
 }
@@ -328,7 +327,7 @@ bool fetchBleDev(const DevRef& r, BleDev& out, uint32_t freshMs) {
     bool ok = false;
     portENTER_CRITICAL(&g_devMux);
     const BleDev& d = bleDevs[r.idx];
-    if (d.lastMs && (now - d.lastMs) <= freshMs && macEq(d.mac, r.key)) { out = d; ok = true; }
+    if (devFresh(d.lastMs, now, freshMs) && macEq(d.mac, r.key)) { out = d; ok = true; }
     portEXIT_CRITICAL(&g_devMux);
     return ok;
 }
@@ -337,7 +336,7 @@ bool fetch154Dev(const DevRef& r, Dev154& out, uint32_t freshMs) {
     bool ok = false;
     portENTER_CRITICAL(&g_devMux);
     const Dev154& d = devs154[r.idx];
-    if (d.lastMs && (now - d.lastMs) <= freshMs && key8Eq(d.key, r.key)) { out = d; ok = true; }
+    if (devFresh(d.lastMs, now, freshMs) && key8Eq(d.key, r.key)) { out = d; ok = true; }
     portEXIT_CRITICAL(&g_devMux);
     return ok;
 }
@@ -350,14 +349,18 @@ void setPark(int idx) {
 void lookupHuntLabel() {
     hunt.label[0] = 0;
     if (hunt.kind == 1) {
+        // Copy the two fields under the lock and format after it: the radio callbacks wait on g_devMux.
+        bool found = false;
+        uint8_t proto = 0;
+        uint16_t pan = 0;
         portENTER_CRITICAL(&g_devMux);
         for (int i = 0; i < kDev154Slots; i++)
-            if (devs154[i].lastMs && key8Eq(devs154[i].key, hunt.key)) {
-                static const char* const kProto[] = {"802.15.4", "Zigbee", "Zigbee GP", "Thread", "MAC-secured"};
-                snprintf(hunt.label, sizeof(hunt.label), "%s pan %04x", kProto[devs154[i].proto < 5 ? devs154[i].proto : 0], devs154[i].pan);
-                break;
-            }
+            if (devs154[i].lastMs && key8Eq(devs154[i].key, hunt.key)) { found = true; proto = devs154[i].proto; pan = devs154[i].pan; break; }
         portEXIT_CRITICAL(&g_devMux);
+        if (found) {
+            static const char* const kProto[] = {"802.15.4", "Zigbee", "Zigbee GP", "Thread", "MAC-secured"};
+            snprintf(hunt.label, sizeof(hunt.label), "%s pan %04x", kProto[proto < 5 ? proto : 0], pan);
+        }
         return;
     }
     portENTER_CRITICAL(&g_devMux);
@@ -451,9 +454,11 @@ void hopIfNeeded() {
     if ((now - dwellStartedMs) < dwell) return;
 
     finishDwell();
-    resetAccum();
     const int lastIdx = currentIdx;
     monitorReady = advanceChannel();
+    // Reset after the switch, not before it: frames that landed between the two used to be counted toward the
+    // next channel. (A frame from the old channel still in flight is now dropped instead, which is the safer error.)
+    resetAccum();
     if (monitorReady && parkedIdx < 0 && currentIdx < lastIdx) {
         sweepCount += 1;
         sendSweep();
@@ -461,10 +466,7 @@ void hopIfNeeded() {
 }
 
 void Bandwatch_Init(void) {
-    pinMode(kBootButtonPin, INPUT_PULLUP);
-    memset(wifiDevs, 0, sizeof(wifiDevs));
-    memset(bleDevs, 0, sizeof(bleDevs));
-    memset(devs154, 0, sizeof(devs154));
+    pinMode(kBootButtonPin, INPUT_PULLUP);   // the device tables are BSS: already zero
     // Probe the card at boot so "hello" can tell the dashboard whether SD recording is available.
     // SPI is already up: LCD_Init() runs before this, and both share the bus from the loop task.
     sdProbeAtBoot();

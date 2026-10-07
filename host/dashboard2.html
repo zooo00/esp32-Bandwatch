@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bandwatch · new UI</title>
+<title>Bandwatch</title>
 <style>
   :root {
     color-scheme: light;
@@ -11,6 +11,7 @@
     --grid: #e1e0d9; --axis: #c3c2b7; --border: rgba(11,11,11,0.10);
     --series: #2a78d6; --series-soft: #cde2fb; --accent-ink: #1c5cab;
     --good: #0ca30c; --warning: #fab219; --critical: #d03b3b;
+    --accent: #1c5cab;   /* solid fill under white text (the explain banner) */
   }
   @media (prefers-color-scheme: dark) {
     :root {
@@ -45,7 +46,7 @@
   .link:hover { text-decoration: underline; }
 
   .shell { max-width: 1560px; margin: 0 auto; display: grid; grid-template-columns: 278px minmax(0, 1fr); gap: 14px; align-items: start; }
-  .rail { position: sticky; top: 74px; max-height: calc(100vh - 90px); overflow-y: auto; display: grid; gap: 12px; padding-right: 2px; scrollbar-width: thin; align-content: start; }
+  .rail { position: sticky; top: var(--topbar-h, 74px); max-height: calc(100vh - var(--topbar-h, 74px) - 16px); overflow-y: auto; display: grid; gap: 12px; padding-right: 2px; scrollbar-width: thin; align-content: start; }
   .col { display: grid; gap: 14px; min-width: 0; align-content: start; }
 
   .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 13px 16px; }
@@ -74,15 +75,9 @@
   .meta { font-size: 13.5px; line-height: 1.55; }
   .warn { color: var(--warning); margin-top: 6px; }
 
-  .files { list-style: none; margin: 9px 0 0; padding: 0; display: grid; gap: 7px; }
-  .files li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; min-width: 0; }
-  .fname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
   .push { margin-left: auto; white-space: nowrap; }
   .pullprog { width: 64px; height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; flex: none; }
   .pullprog i { display: block; height: 100%; background: var(--series); }
-  .files .acts { margin-left: auto; display: flex; gap: 5px; align-items: center; flex: none; white-space: nowrap; }
-  .files .fsize { flex: none; }
-  .filesfoot { margin-top: 7px; }
   .fgroup { margin-top: 12px; }
   .fgroup h3 { font-size: 13px; margin: 0 0 4px; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
   .fgroup h3 small { color: var(--muted); font-weight: 400; }
@@ -96,10 +91,10 @@
   .ftable .acts button, .ftable .acts a { margin-left: 5px; }
   .fgroup .more { margin-top: 4px; }
   @media (max-width: 640px) { .ftable .fwhen { display: none; } }
-  .filesfoot p { margin: 5px 0 0; }
 
   .devcard { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   .devhead { display: flex; align-items: center; gap: 9px; padding: 10px 16px; cursor: pointer; user-select: none; }
+  .devhead:focus-visible { outline: 2px solid var(--accent-ink); outline-offset: -2px; }
   .devcard.active .devhead { cursor: default; }
   .devhead h3 { font-size: 14.5px; white-space: nowrap; }
   .chev { color: var(--muted); display: inline-block; transition: transform .15s; font-size: 12px; flex: none; }
@@ -131,7 +126,7 @@
   .surv.t1 { color: #9a7b16; background: color-mix(in srgb, var(--warning) 20%, transparent); }
 
   .deauth-menu { position: relative; display: inline-block; margin-left: 4px; }
-  .dca-list { display: none; position: absolute; left: 100%; top: -6px; z-index: 30; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 9px; width: max-content; max-width: 270px; text-align: left; }
+  .dca-list { display: none; position: fixed; z-index: 60; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 9px; width: max-content; max-width: 270px; text-align: left; }
   .deauth-menu.open .dca-list { display: block; }
   .dca-list .hdr { font-size: 11px; color: var(--muted); margin-bottom: 6px; white-space: nowrap; }
   .dca-list button.tiny { display: block; width: 100%; text-align: left; margin-top: 3px; white-space: nowrap; }
@@ -149,6 +144,10 @@
   .area { fill: var(--series-soft); opacity: .55; }
   .enddot { fill: var(--series); }
   .cross { stroke: var(--axis); stroke-dasharray: 3 3; }
+  .hit { fill: transparent; }   /* hover target for the tooltips: an unstyled rect would paint black */
+  .spark { display: inline-block; vertical-align: middle; }
+  .speclegend { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--ink-2); margin-bottom: 6px; }
+  .seg { display: flex; flex-wrap: wrap; gap: 6px; }
   #waterfall { width: 100%; height: 180px; image-rendering: pixelated; border-radius: 8px; background: #0b0f14; display: block; }
   .wfaxis { display: flex; justify-content: space-between; font-size: 10.5px; color: var(--muted); margin-top: 3px; }
 
@@ -178,6 +177,9 @@
   .toasts { position: fixed; right: 16px; bottom: 16px; display: grid; gap: 8px; z-index: 100; }
   .toast { background: var(--ink); color: var(--page); padding: 9px 14px; border-radius: 10px; font-size: 13px; box-shadow: 0 6px 24px rgba(0,0,0,.25); animation: tin .2s ease-out; transition: opacity .3s; max-width: 380px; }
   .toast b { margin-right: 7px; }
+  .toast.rec { border-left: 4px solid var(--critical); }
+  .toast.done { border-left: 4px solid var(--good); }
+  .toast.warn { border-left: 4px solid var(--warning); }
   .toast.out { opacity: 0; }
   @keyframes tin { from { opacity: 0; transform: translateY(6px); } }
 
@@ -186,16 +188,15 @@
     .rail { position: static; max-height: none; overflow: visible; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
     .actbar { grid-template-columns: 1fr; gap: 14px; }
     .grid2 { grid-template-columns: 1fr; }
-    .dca-list { left: auto; right: 0; top: 100%; }
   }
 </style>
 </head>
 <body>
-<div class="toasts" id="toasts"></div>
-<div id="explainBanner" hidden style="position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:50;background:var(--accent,#2b6cb0);color:#fff;padding:8px 14px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.3);font-size:13px;max-width:92vw"></div>
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+<div id="explainBanner" hidden role="status" aria-live="polite" style="position:fixed;left:50%;top:10px;transform:translateX(-50%);z-index:50;background:var(--accent);color:#fff;padding:8px 14px;border-radius:8px;box-shadow:0 2px 10px rgba(0,0,0,.3);font-size:13px;max-width:92vw"></div>
 <div id="app">
   <header class="topbar">
-    <h1>Bandwatch <span class="tag">new UI</span></h1>
+    <h1>Bandwatch</h1>
     <span class="pill" id="conn"><span class="dot"></span><span id="connText">connecting…</span></span>
     <span class="note" id="fw"></span>
     <button class="pill" id="unidPill" hidden title="Sustained 2.4 GHz energy no decoded device accounts for, from the last spectrum sweep - click to show it"></button>
@@ -207,9 +208,9 @@
       <section class="card railcard">
         <h3>Mode</h3>
         <div class="vseg" id="bandSeg">
-          <button data-band="5g">5 GHz Wi‑Fi</button>
-          <button data-band="2.4g">2.4 GHz Wi‑Fi</button>
-          <button data-band="both">Both Wi‑Fi bands</button>
+          <button data-band="5g">5 GHz Wi-Fi</button>
+          <button data-band="2.4g">2.4 GHz Wi-Fi</button>
+          <button data-band="both">Both Wi-Fi bands</button>
           <button data-band="ble">Bluetooth LE</button>
           <button data-band="154">Zigbee / Thread (802.15.4)</button>
           <button data-band="spec">Spectrum · 2.4 GHz energy</button>
@@ -284,19 +285,32 @@
     </aside>
 
     <main class="col">
-      <section class="card actbar" id="actBar" hidden>
+      <!-- Two independent action bars (B1): a deauth and a hunt can run at once, and a running transmit must never be
+           hidden. The deauth bar comes first - it is the more important thing to see. -->
+      <section class="card actbar" id="deauthBar" hidden>
         <div>
-          <div class="tagline" id="actTitle">Hunting</div>
-          <div class="big"><span id="actNum">–</span><small id="actUnit">dBm</small></div>
-          <div class="meter" style="margin-top:8px;max-width:none;width:100%"><div id="actMeter"></div></div>
-          <div class="note dim" id="actSub"></div>
+          <div class="tagline">Deauthing</div>
+          <div class="big"><span id="deauthNum">–</span><small>frames queued</small></div>
+          <div class="meter" style="margin-top:8px;max-width:none;width:100%"><div style="width:100%;background:var(--critical)"></div></div>
+          <div class="note dim" id="deauthSub"></div>
         </div>
         <div class="act-mid">
-          <div class="meta" id="actMeta"></div>
-          <svg id="actTrend" viewBox="0 0 420 96" style="max-width:440px;margin-top:10px"></svg>
-          <div class="note warn" id="actWarn" hidden></div>
+          <div class="meta" id="deauthMeta"></div>
+          <div class="note warn" id="deauthWarn" hidden></div>
         </div>
-        <button class="small stop" id="actStop">Stop</button>
+        <button class="small stop" id="deauthStop">Stop deauth</button>
+      </section>
+      <section class="card actbar" id="huntBar" hidden>
+        <div>
+          <div class="tagline">Hunting</div>
+          <div class="big"><span id="huntNum">–</span><small>dBm</small></div>
+          <div class="meter" style="margin-top:8px;max-width:none;width:100%"><div id="huntMeter"></div></div>
+        </div>
+        <div class="act-mid">
+          <div class="meta" id="huntMeta"></div>
+          <svg id="huntTrend" viewBox="0 0 420 96" style="max-width:440px;margin-top:10px"></svg>
+        </div>
+        <button class="small stop" id="huntStop">Stop hunting</button>
       </section>
 
       <div class="hero" id="hero"></div>
@@ -337,7 +351,7 @@
         <div class="warnbar" id="specWarn" hidden></div>
         <section class="card">
           <h2>2.4 GHz — RF energy <small>bar = power (dBm, auto-ranged) · cap colour = what explains it</small></h2>
-          <div class="speclegend" style="display:flex;flex-wrap:wrap;gap:12px;font-size:12px;color:var(--ink-2,#9aa);margin-bottom:6px">
+          <div class="speclegend">
             <span style="opacity:.75">cap:</span>
             <span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#3b82f6;margin-right:4px"></i>Wi-Fi</span>
             <span><i style="display:inline-block;width:10px;height:10px;border-radius:2px;background:#06b6d4;margin-right:4px"></i>BLE</span>
@@ -371,9 +385,9 @@
       </div>
 
       <section class="devcard" id="devWifi">
-        <div class="devhead">
+        <div class="devhead" role="button" tabindex="0" aria-expanded="true">
           <span class="chev">▾</span>
-          <h3>Wi‑Fi devices</h3>
+          <h3>Wi-Fi devices</h3>
           <span class="chip" id="nWifi">0 now</span>
           <span class="note dim" id="devWifiSeen"></span>
         </div>
@@ -396,7 +410,7 @@
       </section>
 
       <section class="devcard" id="devBle">
-        <div class="devhead">
+        <div class="devhead" role="button" tabindex="0" aria-expanded="true">
           <span class="chev">▾</span>
           <h3>Bluetooth LE</h3>
           <span class="chip" id="nBle">0 now</span>
@@ -413,12 +427,12 @@
             <th class="l" data-k="kind">What it looks like</th><th data-k="tx">TX pwr</th><th data-k="rssi" class="sorted">RSSI</th><th data-k="max">Max</th>
             <th>Trend</th><th data-k="adv">Adverts</th><th data-k="age">Seen</th><th></th>
           </tr></thead><tbody></tbody></table></div>
-          <p class="note" style="margin:9px 0 0">BLE mode pauses Wi‑Fi sniffing (single radio). Vendor is the Bluetooth SIG company id from manufacturer data, or the OUI for public addresses. Most phones and wearables rotate random addresses every ~15 minutes, so the same device may appear under several addresses. The prebuilt radio stack scans legacy advertisements only.</p>
+          <p class="note" style="margin:9px 0 0">BLE mode pauses Wi-Fi sniffing (single radio). Vendor is the Bluetooth SIG company id from manufacturer data, or the OUI for public addresses. Most phones and wearables rotate random addresses every ~15 minutes, so the same device may appear under several addresses. The prebuilt radio stack scans legacy advertisements only.</p>
         </div>
       </section>
 
       <section class="devcard" id="devZig">
-        <div class="devhead">
+        <div class="devhead" role="button" tabindex="0" aria-expanded="true">
           <span class="chev">▾</span>
           <h3>Zigbee / Thread (802.15.4)</h3>
           <span class="chip" id="nZig">0 now</span>
@@ -465,17 +479,16 @@
 <script>
 (() => {
   const $ = (s) => document.querySelector(s);
-  let state = null, dwellS = 0.22, lastGood = 0, paused = false, sdlsAt = 0, wfSweep = -1, lastStep = 0, actMode = '';
+  let state = null, dwellS = 0.22, lastGood = 0, paused = false, sdlsAt = 0, wfSweep = -1, lastStep = 0;
   const KINDS = ['wifi', 'ble', 'zig'];
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };      // table under the mouse keeps its rows put
   const expanded = { wifi: false, ble: false, zig: false };    // user-opened "last seen" cards
-  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0, spec: 0 };                // click latches until the device confirms (poll is 1 Hz)
-  let explainPending = null;
-  let specOpen = false;                                        // cached spectrum expanded outside spec mode                                   // {scope, t} latched from click until the host reports it active
+  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0, spec: 0, alerts: 0 };     // click latches until the device confirms (poll is 1 Hz)
+  let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
+  let specOpen = false;                                        // cached spectrum expanded outside spec mode
+  let unfreeze = null;                                         // table kind a sort/filter click is re-rendering right now
   const prev = {};
-  // C4 text files on the card (not pcaps), in list order. The first two are the live log and baseline, shown even
-  // in the compact list; the rest (rotated .old files, the extra-OUI list) only under "show all".
   const fileGroupOpen = {};                                     // per-group "show all" expanders (file card)
   const FILE_GROUP_SHOW = 5;                                    // rows per group before "show all"
   // Card files by kind. Capture names come from sdOpenCapture(): bandwatch-<radio>-YYYYMMDD-HHMMSS.pcap (UTC, host
@@ -505,7 +518,7 @@
   const kb = (b) => b >= 1048576 ? `${fmt(b / 1048576, 1)} MB` : `${fmt((b || 0) / 1024, 1)} KB`;
   const band = (c) => state && state.band === '154' ? '802.15.4' : state && state.band === 'spec' ? '2.4 GHz' : c > 14 ? '5 GHz' : '2.4 GHz';
   const bandIn = (c, b) => b === '154' ? '802.15.4' : c > 14 ? '5 GHz' : '2.4 GHz';   // band of a channel in a given mode
-  const BAND_NAME = { '5g': '5 GHz Wi‑Fi', '2.4g': '2.4 GHz Wi‑Fi', both: 'both Wi‑Fi bands', '154': '802.15.4' };
+  const BAND_NAME = { '5g': '5 GHz Wi-Fi', '2.4g': '2.4 GHz Wi-Fi', both: 'both Wi-Fi bands', '154': '802.15.4' };
   // Last channel picture from a hopping mode, so BLE/spec can still show it (marked stale). BLE's hello carries
   // no channel list, and spec reuses 11-26 but sends no dwell lines, so the host can't keep this for us.
   let lastHop = null;
@@ -537,10 +550,36 @@
   // Colour encodes the explanation ONLY; strength is the bar height (dBm). Keeping edColor out of the fill
   // stops the energy gradient from competing with the classification palette.
   const barColor = (b) => CLS_COLORS[b.cls] || CLS_UNCLASSED;
-  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const ago = (s) => s == null ? 'never' : s < 1 ? 'now' : s < 60 ? fmt(s) + ' s' : s < 3600 ? fmt(s / 60) + ' min' : fmt(s / 3600, 1) + ' h';
-  const post = (body) => fetch('/api/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const since = (s) => s == null ? 'never' : s < 1 ? 'just now' : ago(s) + ' ago';   // "5 s ago", never "now ago"
+  // Fetch with a timeout, so one hung request cannot stall a poll loop for good.
+  function fetchT(url, opts, ms) {
+    const ctl = new AbortController(), tm = setTimeout(() => ctl.abort(), ms || 5000);
+    return fetch(url, { ...(opts || {}), signal: ctl.signal }).finally(() => clearTimeout(tm));
+  }
+  // POST a command. Resolves true on success; on a refusal (non-2xx, {"ok":false,"error":..}) or no answer it
+  // toasts why and resolves false, so a caller can release its click latch at once.
+  async function post(body, quiet) {
+    let r, j = null;
+    try {
+      r = await fetchT('/api/cmd', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }, 8000);
+      try { j = await r.json(); } catch (e) { /* no JSON body */ }
+    } catch (e) {
+      if (!quiet) toast('Command failed', `${body.cmd}: the host did not answer`, 'warn');
+      return false;
+    }
+    if (r.ok && !(j && j.ok === false)) return true;
+    if (!quiet) toast('Command refused', `${body.cmd}: ${(j && j.error) || 'HTTP ' + r.status}`, 'warn');
+    return false;
+  }
+  // Release a click latch early when the command was refused (otherwise it waits out its 6 s timeout).
+  const unlatchOnFail = (which) => (ok) => { if (!ok && pending[which]) { pending[which] = 0; if (state) render(state); } };
+  let hostSkew = 0;                                            // host clock minus browser clock, s (see tick)
+  const hostNow = () => Date.now() / 1000 + hostSkew;
   const pct = (rssi) => Math.max(0, Math.min(100, Math.round((rssi + 100) * 100 / 70)));
+  // dest_only Wi-Fi rows carry no RSSI of their own: the host sends null (older hosts sent 0).
+  const noRssi = (r, d) => r == null || (r === 0 && !!(d && d.dest_only));
 
   $('#bandSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) post({ cmd: 'band', value: b.dataset.band }); });
   $('#park').addEventListener('change', (e) => post({ cmd: 'park', value: +e.target.value }));
@@ -559,7 +598,7 @@
     const on = !(state && state.capture);
     armPending('cap', $('#capBtn'), on ? 'Starting…' : 'Stopping…');
     toast(on ? 'Saving pcap to this Mac' : 'Stopping Mac capture', on ? 'starting…' : 'closing the file…');
-    post({ cmd: 'capture', value: on, snaplen: +$('#snap').value || 1600 });
+    post({ cmd: 'capture', value: on, snaplen: +$('#snap').value || 1600 }).then(unlatchOnFail('cap'));
   });
   $('#bleScanSeg').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-scan]'); if (!b) return;
@@ -572,40 +611,55 @@
     const on = !(state && state.sd && state.sd.cap);
     armPending('sd', $('#sdBtn'), on ? 'Starting…' : 'Stopping…');
     toast(on ? 'Recording to microSD' : 'Stopping SD recording', on ? 'mounting the card…' : 'closing the file…');
-    post({ cmd: 'sdcap', value: on });
+    post({ cmd: 'sdcap', value: on }).then(unlatchOnFail('sd'));
   });
   $('#evBtn').addEventListener('click', () => {
     const on = !(state && state.events && state.events.on);
     armPending('ev', $('#evBtn'), on ? 'Arming…' : 'Disarming…');
     toast(on ? 'Event log armed' : 'Event log off', on ? 'new devices and surveillance hits go to events.csv' : 'no further rows are logged');
-    post({ cmd: 'events', value: on });
+    post({ cmd: 'events', value: on }).then(unlatchOnFail('ev'));
   });
   $('#alertBtn').addEventListener('click', () => {
     const on = !(state && state.alerts);
     armPending('alerts', $('#alertBtn'), on ? 'Turning on…' : 'Turning off…');
-    post({ cmd: 'alerts', value: on });
+    post({ cmd: 'alerts', value: on }).then(unlatchOnFail('alerts'));
   });
   $('#alertCard').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-ledtest]'); if (!b) return;
     post({ cmd: 'ledtest', value: b.dataset.ledtest });
     toast('LED test', 'watch the board: ' + b.title.toLowerCase());
   });
-  $('#actStop').addEventListener('click', () => {
-    if (actMode === 'hunt') post({ cmd: 'hunt', mac: null });
-    else if (actMode === 'deauth') { armPending('deauth', $('#actStop'), 'Stopping…'); post({ cmd: 'deauth', mac: null }); }
-  });
+  $('#huntStop').addEventListener('click', () => post({ cmd: 'hunt', mac: null }));
+  $('#deauthStop').addEventListener('click', () => { armPending('deauth', $('#deauthStop'), 'Stopping…'); post({ cmd: 'deauth', mac: null }).then(unlatchOnFail('deauth')); });
   $('#pauseBtn').addEventListener('click', () => { paused = !paused; $('#pauseBtn').textContent = paused ? 'Resume updates' : 'Pause updates'; $('#pauseBtn').classList.toggle('stop', paused); if (!paused && state) render(state); });
-  document.addEventListener('keydown', (e) => { if (e.key === ' ' && !/INPUT|SELECT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); $('#pauseBtn').click(); } });
+  // Space pauses - unless focus is on a control, where Space must keep its own meaning (press a button, open a summary).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== ' ' || e.defaultPrevented) return;
+    const a = document.activeElement;
+    if (a && a.closest && a.closest('button, input, select, textarea, summary, a[href], [role=button], [contenteditable]')) return;
+    e.preventDefault(); $('#pauseBtn').click();
+  });
+  // Render one device table now, bypassing the hover freeze and the pause: the user just asked for a new order/filter.
+  function renderTableNow(t) {
+    if (!state) return;
+    unfreeze = t;
+    try { if (t === 'wifi') renderWifi(state); else if (t === 'ble') renderBle(state); else renderZig(state); }
+    finally { unfreeze = null; }
+  }
+  const freezeOf = (t) => (frozen[t] || paused) && unfreeze !== t;
 
   for (const t of KINDS) {
     const tbl = $('#' + t + 'Tbl');
     tbl.addEventListener('mouseenter', () => frozen[t] = true);
     tbl.addEventListener('mouseleave', () => { frozen[t] = false; if (state && !paused) render(state); });
-    $('#' + t + 'Tbl thead').addEventListener('click', (e) => { const th = e.target.closest('th[data-k]'); if (!th) return; const k = th.dataset.k; if (sort[t].k === k) sort[t].dir *= -1; else { sort[t].k = k; sort[t].dir = (k === 'rssi' || k === 'max' || k === 'frames' || k === 'adv' || k === 'util' || k === 'stations' || k === 'tx') ? -1 : 1; } if (state) render(state); });
-    $('#' + t + 'Filter').addEventListener('input', () => state && render(state));
-    $('#dev' + t[0].toUpperCase() + t.slice(1)).querySelector('.devhead').addEventListener('click', () => { expanded[t] = !expanded[t]; if (state) render(state); });
+    $('#' + t + 'Tbl thead').addEventListener('click', (e) => { const th = e.target.closest('th[data-k]'); if (!th) return; const k = th.dataset.k; if (sort[t].k === k) sort[t].dir *= -1; else { sort[t].k = k; sort[t].dir = (k === 'rssi' || k === 'max' || k === 'frames' || k === 'adv' || k === 'util' || k === 'stations' || k === 'tx') ? -1 : 1; } renderTableNow(t); });
+    $('#' + t + 'Filter').addEventListener('input', () => renderTableNow(t));
+    const head = $('#dev' + t[0].toUpperCase() + t.slice(1)).querySelector('.devhead');
+    const toggle = () => { expanded[t] = !expanded[t]; if (state) render(state); if (!paused || !state) return; renderTableNow(t); };
+    head.addEventListener('click', toggle);
+    head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
   }
-  for (const id of ['wifiApOnly', 'survOnly', 'wifiActive', 'bleActive', 'zigActive']) $('#' + id).addEventListener('change', () => state && render(state));
+  for (const [id, t] of [['wifiApOnly', 'wifi'], ['survOnly', 'wifi'], ['wifiActive', 'wifi'], ['bleActive', 'ble'], ['zigActive', 'zig']]) $('#' + id).addEventListener('change', () => renderTableNow(t));
 
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
   // "Scan 2.4 GHz" from any mode: latch every scan button until the device reports spec mode (poll is 1 Hz).
@@ -624,7 +678,10 @@
   document.addEventListener('click', (e) => { const b = e.target.closest('[data-specstep]'); if (b) post({ cmd: 'specstep', value: +b.dataset.specstep }); });
   // "Explain" unexplained energy: leave spec to decode, then the host jumps back. Latch a local pending state
   // so the button reads as busy immediately (the 1 Hz poll would otherwise look dead until the host responds).
-  function explain(scope, btn) { explainPending = { scope, t: Date.now() }; btn.disabled = true; post({ cmd: 'explain', value: scope }); }
+  function explain(scope, btn) {
+    explainPending = { scope, t: Date.now() }; btn.disabled = true;
+    post({ cmd: 'explain', value: scope }).then(ok => { if (!ok) { explainPending = null; if (state) renderExplain(state); } });
+  }
   $('#explainCurrent').addEventListener('click', (e) => explain('current', e.currentTarget));
   $('#explainFull').addEventListener('click', (e) => explain('full', e.currentTarget));
   $('#explainClear').addEventListener('click', () => post({ cmd: 'explain', value: 'clear' }));
@@ -633,15 +690,26 @@
     const k = e.target.closest('button[data-deauth]');
     if (!k) return;
     armPending('deauth', k, '…');
-    post({ cmd: 'deauth', mac: k.dataset.deauth || null });
+    post({ cmd: 'deauth', mac: k.dataset.deauth || null }).then(unlatchOnFail('deauth'));
   });
   // The gear that reveals the client picker. One menu open at a time; a click anywhere else closes it.
   document.addEventListener('click', (e) => {
     const g = e.target.closest('.deauth-dropdown');
     const open = g && g.parentElement;
     document.querySelectorAll('.deauth-menu.open').forEach(m => { if (m !== open) m.classList.remove('open'); });
-    if (open) { open.classList.toggle('open'); e.stopPropagation(); }
+    if (!open) return;
+    e.stopPropagation();
+    if (!open.classList.toggle('open')) return;
+    // position:fixed (the table's overflow-x wrapper would clip an absolute menu): beside the gear, kept on screen.
+    const list = open.querySelector('.dca-list'), r = g.getBoundingClientRect();
+    list.style.left = '0px'; list.style.top = '0px';
+    const w = list.offsetWidth, h = list.offsetHeight, vw = document.documentElement.clientWidth, vh = window.innerHeight;
+    const left = r.right + 4 + w <= vw - 8 ? r.right + 4 : Math.max(8, r.left - 4 - w);
+    list.style.left = left + 'px';
+    list.style.top = Math.max(8, Math.min(r.top - 6, vh - h - 8)) + 'px';
   });
+  // A fixed menu would float away from its row on scroll: close it instead (scrolling inside the menu is fine).
+  window.addEventListener('scroll', (e) => { if (e.target.closest && e.target.closest('.dca-list')) return; document.querySelectorAll('.deauth-menu.open').forEach(m => m.classList.remove('open')); }, true);
   // dca: targeted deauth to one station. data-dca is "<client mac> <ap bssid>", colons intact.
   document.addEventListener('click', (e) => {
     const k = e.target.closest('button[data-dca]');
@@ -753,13 +821,18 @@
     $('#sdFilesLink').hidden = !files.length;
   }
 
-  function spark(hist) {
-    if (!hist || hist.length < 2) return '';
+  function spark(hist, dev) {
+    hist = (hist || []).filter(p => !noRssi(p[1], dev));
+    if (hist.length < 2) return '';
     const W = 90, H = 20, t0 = hist[0][0], t1 = hist[hist.length - 1][0], span = Math.max(1, t1 - t0);
     const d = hist.map((p, i) => (i ? 'L' : 'M') + ((p[0] - t0) / span * (W - 2) + 1).toFixed(1) + ',' + (H - 1 - pct(p[1]) / 100 * (H - 2)).toFixed(1)).join(' ');
     return `<svg class="spark" viewBox="0 0 ${W} ${H}" style="width:90px;height:20px"><path d="${d}" style="fill:none;stroke:var(--series);stroke-width:1.5"/></svg>`;
   }
-  function rssiCell(r) { return `<span class="rowbar"><div style="width:${pct(r)}%"></div></span>${fmt(r)}`; }
+  function rssiCell(r, d) {
+    if (noRssi(r, d)) return `<span class="rowbar" title="no signal of its own: seen only as a frame destination"></span>–`;
+    return `<span class="rowbar"><div style="width:${pct(r)}%"></div></span>${fmt(r)}`;
+  }
+  const maxCell = (m, d) => noRssi(m, d) ? '–' : fmt(m);
 
   const activeKind = (b) => b === 'ble' ? 'ble' : b === '154' ? 'zig' : ['5g', '2.4g', 'both'].includes(b) ? 'wifi' : null;
   const devsOf = (s, k) => s[k === 'wifi' ? 'wifi_devs' : k === 'ble' ? 'ble_devs' : 'z_devs'] || [];
@@ -813,7 +886,7 @@
     // Keep the file list around: hello replaces st["sd"] without it, so re-ask whenever it is gone. A few
     // seconds of cooldown keeps an empty card from being listed on every tick; if total=0 we stop asking.
     if (sd.mounted && !rec && sd.file_total === undefined && Date.now() - sdlsAt > 5000) {
-      sdlsAt = Date.now(); post({ cmd: 'sdls' });
+      sdlsAt = Date.now(); post({ cmd: 'sdls' }, true);
     }
     const sr = s.sd_read;   // file being pulled off the card (or the last one pulled this session)
     if (sr && sr.done && !(prev.srName === sr.name && prev.srDone)) {
@@ -841,7 +914,7 @@
     if (s.band === 'ble') {
       const bs = s.ble || {};
       document.querySelectorAll('#bleScanSeg button').forEach(b => b.classList.toggle('active', b.dataset.scan === (bs.scan || 'auto')));
-      $('#bleCapNote').innerHTML = `BLE capture records <b>advertising packets only</b>, reconstructed from HCI reports — no connections, no channel number.` +
+      $('#bleCapNote').innerHTML = `BLE capture records <b>advertising packets only</b>, reconstructed from HCI reports — no connections. The channel field is a placeholder (39): the scanner does not say which of 37/38/39 a packet arrived on.` +
         (bs.running ? `<br>scanning <b>${esc(bs.running)}</b>${bs.scan === 'auto' ? ' (auto)' : ''} · ${fmt(bs.adv || 0)} advertisements` : '');
     }
 
@@ -918,7 +991,7 @@
       const bs = s.ble || {};
       const live = devsOf(s, 'ble').filter(d => d.age < 60).length;
       slots = [
-        ['devices now', fmt(live), `${s.ble_devs.length} known · scan cycle ${fmt(bs.cycles)}`, true],
+        ['devices now', fmt(live), `${devsOf(s, 'ble').length} known · scan cycle ${fmt(bs.cycles)}`, true],
         ['scanning', esc(bs.running || bs.scan || '–'), bs.scan === 'auto' ? 'passive, with an active burst when a new device appears' : bs.scan === 'active' ? 'transmits SCAN_REQ to collect names' : 'never transmits'],
         ['advertisements', fmt(bs.adv), 'seen by the scanner this session'],
       ];
@@ -936,61 +1009,55 @@
       `<div class="hstat${big ? ' big' : ''}"><div class="hlabel">${label}</div><div class="hvalue">${value == null || value === '' ? '–' : value}</div>${sub ? `<div class="hsub">${sub}</div>` : ''}</div>`).join('');
   }
 
-  function renderAct(s) {
-    const h = s.hunt, k = s.deauth;
-    actMode = h ? 'hunt' : k ? 'deauth' : '';
-    $('#actBar').hidden = !actMode;
-    if (!actMode) return;
-    if (h) {   // ---- hunt: walk toward the target, watch the number rise ----
-      const live = h.rssi != null && h.age_ms != null && h.age_ms < 5000;
-      $('#actTitle').textContent = 'Hunting';
-      $('#actNum').textContent = live ? fmt(h.rssi) : '–';
-      $('#actUnit').textContent = 'dBm';
-      const m = $('#actMeter'); m.style.width = (live ? pct(h.rssi) : 0) + '%'; m.style.background = 'var(--series)';
-      $('#actSub').textContent = '';
-      const at = $('#actTrend'); at.style.display = '';   // the deauth mode hides it again below
-      $('#actMeta').innerHTML = `<b>${esc(h.label || '(no name)')}</b> <span class="mono">${esc(h.mac)}</span><br>` +
-        `[${[h.vendor, h.kind].filter(Boolean).join(' · ') || 'unknown kind'}] ${h.age_ms == null ? 'not seen yet' : `seen ${h.age_ms < 1000 ? 'now' : (h.age_ms / 1000).toFixed(1) + ' s ago'} · ${fmt(h.count)} hits`}`;
-      const pts = h.hist || [], W = 420, H = 96, padL = 30, padR = 10, padT = 8, padB = 16;
-      if (pts.length < 2) $('#actTrend').innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:12px">waiting for the target…</text>';
-      else {
-        const t0 = pts[0][0], t1 = pts[pts.length - 1][0], span = Math.max(20, t1 - t0);
-        const x = (t) => padL + (t - t0) / span * (W - padL - padR), y = (v) => padT + (H - padT - padB) - (Math.max(-100, Math.min(-30, v)) + 100) / 70 * (H - padT - padB);
-        const d = pts.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1)).join(' ');
-        const last = pts[pts.length - 1];
-        $('#actTrend').innerHTML = `<g class="grid">${[-100, -65, -30].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
-          <g>${[-100, -65, -30].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('')}<text x="${W - padR}" y="${H - 4}" text-anchor="end">last ${fmt(span)} s</text></g>
-          <path class="line" d="${d}"/><circle class="enddot" cx="${x(last[0])}" cy="${y(last[1])}" r="4"/>`;
-      }
-      $('#actWarn').hidden = true;
-      $('#actStop').textContent = 'Stop hunting';
-    } else {   // ---- deauth: kick the AP's stations (or one of them) ----
-      // Release the click latch as soon as the device's own state agrees with what was asked for (or after 6 s).
-      if (pending.deauth && (Date.now() - pending.deauth > 6000 || !!k !== prev.deauthOn)) { pending.deauth = 0; $('#actStop').disabled = false; }
-      prev.deauthOn = !!k;
-      $('#actTitle').textContent = 'Deauthing';
-      $('#actNum').textContent = fmt(k.sent);
-      $('#actUnit').textContent = 'frames queued';
-      const m = $('#actMeter'); m.style.width = '100%'; m.style.background = 'var(--critical)';
-      // df counts frames the driver *rejected*. Since 1.6 the raw TX path is the default and it returns
-      // ESP_ERR_INVALID_ARG unless the image was patched by tools/deauth/patch_raw_tx.py, so a climbing
-      // fail count almost always means "unpatched image, nothing is going out". Say so, rather than "failed".
-      $('#actSub').textContent = k.fail ? `${fmt(k.fail)} rejected by the driver` : '';
-      const apMac = k.targeted ? k.ap_bssid : k.mac;
-      const ap = (s.wifi_devs || []).find(x => x.mac === apMac);
-      let hint = [ap && (ap.ssid || '(hidden SSID)'), ap && ap.sec].filter(Boolean).join(' · ');
-      if (k.targeted) {
-        const c = (s.wifi_devs || []).find(x => x.mac === k.mac);
-        hint = [hint || apMac, `target ${k.mac}${c && c.vendor ? ` (${c.vendor})` : ''}`].filter(Boolean).join(' · ');
-      }
-      $('#actMeta').innerHTML = `spoofing <b>${esc(k.targeted ? `${k.mac} (one station)` : `${k.mac} (all stations)`)}</b> — ${hint || 'AP details unknown'}<br>` +
-        `${k.ch ? `parked on ch ${k.ch} (${band(k.ch)})` : 'channel unknown — hopping'}`;
-      const at = $('#actTrend'); at.innerHTML = ''; at.style.display = 'none';
-      const w = $('#actWarn');
-      w.hidden = !k.fail;
-      if (k.fail) w.textContent = 'The driver is rejecting the raw transmit — almost always an unpatched image, in which case nothing is being transmitted. Re-flash with ./build.sh --upload, which applies tools/deauth/patch_raw_tx.py by default.';
-      $('#actStop').textContent = 'Stop deauth';
+  // Hunt and deauth each own a bar (B1): both can run at once, and each Stop stops only its own activity.
+  function renderHuntBar(s) {
+    const h = s.hunt;
+    $('#huntBar').hidden = !h;
+    if (!h) return;   // ---- hunt: walk toward the target, watch the number rise ----
+    const live = h.rssi != null && h.age_ms != null && h.age_ms < 5000;
+    $('#huntNum').textContent = live ? fmt(h.rssi) : '–';
+    $('#huntMeter').style.width = (live ? pct(h.rssi) : 0) + '%';
+    $('#huntMeta').innerHTML = `<b>${esc(h.label || '(no name)')}</b> <span class="mono">${esc(h.mac)}</span><br>` +
+      `[${esc([h.vendor, h.kind].filter(Boolean).join(' · ') || 'unknown kind')}] ${h.age_ms == null ? 'not seen yet' : `seen ${h.age_ms < 1000 ? 'just now' : (h.age_ms / 1000).toFixed(1) + ' s ago'} · ${fmt(h.count)} hits`}`;
+    const pts = (h.hist || []).filter(p => p[1] != null), W = 420, H = 96, padL = 30, padR = 10, padT = 8, padB = 16;
+    if (pts.length < 2) $('#huntTrend').innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:12px">waiting for the target…</text>';
+    else {
+      const t0 = pts[0][0], t1 = pts[pts.length - 1][0], span = Math.max(20, t1 - t0);
+      const x = (t) => padL + (t - t0) / span * (W - padL - padR), y = (v) => padT + (H - padT - padB) - (Math.max(-100, Math.min(-30, v)) + 100) / 70 * (H - padT - padB);
+      const d = pts.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1)).join(' ');
+      const last = pts[pts.length - 1];
+      $('#huntTrend').innerHTML = `<g class="grid">${[-100, -65, -30].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
+        <g>${[-100, -65, -30].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('')}<text x="${W - padR}" y="${H - 4}" text-anchor="end">last ${fmt(span)} s</text></g>
+        <path class="line" d="${d}"/><circle class="enddot" cx="${x(last[0])}" cy="${y(last[1])}" r="4"/>`;
     }
+  }
+  function renderDeauthBar(s) {
+    const k = s.deauth;
+    // Release the click latch (bar Stop and every row's "…") on every render, running or not (B2): as soon as
+    // the device's own state differs from what it was at the click, or after 6 s.
+    if (pending.deauth && (Date.now() - pending.deauth > 6000 || (prev.deauthOn !== undefined && !!k !== prev.deauthOn))) pending.deauth = 0;
+    if (!pending.deauth) { const st = $('#deauthStop'); st.disabled = false; st.textContent = 'Stop deauth'; }
+    prev.deauthOn = !!k;
+    $('#deauthBar').hidden = !k;
+    if (!k) return;   // ---- deauth: kick the AP's stations (or one of them) ----
+    $('#deauthNum').textContent = fmt(k.sent);
+    // df counts frames the driver *rejected*. Since 1.6 the raw TX path is the default and it returns
+    // ESP_ERR_INVALID_ARG unless the image was patched by tools/deauth/patch_raw_tx.py, so a climbing
+    // fail count almost always means "unpatched image, nothing is going out". Say so, rather than "failed".
+    $('#deauthSub').textContent = k.fail ? `${fmt(k.fail)} rejected by the driver` : '';
+    const apMac = k.targeted ? k.ap_bssid : k.mac;
+    const ap = (s.wifi_devs || []).find(x => x.mac === apMac);
+    // SSIDs and vendors come off the air: everything below is escaped before it reaches innerHTML (D1).
+    let hint = [ap && (ap.ssid || '(hidden SSID)'), ap && ap.sec].filter(Boolean).map(esc).join(' · ');
+    if (k.targeted) {
+      const c = (s.wifi_devs || []).find(x => x.mac === k.mac);
+      hint = [hint || esc(apMac), `target ${esc(k.mac)}${c && c.vendor ? ` (${esc(c.vendor)})` : ''}`].filter(Boolean).join(' · ');
+    }
+    $('#deauthMeta').innerHTML = `spoofing <b>${esc(k.targeted ? `${k.mac} (one station)` : `${k.mac} (all stations)`)}</b> — ${hint || 'AP details unknown'}<br>` +
+      `${k.ch ? `parked on ch ${esc(k.ch)} (${band(k.ch)})` : 'channel unknown — hopping'}`;
+    const w = $('#deauthWarn');
+    w.hidden = !k.fail;
+    if (k.fail) w.textContent = 'The driver is rejecting the raw transmit — almost always an unpatched image, in which case nothing is being transmitted. Re-flash with ./build.sh --upload, which applies tools/deauth/patch_raw_tx.py by default.';
   }
 
   // Shared bar-chart scaffolding: horizontal gridlines + left-axis labels, and hover tooltips on the .hit rects.
@@ -1080,7 +1147,6 @@
     svg.onmouseleave = () => { tip.style.display = 'none'; cl.style.display = 'none'; };
   }
 
-  function rssiBarColor(r) { return r >= -55 ? 'var(--critical)' : r >= -70 ? 'var(--warning)' : r >= -82 ? '#caa23a' : 'var(--series)'; }
   // BLE: a breakdown of live advertisers by what they look like (from the continuity/service/appearance
   // labels the host already derives). A per-device RSSI bar chart just duplicated the table below it; this
   // instead answers "what's around me" at a glance - the table doesn't summarise that.
@@ -1123,7 +1189,7 @@
   function renderSpecCache(s, hasBins) {
     const f = s.fine || {}, n = (s.unidentified || []).length;
     $('#specCacheSub').textContent = hasBins
-      ? `cached — last swept ${f.age == null ? 'earlier' : ago(f.age) + ' ago'} · energy only refreshes in Spectrum mode`
+      ? `cached — last swept ${f.age == null ? 'earlier' : since(f.age)} · energy only refreshes in Spectrum mode`
       : 'no sweep yet this session — a scan pauses decoding while it runs (one radio)';
     $('#specCacheUnid').hidden = !hasBins;
     $('#specCacheUnid').textContent = `${n} unexplained`;
@@ -1139,7 +1205,7 @@
     if (!hasBins) return;
     const n = (s.unidentified || []).length;
     pill.innerHTML = `<span class="dot" style="background:${n ? 'var(--critical)' : 'var(--muted)'}"></span>${n} unexplained · 2.4 GHz` +
-      (s.band === 'spec' ? '' : ` <span class="dim">(${f.age == null ? 'cached' : ago(f.age) + ' old'})</span>`);
+      (s.band === 'spec' ? '' : ` <span class="dim">(${f.age == null ? 'cached' : since(f.age)})</span>`);
   }
   function renderSpecStatus(s) {
     const f = s.fine || {};
@@ -1161,6 +1227,7 @@
     const running = ex && ex.active;
     // Clear the local latch once the host has picked the request up (active) or finished one after our click.
     if (explainPending && (running || (ex && ex.finished && ex.finished * 1000 > explainPending.t))) explainPending = null;
+    if (explainPending && Date.now() - explainPending.t > 10000) explainPending = null;   // never picked up: give the buttons back
     const busy = running || !!explainPending;
     if (cur) cur.disabled = busy;
     if (full) full.disabled = busy;
@@ -1192,9 +1259,9 @@
         + spans.map(e => `<tr><td class="l"><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${CLS_COLORS[e.cls]};opacity:${e.age ? 0.45 : 1};margin-right:5px"></i>${CLS_LABEL[e.cls]}</td>`
             + `<td class="l mono">${esc(e.expl) || '—'}</td>`
             + `<td class="l">${e.lo === e.hi ? e.lo + ' MHz' : e.lo + '–' + e.hi + ' MHz'}</td><td>${e.peak} dBm</td>`
-            + `<td>${e.age ? ago(e.age) + ' ago' : '<span style="color:#22c55e">live</span>'}</td></tr>`).join('')
+            + `<td>${e.age ? since(e.age) : '<span style="color:var(--good)">live</span>'}</td></tr>`).join('')
         + '</tbody></table>'
-      : '<p class="note" style="margin:0">Nothing explained yet — no recently-decoded Wi‑Fi/BLE/Zigbee covers the energy on air. Use the buttons above to decode; matches are remembered here until you clear them.</p>';
+      : '<p class="note" style="margin:0">Nothing explained yet — no recently-decoded Wi-Fi/BLE/Zigbee covers the energy on air. Use the buttons above to decode; matches are remembered here until you clear them.</p>';
   }
   function renderEnergy24(s) {
     const svg = $('#spec'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 46, padR = 12, padT = 18, padB = 42;
@@ -1291,7 +1358,7 @@
     const name = (ap && ap.ssid) || d.parent;
     return ` · on <span title="${esc(d.parent)}">${esc(name)}</span>`;
   }
-  function huntBtn(mac, ch, s) { const on = s.hunt && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : mac}" ${ch ? `data-ch="${ch}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
+  function huntBtn(mac, ch, s) { const on = s.hunt && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : esc(mac)}" ${ch ? `data-ch="${esc(ch)}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
   function deauthBtn(d, s) {
     // "Stop" belongs on whichever row the running attack is pinned to: in targeted mode the device
     // reports the client as .mac and the AP as .ap_bssid, so an AP row matches on either.
@@ -1300,14 +1367,14 @@
     const title = d.ap ? 'Spoof this BSSID and kick every station on it' : 'Deauth';
     let btn = pending.deauth
       ? `<button class="small" disabled>…</button>`
-      : `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : d.mac}" title="${esc(title)}">${on ? 'Stop' : 'Deauth'}</button>`;
+      : `<button class="small ${on ? 'stop' : ''}" data-deauth="${on ? '' : esc(d.mac)}" title="${esc(title)}">${on ? 'Stop' : 'Deauth'}</button>`;
     // Stations the device has heard on this BSS. No clients seen -> no picker, which is the honest state.
     const clients = d.ap ? (s.wifi_devs || []).filter(x => x.parent === d.mac && x.mac !== d.mac) : [];
     if (clients.length) {
       // MACs keep their colons: the firmware's parseMac() only accepts "aa:bb-.." style, and 1.5.3 stripped them,
       // so every targeted kick was parsed as garbage and silently stopped the attack instead of starting one.
       const items = clients.slice(0, 12).map(c =>
-        `<button class="tiny" data-dca="${c.mac} ${d.mac}" title="Disconnect just this station">${c.mac}` +
+        `<button class="tiny" data-dca="${esc(c.mac)} ${esc(d.mac)}" title="Disconnect just this station">${esc(c.mac)}` +
         `${c.vendor ? ` <span class="sub">${esc(c.vendor)}</span>` : ''}</button>`).join('');
       btn += `<span class="deauth-menu"><button class="tiny ghost deauth-dropdown" title="Kick one specific station">⚙</button>` +
              `<span class="dca-list"><div class="hdr">${clients.length} station${clients.length > 1 ? 's' : ''} on this BSS</div>${items}</span></span>`;
@@ -1322,11 +1389,11 @@
     const newest = groups.length ? Math.min(...groups.map(g => g.age == null ? Infinity : g.age)) : null;
     const st = $('#probeStale');
     st.hidden = live;
-    if (!live) st.textContent = `cached — last heard ${newest == null || newest === Infinity ? 'a while' : ago(newest)} ago · switch Mode to a Wi‑Fi band to refresh`;
+    if (!live) st.textContent = `cached — last heard ${newest == null || newest === Infinity ? 'a while ago' : since(newest)} · switch Mode to a Wi-Fi band to refresh`;
     $('#zoneProbe').classList.toggle('cached', !live);
     const tb = $('#probeTbl tbody');
     tb.innerHTML = groups.length ? groups.map(g => `<tr><td class="l"><b>${esc(g.ssid)}</b>${g.nearby_ap ? ' <span class="sub">· AP nearby</span>' : ''}</td>
-      <td>${g.macs}</td><td class="l"><span class="sub">${g.random === g.macs ? 'all randomized MACs' : `${g.random} randomized`}${g.sample.length ? ' · ' + g.sample.map(x => `<span class="mono">${x.mac}</span>${x.vendor ? ' ' + esc(x.vendor) : ''}`).join(', ') : ''}</span></td>
+      <td>${esc(g.macs)}</td><td class="l"><span class="sub">${g.random === g.macs ? 'all randomized MACs' : `${g.random} randomized`}${g.sample.length ? ' · ' + g.sample.map(x => `<span class="mono">${esc(x.mac)}</span>${x.vendor ? ' ' + esc(x.vendor) : ''}`).join(', ') : ''}</span></td>
       <td>${fmt(g.rssi)}</td><td>${ago(g.age)}</td></tr>`).join('')
       : '<tr><td class="l" colspan="5"><span class="sub">No directed probe requests heard yet. Most phones probe with a wildcard (no SSID) and are not listed.</span></td></tr>';
     $('#probeNote').textContent = groups.length ? `${groups.length} network${groups.length > 1 ? 's' : ''} · a randomized MAC per probe burst is normal for phones, so one device can count as several clients` : '';
@@ -1335,17 +1402,18 @@
   function renderWifi(s) {
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
     const survOnly = $('#survOnly').checked;
-    let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy, ...(d.seeking || [])].join(' ').toLowerCase().includes(f)));
+    const all = s.wifi_devs || [];
+    let rows = all.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy, ...(d.seeking || [])].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'wifi');
-    $('#nWifi').textContent = `${s.wifi_devs.filter(d => d.age < 60).length} now`;
-    $('#wifiNote').textContent = `${rows.length} shown · ${s.wifi_devs.length} known · vendors: ${s.oui_source}`;
+    $('#nWifi').textContent = `${all.filter(d => d.age < 60).length} now`;
+    $('#wifiNote').textContent = `${rows.length} shown · ${all.length} known · vendors: ${s.oui_source}`;
     const survBadge = (d) => d.surv
       ? `<span class="surv${d.tier === 1 ? ' t1' : ''}" title="${esc(d.surv_kind)} — OUI match${d.tier === 1 ? ', seen only as a frame destination (weaker evidence)' : ''}">${esc(d.surv)}${d.tier === 1 ? ' ?' : ''}</span>` : '';
     renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}${d.seeking && d.seeking.length ? `<br><span class="sub">probing for ${d.seeking.map(x => `<b>${esc(x)}</b>`).join(', ')}</span>` : ''}</td>
-      <td class="l mono">${d.mac}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
-      <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? d.bw + ' MHz' : ''}</td><td>${d.ch}</td>
-      <td>${d.util != null ? d.util + ' %' : ''}</td><td>${d.stations != null && d.ap ? d.stations : ''}</td>
-      <td>${rssiCell(d.rssi)}</td><td>${fmt(d.max)}</td><td>${spark(d.hist)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, d.ch, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, frozen.wifi || paused);
+      <td class="l mono">${esc(d.mac)}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
+      <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? esc(d.bw) + ' MHz' : ''}</td><td>${esc(d.ch)}</td>
+      <td>${d.util != null ? esc(d.util) + ' %' : ''}</td><td>${d.stations != null && d.ap ? esc(d.stations) : ''}</td>
+      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, d.ch, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, freezeOf('wifi'));
     for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.deauth && (s.deauth.mac === d.mac || s.deauth.ap_bssid === d.mac) ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
@@ -1357,10 +1425,10 @@
     $('#bleNote').textContent = s.band === 'ble' ? `${rows.length} shown · ${(s.ble_devs || []).length} known · scan cycle ${fmt((s.ble || {}).cycles)}` : `${(s.ble_devs || []).length} known (stale cache — switch Mode to Bluetooth LE to refresh)`;
     const bSurv = (d) => d.surv ? `<span class="surv" title="${esc(d.surv_kind)} — OUI match">${esc(d.surv)}</span>` : '';
     renderRows($('#bleTbl tbody'), rows, d => d.mac, d => `<td class="l">${bSurv(d)}<b>${esc(d.name) || '<i>(unnamed)</i>'}</b>${d.connectable ? '' : '<br><span class="sub">non-connectable</span>'}</td>
-      <td class="l mono">${d.mac}<br><span class="sub">${d.random ? 'random address' : 'public address'}</span></td>
+      <td class="l mono">${esc(d.mac)}<br><span class="sub">${d.random ? 'random address' : 'public address'}</span></td>
       <td class="l">${esc(d.vendor)}${d.company && d.company_name !== d.vendor ? `<br><span class="sub">${esc(d.company_name)}</span>` : ''}</td>
-      <td class="l">${esc(d.kind)}</td><td>${d.tx != null ? d.tx + ' dBm' : ''}</td>
-      <td>${rssiCell(d.rssi)}</td><td>${fmt(d.max)}</td><td>${spark(d.hist)}</td><td>${fmt(d.adv)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, 0, s)}</td>`, frozen.ble || paused);
+      <td class="l">${esc(d.kind)}</td><td>${d.tx != null ? esc(d.tx) + ' dBm' : ''}</td>
+      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.adv)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, 0, s)}</td>`, freezeOf('ble'));
     for (const tr of $('#bleTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
@@ -1371,15 +1439,15 @@
     rows = sortRows(rows, 'zig');
     $('#nZig').textContent = `${(s.z_devs || []).filter(d => d.age < 60).length} now`;
     $('#zigNote').textContent = s.band === '154' ? `${rows.length} shown · ${(s.z_devs || []).length} known` : `${(s.z_devs || []).length} known (stale cache — switch Mode to 802.15.4 to refresh)`;
-    renderRows($('#zigTbl tbody'), rows, d => d.key, d => `<td class="l mono">${d.key}<br><span class="sub">${d.ext ? 'extended (EUI-64)' : 'pan / short'}</span></td>
+    renderRows($('#zigTbl tbody'), rows, d => d.key, d => `<td class="l mono">${esc(d.key)}<br><span class="sub">${d.ext ? 'extended (EUI-64)' : 'pan / short'}</span></td>
       <td class="l">${esc(d.vendor)}</td><td class="l">${esc(d.proto)}</td><td class="l">${d.permit_join ? '<b style="color:var(--warning)">permit join</b> · ' : ''}${esc(d.role)}</td>
-      <td>${d.pan || ''}</td><td>${d.short || ''}</td><td>${d.ch}</td><td>${d.lqi}</td>
-      <td>${rssiCell(d.rssi)}</td><td>${fmt(d.max)}</td><td>${spark(d.hist)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.key, d.ch, s)}</td>`, frozen.zig || paused);
+      <td>${esc(d.pan || '')}</td><td>${esc(d.short || '')}</td><td>${esc(d.ch)}</td><td>${esc(d.lqi)}</td>
+      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.key, d.ch, s)}</td>`, freezeOf('zig'));
     for (const tr of $('#zigTbl tbody').children) { const d = rows.find(x => x.key === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.key ? 'hunted' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
   function renderChannels(s, v) {
-    const now = Date.now() / 1000;
+    const now = hostNow();
     $('#tbl tbody').innerHTML = v.channels.map(c => `<tr class="${c.ch === v.current ? 'current' : ''}"><td class="l">ch ${c.ch}</td><td>${bandIn(c.ch, v.band)}</td>
       ${c.state === 2 ? '<td colspan="9" class="l" style="color:var(--muted)">rejected by driver</td>' : c.state === 1 ? '<td colspan="9" class="l" style="color:var(--muted)">no data yet</td>'
         : `<td>${fmt(c.s)}</td><td>${fmt(c.r)}</td><td>${fmt(c.f)}</td><td>${rate(c.f / dwellS)}</td><td>${rate(c.b / dwellS)}</td><td>${c.u}</td><td>${c.st}</td><td class="l">${topTalker(c, s)}</td><td>${c.t ? fmt(now - c.t) + ' s ago' : '–'}</td>`}</tr>`).join('');
@@ -1389,18 +1457,19 @@
     if (!c.top) return '<span class="sub">–</span>';
     const d = (s.wifi_devs || []).find(x => x.mac === c.top);
     const name = d ? (d.ssid || d.vendor || '') : '';
-    return `<span class="mono">${c.top}</span>${name ? ' <span class="sub">' + esc(name) + '</span>' : ''}${c.trssi != null ? ` <span class="sub">${c.trssi} dBm</span>` : ''}`;
+    return `<span class="mono">${esc(c.top)}</span>${name ? ' <span class="sub">' + esc(name) + '</span>' : ''}${c.trssi != null ? ` <span class="sub">${esc(c.trssi)} dBm</span>` : ''}`;
   }
 
   function render(s) {
     state = s;
     if (s.hello && s.hello.dwell_ms) dwellS = s.hello.dwell_ms / 1000;
     $('#conn').classList.toggle('on', !!s.connected);
-    $('#connText').textContent = s.connected ? `${esc(s.port)}${s.age != null ? ' · ' + s.age + ' s ago' : ''}` : 'no device';
+    $('#connText').textContent = s.connected ? `${s.port || ''}${s.age != null ? ' · ' + s.age + ' s ago' : ''}` : 'no device';
     $('#fw').textContent = s.hello ? `firmware ${s.hello.fw}${s.hello.ver ? ' ' + s.hello.ver : ''} · mode ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
     $('#app').classList.toggle('stale', !s.connected);
+    topbarFit();   // the firmware line can wrap the topbar
     if (s.hello && !mirrorInit) { mirrorInit = true; if (s.hello.mir) { mirrorOn = true; mirrorSetBtn(); } }
-    renderRail(s); renderAlerts(s); renderHero(s); renderAct(s); renderExplain(s); renderUnidPill(s);
+    renderRail(s); renderAlerts(s); renderHero(s); renderDeauthBar(s); renderHuntBar(s); renderExplain(s); renderUnidPill(s);
     if (pending.spec && (s.band === 'spec' || Date.now() - pending.spec > 6000)) {
       pending.spec = 0;
       document.querySelectorAll('[data-startspec]').forEach(b => { b.disabled = false; b.textContent = 'Scan 2.4 GHz'; });
@@ -1415,6 +1484,7 @@
       const lastSeen = devs.length ? Math.min(...devs.map(d => d.age)) : null;
       $('#dev' + cap1).classList.toggle('active', t === actK);
       $('#dev' + cap1).classList.toggle('collapsed', t !== actK && !expanded[t]);
+      $('#dev' + cap1 + ' .devhead').setAttribute('aria-expanded', String(t === actK || !!expanded[t]));
       $('#n' + cap1).textContent = devs.filter(d => d.age < 60).length + ' now';
       $('#dev' + cap1 + 'Seen').textContent = t === actK ? (s.band === 'spec' ? 'no radio decoding right now — stale cache' : 'live') : `last seen ${ago(lastSeen)}`;
     }
@@ -1425,7 +1495,7 @@
     const hv = hopView(s);
     const hvData = !!hv && hv.channels.some(c => c.state === 0);
     const showCh = hop || hvData;
-    const staleTxt = hv && !hv.live ? `last known — from ${BAND_NAME[hv.band] || hv.band} mode${hv.t ? ', ' + ago(Date.now() / 1000 - hv.t) + ' ago' : ''}`
+    const staleTxt = hv && !hv.live ? `last known — from ${BAND_NAME[hv.band] || hv.band} mode${hv.t ? ', ' + since(hostNow() - hv.t) : ''}`
       + (hv.band === '154' ? ' · 802.15.4 busy scores (decoded frames), not RF energy' : '') + ' · not live' : '';
     for (const [card, note] of [['#zoneHopBars', '#hopStale'], ['#chCard', '#chStale']]) {
       $(card).hidden = !showCh; $(card).classList.toggle('cached', showCh && !hop);
@@ -1435,7 +1505,7 @@
     const showTrend = hop || hist.length >= 2;
     $('#zoneTrend').hidden = !showTrend; $('#zoneTrend').classList.toggle('cached', showTrend && !hop);
     $('#trendStale').hidden = hop || !showTrend;
-    if (!hop && showTrend) $('#trendStale').textContent = `last known — no channel sweep in this mode · last sample ${ago(Date.now() / 1000 - hist[hist.length - 1][0])} ago`;
+    if (!hop && showTrend) $('#trendStale').textContent = `last known — no channel sweep in this mode · last sample ${since(hostNow() - hist[hist.length - 1][0])}`;
     const wifiBand = ['5g', '2.4g', 'both'].includes(s.band);
     // Probe groups are kept 15 min by the host, so outside the Wi-Fi bands they are still worth showing - as a cache.
     const probesShown = wifiBand || (s.probes || []).length > 0;
@@ -1464,7 +1534,7 @@
         ? '<table><thead><tr><th class="l">Frequency</th><th>Peak</th><th>Floor</th><th>Duty</th></tr></thead><tbody>'
           + list.map(e => `<tr><td class="l">${e.freq_mhz} MHz</td><td>${e.peak_dbm} dBm</td><td>${e.floor_dbm} dBm</td><td>${Math.round(e.duty * 100)}%</td></tr>`).join('')
           + '</tbody></table>'
-        : '<p class="note" style="margin:0">Nothing unexplained — every 2.4 GHz bin with sustained energy lines up with a Wi‑Fi, BLE or Zigbee device seen recently, or the band is quiet. Scan those bands first so the comparison has something to match against.</p>';
+        : '<p class="note" style="margin:0">Nothing unexplained — every 2.4 GHz bin with sustained energy lines up with a Wi-Fi, BLE or Zigbee device seen recently, or the band is quiet. Scan those bands first so the comparison has something to match against.</p>';
     }
 
     for (const t of KINDS) {   // tables: the active radio's plus any "last seen" card the user opened
@@ -1523,9 +1593,19 @@
   }
   mirrorTick();
 
+  // The rail sticks just under the sticky topbar, whose height changes when it wraps on narrow windows.
+  const topbarFit = () => document.documentElement.style.setProperty('--topbar-h', ($('.topbar').offsetHeight + 22) + 'px');
+  window.addEventListener('resize', topbarFit); topbarFit();
+
   async function tick() {
-    try { const r = await fetch('/api/state', { cache: 'no-store' }); render(await r.json()); lastGood = Date.now(); }
+    let s = null;
+    try { const r = await fetchT('/api/state', { cache: 'no-store' }, 5000); s = await r.json(); lastGood = Date.now();
+      // Host timestamps (dwell t, history) vs this browser's clock: off localhost they can disagree. The HTTP Date
+      // header has 1 s resolution, so only correct a real skew.
+      const dh = Date.parse(r.headers.get('Date') || '');
+      if (!isNaN(dh)) { const sk = dh / 1000 - Date.now() / 1000; hostSkew = Math.abs(sk) > 2 ? sk : 0; } }
     catch (e) { if (Date.now() - lastGood > 3000) $('#app').classList.add('stale'); }
+    if (s) { try { render(s); } catch (e) { console.error('dashboard render failed', e); } }
     setTimeout(tick, state && state.band === 'spec' ? 300 : 1000);   // spectrum walks live, so poll it faster
   }
   tick();

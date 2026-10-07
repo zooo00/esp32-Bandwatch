@@ -32,14 +32,23 @@ Serial protocol (one line each):
                                                  Regions are published to /screen.bin only at markers;
                                                  firmware without markers is published per region.
     {"t":"sdls","files":[[name,bytes],...],"total":N,"sent":M}   microSD listing ("sdls"); sent<total = truncated mid-list
-Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
-"deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), 
+Commands to the device: "band 5g|2.4g|both|ble|154|spec", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" /
+"hunt 0", "deauth <bssid>" / "deauth 0" (Wi-Fi modes; reaches the air only on the raw-TX-patched image that
+build.sh flashes by default - confirm with tools/witness/verify.py, never from the counter; docs/DEVELOPER.md 11),
 "dca <client_mac> <ap_bssid>" / "dca 0" (targeted deauth to one client),
 "sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "sdrm <path>" (delete one
 card-root file; the pulled local copy stays), "time <epoch>", "info",
 "events 0|1" (C4: arm/disarm the SD event log - /events.csv rows for surveillance hits and MACs new to this card's
 /seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s),
-"alerts 0|1" (LED alert blips for surveillance hits / permit-join / new devices; persists), "ledtest surv|new|join".
+"alerts 0|1" (LED alert blips for surveillance hits / permit-join / new devices; persists), "ledtest surv|new|join",
+"specstep 1|2|5" (fine-spectrum step, spec mode), "blescan active|passive|auto", "addr1 0|1" (track addr1-only
+destinations), "mirror 0|1" (stream the LCD), "page next|prev" (step the LCD like a BOOT tap).
+"explain full|current|clear" on /api/cmd is host-side: it walks the device through Wi-Fi/BLE/15.4 and back to spec.
+
+HTTP API: GET /api/state, /api/screen, /screen.bin, /file?name=..; POST /api/cmd with a JSON object body and
+Content-Type: application/json. Errors are non-2xx {"ok": false, "error": ...}; 503 when no device is connected.
+The Host header must name the bind address, localhost, 127.0.0.1 or [::1] (DNS-rebinding guard), and a POST with a
+foreign Origin is refused. There is no authentication: binding to anything but loopback exposes deauth to the LAN.
 
 pcap link types written: 127 radiotap (Wi-Fi), 283 IEEE 802.15.4-TAP, 256 BLE LL with pseudo-header. BLE
 records are advertising packets reconstructed from HCI reports - see docs/DEVELOPER.md section 13.
@@ -53,12 +62,15 @@ in the background; until then (or offline) a small built-in table is used.
 """
 import argparse
 import base64
+import copy
 import csv
 import glob
 import io
 import json
 import os
 import re
+import shutil
+import signal
 import struct
 import sys
 import threading
@@ -94,6 +106,12 @@ MIRROR_HOLD_S = 0.5     # LCD mirror: hold a torn (MF complete=0) frame back at 
 MIRROR_LEGACY_REGIONS = 256   # LCD mirror: this many M lines with no MF marker = firmware without markers
 MIRROR_STALE_S = 0.5    # LCD mirror: regions left unpublished this long after the last line are published anyway
 PROBE_MAX = 512         # cap on probing MACs kept (randomized MACs make one per probe burst)
+PROBE_SSIDS_MAX = 32    # cap on SSIDs remembered per probing MAC (the stalest is dropped)
+DEV_MAX = 1024          # cap per device table (wifi/ble/15.4): a MAC-randomizing flood evicts the stalest entry
+SERIAL_LINE_MAX = 64 * 1024   # a serial "line" longer than this (no newline in sight) is discarded whole
+SERIAL_WRITE_TIMEOUT_S = 1.0  # a stalled USB write gives up instead of hanging every HTTP command
+HTTP_BODY_MAX = 65536   # largest POST body /api/cmd accepts (413 above)
+PCAP_FLUSH_S = 1.0      # flush a running pcap at least this often, so a crash loses at most ~1 s
 # C4 event-log text files on the card that "sdread" may pull besides the pcaps (they land in the captures dir under
 # the same name, overwritten on re-pull, and download through /file like a pcap).
 CARD_TEXT_FILES = ("events.csv", "events.old.csv", "seen.csv", "seen.old.csv", "surveil.csv")
@@ -339,6 +357,7 @@ class PcapWriter:
         linktype = {"154": 283, "ble": 256}.get(link, 127)   # 802.15.4-TAP / BLE LL w/ phdr / radiotap
         self.f.write(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, 65535, linktype))
         self.lock = threading.Lock()
+        self._flushed = time.time()
 
     def write(self, ch, rssi, ts_us, orig_len, data):
         if self.link == "ble":
@@ -364,15 +383,49 @@ class PcapWriter:
             rt += struct.pack("<bB", max(-128, min(127, rssi)), 0)
         now = time.time()
         sec, usec = int(now), int((now - int(now)) * 1_000_000)
+        orig_len = max(orig_len, len(data))   # pcap requires orig_len >= incl_len
         rec = struct.pack("<IIII", sec, usec, len(rt) + len(data), len(rt) + orig_len) + rt + data
         with self.lock:
+            if self.f.closed:
+                return
             self.f.write(rec)
             self.frames += 1
             self.bytes += len(data)
+            if now - self._flushed >= PCAP_FLUSH_S:   # a killed host keeps everything but the last second
+                self.f.flush()
+                self._flushed = now
 
     def close(self):
         with self.lock:
-            self.f.close()
+            if not self.f.closed:
+                self.f.close()
+
+
+class LineSplitter:
+    """Serial bytes -> lines (no trailing CR/LF). A line longer than `limit` with no newline in sight is dropped
+    whole - its head now, its tail when the newline finally arrives - so the buffer stays bounded."""
+
+    def __init__(self, limit=SERIAL_LINE_MAX, on_overflow=None):
+        self.limit = limit
+        self.on_overflow = on_overflow
+        self.buf = b""
+        self.skipping = False   # discarding an over-long line up to its newline
+
+    def feed(self, chunk):
+        self.buf += chunk
+        out = []
+        while b"\n" in self.buf:
+            line, self.buf = self.buf.split(b"\n", 1)
+            if self.skipping:   # the tail of a line already dropped: not a line of its own
+                self.skipping = False
+                continue
+            out.append(line.rstrip(b"\r"))
+        if len(self.buf) > self.limit:
+            if not self.skipping and self.on_overflow:
+                self.on_overflow()
+            self.buf = b""
+            self.skipping = True
+        return out
 
 
 class Bandwatch:
@@ -382,8 +435,12 @@ class Bandwatch:
         self.fcs_present = fcs_present
         self.oui = oui
         self.ser = None
-        self.lock = threading.Lock()
-        self.dlock = threading.Lock()
+        self.lock = threading.Lock()     # the serial port (send() and the reader's hand-over); never held while
+        # taking dlock, so the order is always dlock -> lock
+        # The state lock: the reader thread mutates self.state and the device tables under it, and snapshot()
+        # copies everything it returns under it, so an HTTP thread never serializes a dict or deque mid-update.
+        # Re-entrant because _dispatch holds it while calling merge_*/stop_capture, which take it themselves.
+        self.dlock = threading.RLock()
         self.pcap = None
         self.state = {
             "connected": False, "port": port, "hello": None, "band": None, "chs": [], "channels": {},
@@ -448,6 +505,7 @@ class Bandwatch:
         s.port = port
         s.baudrate = 115200
         s.timeout = 0.5
+        s.write_timeout = SERIAL_WRITE_TIMEOUT_S   # a stalled USB stream must not hang send() (and self.lock) forever
         # The ESP32-C5's USB-Serial-JTAG turns DTR/RTS edges into BOOT/EN pulses. macOS asserts both lines
         # on open; keeping them asserted (no edge) leaves the board running. Dropping them reboots it.
         s.dtr = True
@@ -459,7 +517,15 @@ class Bandwatch:
         s.open()
         return s
 
+    def _log(self, msg):
+        with self.dlock:
+            self.state["log"].append(msg)
+
+    def connected(self):
+        return self.ser is not None
+
     def send(self, cmd):
+        err = None
         with self.lock:
             if self.ser is None:
                 return False
@@ -468,10 +534,12 @@ class Bandwatch:
             line = cmd.strip().replace("\r", " ").replace("\n", " ")
             try:
                 self.ser.write((line + "\n").encode())
-                return True
-            except Exception as e:
-                self.state["log"].append(f"write failed: {e}")
-                return False
+            except Exception as e:   # includes serial.SerialTimeoutException (write_timeout)
+                err = e
+        if err is None:
+            return True
+        self._log(f"write failed: {err}")   # outside self.lock: the lock order is dlock -> lock
+        return False
 
     def reader(self):
         while True:
@@ -487,8 +555,9 @@ class Bandwatch:
                 busy = "lock" in str(e).lower() or "busy" in str(e).lower() or "resource temporarily unavailable" in str(e).lower()
                 msg = (f"open {port}: in use by another program (a second bandwatch_host.py, the device tests, "
                        f"power_profile.py or a serial monitor?) - close it; retrying") if busy else f"open {port}: {e}"
-                if not self.state["log"] or self.state["log"][-1] != msg:   # don't flood the log while retrying
-                    self.state["log"].append(msg)
+                with self.dlock:
+                    if not self.state["log"] or self.state["log"][-1] != msg:   # don't flood the log while retrying
+                        self.state["log"].append(msg)
                 if busy and not getattr(self, "_busy_warned", False):
                     print(msg, file=sys.stderr)
                     self._busy_warned = True
@@ -497,23 +566,22 @@ class Bandwatch:
             self._busy_warned = False
             with self.lock:
                 self.ser = ser
-            self.state["connected"] = True
-            self.state["port"] = port
-            self.state["log"].append(f"connected to {port}")
+            with self.dlock:
+                self.state["connected"] = True
+                self.state["port"] = port
+                self.state["log"].append(f"connected to {port}")
             self.send(f"time {int(time.time())}")   # device has no RTC: pcap timestamps come from this
             self.send("info")
-            buf = b""
+            lines = LineSplitter(on_overflow=lambda: self._log(f"serial line over {SERIAL_LINE_MAX} bytes dropped"))
             try:
                 while True:
                     chunk = ser.read(4096)
                     if not chunk:
                         continue
-                    buf += chunk
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
-                        self.handle_line(line.rstrip(b"\r"))
+                    for line in lines.feed(chunk):
+                        self.handle_line(line)
             except Exception as e:
-                self.state["log"].append(f"serial error: {e}")
+                self._log(f"serial error: {e}")
             finally:
                 with self.lock:
                     self.ser = None
@@ -607,19 +675,21 @@ class Bandwatch:
             msg = json.loads(raw.decode("utf-8", "replace"))
         except Exception:
             if raw.strip():
-                self.state["log"].append(raw.decode("utf-8", "replace")[:160])
+                self._log(raw.decode("utf-8", "replace")[:160])
             return
         if not isinstance(msg, dict):
             # Valid JSON but not an object (boot noise like a bare number): log it. Passing it on would raise
             # in the except clause below (msg.get), out of handle_line, and end the serial session.
-            self.state["log"].append(raw.decode("utf-8", "replace")[:160])
+            self._log(raw.decode("utf-8", "replace")[:160])
             return
         # A line that parses as JSON but has a field missing or the wrong shape must not escape to
         # reader(): an exception there drops the serial session and silently stops a running capture.
-        try:
-            self._dispatch(msg)
-        except Exception as e:
-            self.state["log"].append(f"bad {msg.get('t')!r} line ({e.__class__.__name__}: {e})")
+        # The whole dispatch runs under the state lock, so snapshot() sees a line applied entirely or not at all.
+        with self.dlock:
+            try:
+                self._dispatch(msg)
+            except Exception as e:
+                self.state["log"].append(f"bad {msg.get('t')!r} line ({e.__class__.__name__}: {e})")
 
     def _dispatch(self, msg):
         t = msg.get("t")
@@ -722,6 +792,7 @@ class Bandwatch:
         elif t == "fs":
             # Fine 2.4 GHz spectrum sweep: full set of frequency bins.
             bins = msg.get("bins", [])
+            self._spec_step_seen(msg.get("step", 2))
             self.fine.update({"step": msg.get("step", 2), "lo": msg.get("lo", 2400),
                               "count": msg.get("count", len(bins)), "bins": bins, "ts": time.time()})
             st["spec_step"] = msg.get("step", st.get("spec_step", 2))
@@ -734,6 +805,7 @@ class Bandwatch:
         elif t == "fd":
             # Fine spectrum per-dwell: which frequency the sweep is on now + that bin's energy (walking cursor).
             mhz = msg.get("mhz", 0)
+            self._spec_step_seen(msg.get("step", self.fine["step"]))
             self.fine["current_mhz"] = mhz
             self.fine["step"] = msg.get("step", self.fine["step"])
             st["spec_step"] = msg.get("step", st.get("spec_step", 2))
@@ -808,7 +880,7 @@ class Bandwatch:
             if msg.get("cmd") == "sdread":
                 self._sd_read_start(msg.get("file"), msg.get("bytes"))   # the ack precedes the S chunks
             elif msg.get("cmd") == "sdread_done":
-                self._sd_read_finish(True)
+                self._sd_read_finish(True, msg.get("sent"))
             elif msg.get("cmd") == "sdrm":
                 self._sd_rm_result(msg.get("file"), bool(msg.get("ok")), msg.get("msg"))
         elif t == "sdls":
@@ -861,7 +933,10 @@ class Bandwatch:
                 d["vendor"] = self.oui.lookup(mac)
                 # tier 2 = we heard it transmit; tier 1 = only ever seen as a frame destination (addr1)
                 dest_only = bool(flags & 4)
-                d.update({"rssi": rssi, "max": mx, "frames": frames, "last": now - age / 1000.0, "ch": ch,
+                # rssi/max are null for dest-only: the device has none for them (its 0, or a sender's RSSI leaked
+                # into maxRssi), and the dashboard shows "-" with no bar.
+                d.update({"rssi": None if dest_only else rssi, "max": None if dest_only else mx,
+                          "frames": frames, "last": now - age / 1000.0, "ch": ch,
                           "ap": bool(flags & 1), "ssid": ssid or d["ssid"],
                           "dest_only": dest_only, "ap_suffix": ap_suffix or d.get("ap_suffix", ""),
                           "surv": SURV_CAT.get(surv, ""), "surv_kind": SURV_KIND.get(surv, ""),
@@ -872,8 +947,11 @@ class Bandwatch:
                               "util": round(util * 100 / 255) if util else None, "stations": stations, "cc": cc})
                 # Insert only once the row parsed: a malformed row must not leave a half-built entry (no "last")
                 # that makes every later _expire()/snapshot() raise.
+                self._make_room(self.wifi_devs, mac)
                 self.wifi_devs[mac] = d
-                if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
+                # A dest-only (tier-1) row carries no signal of its own (the device never writes its rssi), so
+                # no RSSI history point either: the sparkline would dip to a fake 0 dBm.
+                if not dest_only and age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.wifi_devs, now)
             self._resolve_parents()
@@ -892,6 +970,8 @@ class Bandwatch:
                     del self.probes[min(self.probes, key=lambda m: self.probes[m]["last"])]
                 p = self.probes[mac] = {"ssids": {}}
             p["ssids"][ssid] = now
+            if len(p["ssids"]) > PROBE_SSIDS_MAX:   # one MAC naming endless SSIDs: keep the most recent
+                del p["ssids"][min(p["ssids"], key=p["ssids"].get)]
             p.update({"rssi": msg.get("rssi"), "ch": msg.get("ch"), "last": now})
 
     @staticmethod
@@ -975,6 +1055,7 @@ class Bandwatch:
                           "connectable": bool(flags & 1), "legacy": bool(flags & 2), "kind": ", ".join(dict.fromkeys(kinds)),
                           "surv": SURV_CAT.get(bsurv, ""), "surv_kind": SURV_KIND.get(bsurv, ""),
                           "tier": 2 if bsurv else 0})
+                self._make_room(self.ble_devs, mac)
                 self.ble_devs[mac] = d   # only once the row parsed (see merge_wifi)
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
@@ -998,6 +1079,7 @@ class Bandwatch:
                           "proto": PROTO_154.get(proto, "?"), "proto_id": proto,
                           "beacons": bool(flags & 2), "permit_join": bool(flags & 4), "mac_secured": bool(flags & 8),
                           "data": bool(flags & 16), "lqi": lqi})
+                self._make_room(self.z_devs, key)
                 self.z_devs[key] = d     # only once the row parsed (see merge_wifi)
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
@@ -1007,6 +1089,12 @@ class Bandwatch:
     def _expire(table, now):
         for mac in [m for m, d in table.items() if now - d["last"] > DEV_EXPIRE_S]:
             del table[mac]
+
+    @staticmethod
+    def _make_room(table, key):
+        """Before inserting a new key: at DEV_MAX entries, evict the one heard longest ago."""
+        if key not in table and len(table) >= DEV_MAX:
+            del table[min(table, key=lambda k: table[k]["last"])]
 
     def _cache_wide(self, band, c, entry):
         """Cache the 5 GHz packet-activity picture for the combined view (the single radio scans one band at a
@@ -1024,6 +1112,15 @@ class Bandwatch:
                 "activity5": [dict(ch=c, freq=5000 + 5 * c, **self.activity5[c]) for c in sorted(self.activity5)],
                 "activity5_age": round(now - self.activity5_ts, 1) if self.activity5_ts else None,
             }
+
+    def _spec_step_seen(self, step):
+        """A new fine-spectrum step (1/2/5 MHz) puts the bins on other frequencies: drop the per-MHz history, or the
+        old keys linger as ghost "unexplained" rows and drag the noise floor. The old bins go too (wrong grid)."""
+        with self.dlock:
+            if step and step != self.fine.get("step"):
+                self.spec_hist.clear()
+                self.fine["bins"] = []
+                self.fine["step"] = step
 
     def _spec_track(self, mhz, ed_max):
         with self.dlock:   # read by _unidentified() on HTTP threads; keyed by frequency (MHz)
@@ -1046,8 +1143,9 @@ class Bandwatch:
                     f = 2412 + 5 * (ch - 1)
                     name = d.get("ssid") or d.get("vendor") or ""
                     label = (name + " · " if name else "") + d["mac"]
+                    sig = d.get("max") if d.get("max") is not None else d.get("rssi")   # null for dest-only rows
                     spans.append({"lo": f - 11, "hi": f + 11, "src": "wifi", "label": label,    # ~22 MHz wide
-                                  "str": d.get("max", d.get("rssi", -128))})
+                                  "str": sig if sig is not None else -128})
             for d in self.z_devs.values():
                 ch = d.get("ch") or 0
                 if 11 <= ch <= 26 and now - d["last"] <= SPEC_KNOWN_AGE_S:
@@ -1157,13 +1255,14 @@ class Bandwatch:
         return legs
 
     def _explain_run(self, scope):
-        if scope == "current":
-            legs = self._explain_legs_current()
-        else:   # full
-            legs = [("2.4g", 0, EXPLAIN_DUR_WIFI_FULL, "Wi-Fi 2.4 GHz (full)"),
-                    ("ble", 0, EXPLAIN_DUR_BLE, "BLE (full)"),
-                    ("154", 0, EXPLAIN_DUR_154_FULL, "802.15.4 (full)")]
-        try:
+        legs = []
+        try:   # everything inside: a throw anywhere must still clear "active", or the dashboard latch never lets go
+            if scope == "current":
+                legs = self._explain_legs_current()
+            else:   # full
+                legs = [("2.4g", 0, EXPLAIN_DUR_WIFI_FULL, "Wi-Fi 2.4 GHz (full)"),
+                        ("ble", 0, EXPLAIN_DUR_BLE, "BLE (full)"),
+                        ("154", 0, EXPLAIN_DUR_154_FULL, "802.15.4 (full)")]
             for i, (band, ch, dur, phase) in enumerate(legs):
                 self.state["explain"] = {"active": True, "scope": scope, "leg": i + 1, "legs": len(legs),
                                          "phase": phase, "until": time.time() + dur + EXPLAIN_SETTLE_S}
@@ -1202,17 +1301,25 @@ class Bandwatch:
     # ---------------- sdread reassembly ----------------
     def _sd_read_start(self, name, total):
         """The 'sdread' ack precedes the chunks and carries the file's size."""
-        self._sd_read = {"name": name or "bandwatch.pcap", "total": total or 0, "buf": bytearray()}
+        self._sd_read = {"name": name or "bandwatch.pcap", "total": total or 0, "buf": bytearray(), "bad": 0}
         self.state["sd_read"] = {"name": os.path.basename(self._sd_read["name"]), "total": self._sd_read["total"],
                                  "received": 0, "done": False, "failed": False}
 
-    def _sd_read_finish(self, done):
+    def _sd_read_finish(self, done, sent=None):
         r = getattr(self, "_sd_read", None)
         if not r:
             return
         self._sd_read = None
         st = dict(self.state.get("sd_read") or {})
-        st["received"] = len(r["buf"])
+        got = len(r["buf"])
+        st["received"] = got
+        if done and (got != r["total"] or r["bad"] or (sent is not None and sent != got)):
+            # The device said done, but what arrived is not the file it announced: a chunk was dropped or mangled
+            # on the way (the S line's byte count disagrees, or the sum misses the size from the ack). Saving it
+            # would hand Wireshark a corrupt file that looks complete.
+            self.state["log"].append(f"sd pull incomplete: {os.path.basename(r['name'])} got {got} of "
+                                     f"{r['total']} bytes ({r['bad']} bad chunks) - not saved")
+            done = False
         st["done"] = done
         st["failed"] = not done   # an error line ended it: the dashboard stops showing a pull in progress
         if done and r["buf"]:   # write it next to the USB captures; same name as on the card, overwritten on re-pull
@@ -1266,10 +1373,14 @@ class Bandwatch:
         if not r:
             return   # chunks without a start ack have nowhere to land
         try:
-            data = base64.b64decode(raw.split(b" ", 2)[2])
+            parts = raw.split(b" ", 2)
+            data = base64.b64decode(parts[2], validate=True)
+            n = int(parts[1])
         except Exception:
-            return
+            return   # unreadable line: not counted; if it was real data the size check at sdread_done catches it
         with self.dlock:   # snapshot() reads the summary on HTTP threads; keep the counter honest
+            if len(data) != n:
+                r["bad"] += 1   # the line's own byte count disagrees with its payload: the file is damaged
             r["buf"] += data
             if self.state.get("sd_read") is not None:
                 self.state["sd_read"]["received"] = len(r["buf"])
@@ -1355,48 +1466,90 @@ class Bandwatch:
                     "complete": self.screen_complete, **self.screen_stats}
 
     # ---------------- control ----------------
+    @staticmethod
+    def parse_snaplen(snaplen):
+        """The capture snap length from the API: None (keep the device's), or an int clamped to the device's 32..1600.
+        Not a number: ValueError (the handler's 400), raised before any file is opened."""
+        if snaplen in (None, "", 0):
+            return None
+        return max(32, min(1600, int(snaplen)))
+
+    def _capture_path(self, link):
+        """A fresh file name: two captures started in the same second get -2, -3... instead of truncating."""
+        stem = time.strftime("bandwatch-%s-%%Y%%m%%d-%%H%%M%%S" % ({"154": "802154", "ble": "ble"}.get(link, "wifi")))
+        path = os.path.join(self.captures_dir, stem + ".pcap")
+        k = 2
+        while os.path.exists(path):
+            path = os.path.join(self.captures_dir, f"{stem}-{k}.pcap")
+            k += 1
+        return path
+
     def start_capture(self, snaplen=None):
-        if self.pcap:
-            return self.state["capture"]
-        os.makedirs(self.captures_dir, exist_ok=True)
-        band = self.state["band"]
-        link = "154" if band == "154" else "ble" if band == "ble" else "wifi"
-        path = os.path.join(self.captures_dir,
-                            time.strftime("bandwatch-%s-%%Y%%m%%d-%%H%%M%%S.pcap"
-                                          % ({"154": "802154", "ble": "ble"}.get(link, "wifi"))))
-        self.pcap = PcapWriter(path, fcs_present=self.fcs_present, link=link)
-        self.cap_band = band
-        self.state["capture"] = {"file": path, "frames": 0, "bytes": 0, "started": time.time()}
-        if snaplen:
-            self.send(f"snap {int(snaplen)}")
-        self.send("cap 1")
-        self.state["log"].append(f"capture started: {path}")
-        return self.state["capture"]
+        """Open a pcap and switch device capture on. Returns the capture state, or None when no device is connected
+        (no file is created then). snaplen is validated before anything is opened (ValueError)."""
+        snap = self.parse_snaplen(snaplen)
+        with self.dlock:   # check-and-open under the lock: two concurrent starts cannot both open a file
+            if self.pcap:
+                return self.state["capture"]
+            if not self.connected():
+                return None
+            os.makedirs(self.captures_dir, exist_ok=True)
+            band = self.state["band"]
+            link = "154" if band == "154" else "ble" if band == "ble" else "wifi"
+            path = self._capture_path(link)
+            self.pcap = PcapWriter(path, fcs_present=self.fcs_present, link=link)
+            self.cap_band = band
+            self.state["capture"] = {"file": path, "frames": 0, "bytes": 0, "started": time.time()}
+            self.state["log"].append(f"capture started: {path}")
+            cap = self.state["capture"]
+        if (snap and not self.send(f"snap {snap}")) or not self.send("cap 1"):
+            # The port went away between the check and the write: take the empty file back out.
+            with self.dlock:
+                pcap = self.pcap if self.pcap and self.pcap.path == cap["file"] else None
+                if pcap:
+                    self.pcap = None
+                    self.state["capture"] = None
+            if pcap:
+                pcap.close()
+                try:
+                    os.remove(pcap.path)
+                except OSError:
+                    pass
+            return None
+        return cap
 
     def stop_capture(self):
         self.send("cap 0")
-        if self.pcap:
-            self.pcap.close()
-            self.state["log"].append(f"capture stopped: {self.pcap.path} ({self.pcap.frames} frames)")
-            sv = self.state["saved"]["usb"]
-            sv["count"] += 1
-            sv["last"] = self.pcap.path
-            sv["frames"] = self.pcap.frames
-            sv["bytes"] = self.pcap.bytes
-            self.pcap = None
-        self.state["capture"] = None
+        with self.dlock:   # take the writer out under the lock: the reader's finally and an HTTP thread both call this
+            pcap, self.pcap = self.pcap, None
+            if pcap:
+                pcap.close()
+                self.state["log"].append(f"capture stopped: {pcap.path} ({pcap.frames} frames)")
+                sv = self.state["saved"]["usb"]
+                sv["count"] += 1
+                sv["last"] = pcap.path
+                sv["frames"] = pcap.frames
+                sv["bytes"] = pcap.bytes
+            self.state["capture"] = None
 
     def hunt(self, mac, ch=None):
+        """Returns send()'s result (False: no device)."""
         if not mac:
-            self.send("hunt 0")
-            return
+            return self.send("hunt 0")
         mac = mac.strip().lower()
         if ch is None:
-            d = self.wifi_devs.get(mac) or self.z_devs.get(mac)
-            ch = d["ch"] if d else 0
-        self.send(f"hunt {mac} {int(ch or 0)}")
+            with self.dlock:
+                d = self.wifi_devs.get(mac) or self.z_devs.get(mac)
+                ch = d["ch"] if d else 0
+        return self.send(f"hunt {mac} {int(ch or 0)}")
 
     def snapshot(self):
+        """Everything /api/state returns, copied under the state lock: the reader thread mutates these dicts and
+        deques, and json.dumps on another thread must never see one mid-update."""
+        with self.dlock:
+            return self._snapshot_locked()
+
+    def _snapshot_locked(self):
         st = self.state
         now = time.time()
         # Analyze the spectrum once per snapshot: the unexplained list and the per-bin {mhz: source} map both
@@ -1406,52 +1559,93 @@ class Bandwatch:
         spec_analysis = self._spec_analyze(remember=st["band"] == "spec")
         spec_cls, spec_expl, spec_age = spec_analysis["cls"], spec_analysis["expl"], spec_analysis["age"]
         chans = [dict(ch=c, **st["channels"].get(c, {})) for c in st["chs"]]
-        with self.dlock:
-            probe_groups = self._probe_view(now)
-            wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1),
-                         seeking=sorted(self.probes.get(d["mac"], {}).get("ssids", {})))
-                    for d in self.wifi_devs.values()]
-            ble = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.ble_devs.values()]
-            zig = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.z_devs.values()]
-            src = None
-            if st["hunt"]:
-                src = self.wifi_devs.get(st["hunt"]["mac"]) or self.ble_devs.get(st["hunt"]["mac"]) or self.z_devs.get(st["hunt"]["mac"])
+        probe_groups = self._probe_view(now)
+        wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1),
+                     seeking=sorted(self.probes.get(d["mac"], {}).get("ssids", {})))
+                for d in self.wifi_devs.values()]
+        ble = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.ble_devs.values()]
+        zig = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.z_devs.values()]
         hunt = None
-        if st["hunt"]:
-            hu = st["hunt"]
+        hu = st["hunt"]
+        if hu:
+            src = self.wifi_devs.get(hu["mac"]) or self.ble_devs.get(hu["mac"]) or self.z_devs.get(hu["mac"]) or {}
             hunt = {"mac": hu["mac"], "rssi": hu["rssi"], "age_ms": hu["age_ms"], "count": hu["count"],
-                    "hist": list(hu["hist"]), "label": (src or {}).get("ssid") or (src or {}).get("name") or (src or {}).get("proto") or "",
-                    "vendor": (src or {}).get("vendor", ""), "kind": (src or {}).get("kind", "") or ((src or {}).get("pan") and "PAN " + src["pan"]) or ""}
+                    "hist": list(hu["hist"]), "label": src.get("ssid") or src.get("name") or src.get("proto") or "",
+                    "vendor": src.get("vendor", ""), "kind": src.get("kind", "") or (src.get("pan") and "PAN " + src["pan"]) or ""}
+        fine = self.fine
+        live = copy.deepcopy({k: st.get(k) for k in ("hello", "capture", "explain", "deauth", "ble", "sd", "sd_read",
+                                                      "sd_rm", "saved", "events", "alerts")})
         return {
             "connected": st["connected"], "port": st["port"],
             "age": round(now - st["last_rx"], 1) if st["last_rx"] else None,
             "band": st["band"], "current": st["current"], "global": st["global"], "sweep": st["sweep"], "aps": st["aps"],
-            "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": st["hello"],
-            "channels": chans, "history": list(self.history), "capture": st["capture"],
+            "park": st["park"], "cap": st["cap"], "drop": st["drop"], "heap": st["heap"], "hello": live["hello"],
+            "channels": chans, "history": list(self.history), "capture": live["capture"],
             "unidentified": spec_analysis["unidentified"],
-            "explain": st.get("explain"),
+            "explain": live["explain"],
             "wide": self._wide(),
             "spec_step": st.get("spec_step", 2),
-            "fine": {"step": self.fine["step"], "lo": self.fine["lo"], "count": self.fine["count"],
-                     "current_mhz": self.fine["current_mhz"],
-                     "age": round(now - self.fine["ts"], 1) if self.fine["ts"] else None,
-                     "bins": [{"mhz": self.fine["lo"] + i * self.fine["step"],
+            "fine": {"step": fine["step"], "lo": fine["lo"], "count": fine["count"],
+                     "current_mhz": fine["current_mhz"],
+                     "age": round(now - fine["ts"], 1) if fine["ts"] else None,
+                     "bins": [{"mhz": fine["lo"] + i * fine["step"],
                                "min": r[0], "mean": r[1], "max": r[2], "n": r[3],
-                               "cls": spec_cls.get(self.fine["lo"] + i * self.fine["step"]),
-                               "expl": spec_expl.get(self.fine["lo"] + i * self.fine["step"]),
-                               "age": spec_age.get(self.fine["lo"] + i * self.fine["step"])}
-                              for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
+                               "cls": spec_cls.get(fine["lo"] + i * fine["step"]),
+                               "expl": spec_expl.get(fine["lo"] + i * fine["step"]),
+                               "age": spec_age.get(fine["lo"] + i * fine["step"])}
+                              for i, r in enumerate(fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
-             "sd_read": st["sd_read"], "sd_rm": st["sd_rm"], "saved": st["saved"], "events": st["events"], "alerts": st["alerts"],
+            "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt,
+            "deauth": live["deauth"], "ble": live["ble"], "sd": live["sd"], "sd_read": live["sd_read"],
+            "sd_rm": live["sd_rm"], "saved": live["saved"], "events": live["events"], "alerts": live["alerts"],
             "oui_source": self.oui.source,
         }
 
 
-def make_handler(bw, page_path):
+WILDCARD_BINDS = ("0.0.0.0", "::", "")
+FILE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:pcap|csv)$")   # what /file will serve
+
+
+def host_name(addr):
+    """An address as it appears in a Host header: IPv6 literals in brackets, lower-case."""
+    addr = (addr or "").strip().lower()
+    return "[%s]" % addr if ":" in addr and not addr.startswith("[") else addr
+
+
+def is_loopback(bind):
+    return bind in ("localhost", "::1", "[::1]") or bind.startswith("127.")
+
+
+def host_allowed(host, binds, port):
+    """DNS-rebinding guard: the Host header must name this server (the bind address, localhost, 127.0.0.1 or
+    [::1], with our port) - a rebound attacker domain arrives with its own name in Host. A wildcard bind has no
+    single name to check against, so any Host passes there (main() warns loudly about that bind)."""
+    if any(b in WILDCARD_BINDS for b in binds):
+        return True
+    if not host:
+        return False
+    names = {"localhost", "127.0.0.1", "[::1]"} | {host_name(b) for b in binds}
+    allowed = {"%s:%d" % (n, port) for n in names}
+    if port == 80:
+        allowed |= names
+    return host.strip().lower() in allowed
+
+
+class _NotConnected(Exception):
+    pass
+
+
+def make_handler(bw, page_path, bind=None):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
+
+        def end_headers(self):
+            # Every response: the dashboard (and its Deauth button) must not be framed by another site.
+            self.send_header("X-Frame-Options", "DENY")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'")
+            super().end_headers()
 
         def _json(self, obj, code=200):
             body = json.dumps(obj).encode()
@@ -1462,7 +1656,24 @@ def make_handler(bw, page_path):
             self.end_headers()
             self.wfile.write(body)
 
+        def _error(self, code, msg):
+            return self._json({"ok": False, "error": msg}, code)
+
+        def _empty(self, code):
+            self.send_response(code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _host_ok(self):
+            binds = [self.server.server_address[0]] + ([bind] if bind else [])
+            if host_allowed(self.headers.get("Host"), binds, self.server.server_address[1]):
+                return True
+            self._error(403, "bad host")
+            return False
+
         def do_GET(self):
+            if not self._host_ok():
+                return
             path = urlparse(self.path).path
             if path == "/api/state":
                 return self._json(bw.snapshot())
@@ -1484,22 +1695,24 @@ def make_handler(bw, page_path):
                 return
             if path == "/file":   # capture pulled off the card (or over USB) for download
                 name = (parse_qs(urlparse(self.path).query).get("name") or [""])[0]
+                # A plain basename of a pcap or csv: it cannot escape the captures dir, and the character set
+                # keeps it safe inside the quoted Content-Disposition (no quote, no CR/LF).
                 fpath = os.path.join(bw.captures_dir, name)
-                ok = bool(name) and len(name) <= 128 and "/" not in name and ".." not in name \
-                    and os.path.isfile(fpath)   # a plain basename: it cannot escape the captures dir
-                if not ok:
-                    self.send_response(404)
+                if not FILE_NAME_RE.match(name) or ".." in name or not os.path.isfile(fpath):
+                    return self._empty(404)
+                try:
+                    f = open(fpath, "rb")
+                except OSError:
+                    return self._empty(404)
+                with f:
+                    size = os.fstat(f.fileno()).st_size
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/octet-stream")
+                    self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(size))
                     self.end_headers()
-                    return
-                with open(fpath, "rb") as f:
-                    body = f.read()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/octet-stream")
-                self.send_header("Content-Disposition", 'attachment; filename="%s"' % name)
-                self.send_header("Cache-Control", "no-store")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+                    shutil.copyfileobj(f, self.wfile, 64 * 1024)   # streamed: a large capture is not read into RAM
                 return
             if path in ("/classic", "/classic/"):   # classic dashboard removed in v1.19: keep old bookmarks working
                 self.send_response(301)
@@ -1518,93 +1731,148 @@ def make_handler(bw, page_path):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            self.send_response(404)
-            self.end_headers()
+            self._empty(404)
 
-        def do_POST(self):
-            path = urlparse(self.path).path
-            n = int(self.headers.get("Content-Length", "0") or 0)
+        def _read_body(self):
+            """The POST body as a dict, or None after an error reply was sent."""
+            # CSRF: a cross-site page can only send a "simple" request (text/plain, form) without a preflight,
+            # so requiring JSON forces any foreign script through CORS - which this server never grants.
+            ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+            if ctype != "application/json":
+                self._error(415, "Content-Type must be application/json")
+                return None
+            origin = self.headers.get("Origin")
+            if origin is not None:
+                o = urlparse(origin)
+                if o.scheme not in ("http", "https") or o.netloc.lower() != (self.headers.get("Host") or "").strip().lower():
+                    self._error(403, "foreign origin")
+                    return None
+            raw_len = (self.headers.get("Content-Length") or "0").strip()
+            if not raw_len.isdigit():   # also rejects a negative length, which would block on read(-1)
+                self._error(400, "bad Content-Length")
+                return None
+            n = int(raw_len)
+            if n > HTTP_BODY_MAX:
+                self._error(413, "body too large")
+                return None
             try:
                 req = json.loads(self.rfile.read(n) or b"{}")
             except Exception:
-                return self._json({"error": "bad json"}, 400)
-            if path != "/api/cmd":
-                self.send_response(404)
-                self.end_headers()
+                self._error(400, "bad json")
+                return None
+            if not isinstance(req, dict):
+                self._error(400, "body must be a JSON object")
+                return None
+            return req
+
+        def do_POST(self):
+            if not self._host_ok():
                 return
-            cmd = req.get("cmd")
+            path = urlparse(self.path).path
+            if path != "/api/cmd":
+                return self._error(404, "not found")
+            req = self._read_body()
+            if req is None:
+                return
             try:
-                if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154", "spec"):
-                    bw.send(f"band {req['value']}")
-                elif cmd == "specstep" and int(req.get("value") or 0) in (1, 2, 5):
-                    bw.send(f"specstep {int(req['value'])}")
-                elif cmd == "park":
-                    bw.send(f"park {int(req.get('value') or 0)}")
-                elif cmd == "capture":
-                    if req.get("value"):
-                        bw.start_capture(req.get("snaplen"))
-                    else:
-                        bw.stop_capture()
-                elif cmd == "hunt":
-                    target = clean_hunt_id(req.get("mac"))
-                    if req.get("mac") and not target:
-                        return self._json({"error": "bad hunt target"}, 400)
-                    bw.hunt(target, req.get("ch"))
-                elif cmd == "deauth":
-                    mac = clean_mac(req.get("mac"))
-                    if req.get("mac") and not mac:
-                        return self._json({"error": "bad mac"}, 400)
-                    bw.send(f"deauth {mac or '0'}")   # the device finds the AP's channel itself
-                elif cmd == "dca":  # targeted deauth to one specific client
-                    mac = clean_mac(req.get("client_mac") or req.get("mac"))
-                    ap_bssid = clean_mac(req.get("ap_bssid"))
-                    if (req.get("client_mac") or req.get("mac") or req.get("ap_bssid")) and not (mac and ap_bssid):
-                        return self._json({"error": "dca needs a valid client_mac and ap_bssid"}, 400)
-                    bw.send(f"dca {mac} {ap_bssid}" if mac and ap_bssid else "dca 0")
-                elif cmd == "sdcap":
-                    bw.send(f"sdcap {1 if req.get('value') else 0}")
-                elif cmd == "events":   # C4 SD event log; persists on the device
-                    bw.send(f"events {1 if req.get('value') else 0}")
-                elif cmd in ("sdread", "sdrm"):
-                    # sdread pulls a card file to the captures dir; sdrm deletes it on the card (the pulled copy
-                    # here stays). Same guard for both: card root, our own file names, <= 39 chars.
-                    name = card_file_name(req.get("path") or "")
-                    if not name:
-                        return self._json({"error": "bad card file path"}, 400)
-                    if cmd == "sdrm":
-                        bw.sd_rm_request(name)
-                    bw.send(f"{cmd} /{name}")
-                elif cmd == "alerts":   # LED alert blips; persists on the device
-                    bw.send(f"alerts {1 if req.get('value') else 0}")
-                elif cmd == "ledtest" and req.get("value") in ("surv", "new", "join"):
-                    bw.send(f"ledtest {req['value']}")
-                elif cmd == "mirror":
-                    bw.send(f"mirror {1 if req.get('value') else 0}")
-                elif cmd == "page" and req.get("value") in ("next", "prev"):
-                    bw.send(f"page {req['value']}")   # step the LCD like a BOOT tap
-                elif cmd == "addr1":
-                    bw.send(f"addr1 {1 if req.get('value') else 0}")
-                elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):
-                    bw.send(f"blescan {req['value']}")
-                elif cmd == "sdinfo":
-                    bw.send("sdinfo")
-                elif cmd == "sdls":
-                    bw.send("sdls")
-                elif cmd == "info":
-                    bw.send("info")
-                elif cmd == "explain" and req.get("value") in ("full", "current"):
-                    # Host-orchestrated (not a device command): decode the relevant modes, then return to spec.
-                    if not bw.start_explain(req["value"]):
-                        return self._json({"error": "explain already running"}, 409)
-                elif cmd == "explain" and req.get("value") == "clear":
-                    bw.clear_explained()   # forget sticky explanations
-                else:
-                    return self._json({"error": "unknown command"}, 400)
+                self._command(req)
+            except _NotConnected:
+                return self._error(503, "not connected")
+            except _Reply as r:
+                return self._error(r.code, r.msg)
             except (TypeError, ValueError) as e:
-                return self._json({"error": f"bad argument: {e}"}, 400)
+                return self._error(400, f"bad argument: {e}")
             return self._json({"ok": True})
 
+        def _command(self, req):
+            """Validate one /api/cmd request and act on it. Raises _Reply for a refusal, _NotConnected when it
+            needs the device and there is none (checked before anything is changed, so no empty pcap)."""
+            def dev(line):
+                if not bw.send(line):
+                    raise _NotConnected
+
+            def need_device():
+                if not bw.connected():
+                    raise _NotConnected
+
+            cmd = req.get("cmd")
+            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154", "spec"):
+                dev(f"band {req['value']}")
+            elif cmd == "specstep" and int(req.get("value") or 0) in (1, 2, 5):
+                dev(f"specstep {int(req['value'])}")
+            elif cmd == "park":
+                dev(f"park {int(req.get('value') or 0)}")
+            elif cmd == "capture":
+                if req.get("value"):
+                    if bw.start_capture(req.get("snaplen")) is None:   # snaplen checked first (ValueError: 400)
+                        raise _NotConnected
+                else:
+                    bw.stop_capture()   # always closes a host-side file, but say so when the device is gone
+                    need_device()
+            elif cmd == "hunt":
+                target = clean_hunt_id(req.get("mac"))
+                if req.get("mac") and not target:
+                    raise _Reply(400, "bad hunt target")
+                if not bw.hunt(target, req.get("ch")):
+                    raise _NotConnected
+            elif cmd == "deauth":
+                mac = clean_mac(req.get("mac"))
+                if req.get("mac") and not mac:
+                    raise _Reply(400, "bad mac")
+                dev(f"deauth {mac or '0'}")   # the device finds the AP's channel itself
+            elif cmd == "dca":  # targeted deauth to one specific client
+                mac = clean_mac(req.get("client_mac") or req.get("mac"))
+                ap_bssid = clean_mac(req.get("ap_bssid"))
+                if (req.get("client_mac") or req.get("mac") or req.get("ap_bssid")) and not (mac and ap_bssid):
+                    raise _Reply(400, "dca needs a valid client_mac and ap_bssid")
+                dev(f"dca {mac} {ap_bssid}" if mac and ap_bssid else "dca 0")
+            elif cmd == "sdcap":
+                dev(f"sdcap {1 if req.get('value') else 0}")
+            elif cmd == "events":   # C4 SD event log; persists on the device
+                dev(f"events {1 if req.get('value') else 0}")
+            elif cmd in ("sdread", "sdrm"):
+                # sdread pulls a card file to the captures dir; sdrm deletes it on the card (the pulled copy
+                # here stays). Same guard for both: card root, our own file names, <= 39 chars.
+                name = card_file_name(req.get("path") or "")
+                if not name:
+                    raise _Reply(400, "bad card file path")
+                need_device()   # before sd_rm_request: no "pending" delete for a device that is not there
+                if cmd == "sdrm":
+                    bw.sd_rm_request(name)
+                dev(f"{cmd} /{name}")
+            elif cmd == "alerts":   # LED alert blips; persists on the device
+                dev(f"alerts {1 if req.get('value') else 0}")
+            elif cmd == "ledtest" and req.get("value") in ("surv", "new", "join"):
+                dev(f"ledtest {req['value']}")
+            elif cmd == "mirror":
+                dev(f"mirror {1 if req.get('value') else 0}")
+            elif cmd == "page" and req.get("value") in ("next", "prev"):
+                dev(f"page {req['value']}")   # step the LCD like a BOOT tap
+            elif cmd == "addr1":
+                dev(f"addr1 {1 if req.get('value') else 0}")
+            elif cmd == "blescan" and req.get("value") in ("passive", "active", "auto"):
+                dev(f"blescan {req['value']}")
+            elif cmd in ("sdinfo", "sdls", "info"):
+                dev(cmd)
+            elif cmd == "explain" and req.get("value") in ("full", "current"):
+                # Host-orchestrated (not a device command): decode the relevant modes, then return to spec.
+                need_device()
+                if not bw.start_explain(req["value"]):
+                    raise _Reply(409, "explain already running")
+            elif cmd == "explain" and req.get("value") == "clear":
+                bw.clear_explained()   # forget sticky explanations (host-side only: works with no device)
+            else:
+                raise _Reply(400, "unknown command")
+
     return Handler
+
+
+class _Reply(Exception):
+    """A refused /api/cmd: the HTTP status and the error text for {"ok": false, "error": ...}."""
+
+    def __init__(self, code, msg):
+        super().__init__(msg)
+        self.code, self.msg = code, msg
 
 
 def main():
@@ -1627,12 +1895,26 @@ def main():
     threading.Thread(target=bw.reader, daemon=True).start()
     if args.ui is not None:
         print(f"Bandwatch host: --ui {args.ui} ignored (the classic dashboard was removed in v1.19)")
-    srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, os.path.join(HERE, "dashboard2.html")))
-    print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/  "
+    srv = ThreadingHTTPServer((args.bind, args.http),
+                              make_handler(bw, os.path.join(HERE, "dashboard2.html"), bind=args.bind))
+    print(f"Bandwatch host: dashboard at http://{host_name(args.bind)}:{args.http}/  "
           f"(serial: {args.port or 'auto'}, captures: {os.path.abspath(args.captures)}, vendors: {oui.source})")
+    if not is_loopback(args.bind):
+        bar = "!" * 78
+        print(f"{bar}\nWARNING: --bind {args.bind} serves the dashboard beyond this machine, with NO authentication.\n"
+              f"Anyone who can reach port {args.http} can start a deauth, delete card files and read captures.\n"
+              f"Use the default --bind 127.0.0.1 (or an SSH tunnel) unless you trust every host on that network.\n"
+              f"{bar}", file=sys.stderr)
+
+    def on_sigterm(signum, frame):
+        raise KeyboardInterrupt   # same clean exit as Ctrl-C: the running pcap is closed, not cut mid-buffer
+
+    signal.signal(signal.SIGTERM, on_sigterm)
     try:
         srv.serve_forever()
     except KeyboardInterrupt:
+        pass
+    finally:
         bw.stop_capture()
 
 

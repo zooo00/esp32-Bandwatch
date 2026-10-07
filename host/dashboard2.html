@@ -213,6 +213,15 @@
         <button class="primary block" id="sdBtn">Record to SD</button>
         <div class="note capinfo" id="sdInfo"></div>
         <ul class="files" id="sdFiles"></ul>
+        <div id="evBox" hidden>
+          <h3 style="margin-top:14px">Event log</h3>
+          <button class="block" id="evBtn">Start event log</button>
+          <div class="note capinfo" id="evInfo"></div>
+          <ul class="files" id="evFiles"></ul>
+          <p class="note dim" style="margin:8px 0 0">Writes <code>events.csv</code> on the card: surveillance-OUI hits, and
+            <b>new</b> devices - a MAC not seen on this card before (randomized MACs are ignored). The baseline
+            (<code>seen.csv</code>) grows as you walk, so early on almost everything is new. The setting stays on the device.</p>
+        </div>
       </section>
 
       <section class="card railcard" id="bleScanCtl" hidden>
@@ -410,9 +419,11 @@
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };      // table under the mouse keeps its rows put
   const expanded = { wifi: false, ble: false, zig: false };    // user-opened "last seen" cards
-  const pending = { cap: 0, sd: 0, deauth: 0 };                // click latches until the device confirms (poll is 1 Hz)
+  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0 };                // click latches until the device confirms (poll is 1 Hz)
   let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
   const prev = {};
+  const EV_FILES = ['events.csv', 'events.old.csv', 'seen.csv', 'surveil.csv'];   // C4 text files on the card (not pcaps)
+  const EV_PULL = ['events.csv', 'seen.csv'];                                     // the ones offered for pulling
 
   const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
   const rate = (n) => n >= 10000 ? (n / 1000).toFixed(0) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n.toFixed(0);
@@ -470,6 +481,12 @@
     armPending('sd', $('#sdBtn'), on ? 'Starting…' : 'Stopping…');
     toast(on ? 'Recording to microSD' : 'Stopping SD recording', on ? 'mounting the card…' : 'closing the file…');
     post({ cmd: 'sdcap', value: on });
+  });
+  $('#evBtn').addEventListener('click', () => {
+    const on = !(state && state.events && state.events.on);
+    armPending('ev', $('#evBtn'), on ? 'Arming…' : 'Disarming…');
+    toast(on ? 'Event log armed' : 'Event log off', on ? 'new devices and surveillance hits go to events.csv' : 'no further rows are logged');
+    post({ cmd: 'events', value: on });
   });
   $('#actStop').addEventListener('click', () => {
     if (actMode === 'hunt') post({ cmd: 'hunt', mac: null });
@@ -595,29 +612,30 @@
     const sr = s.sd_read;   // file being pulled off the card (or the last one pulled this session)
     if (sr && sr.done && !(prev.srName === sr.name && prev.srDone)) toast('SD file ready', `${sr.name} · ${kb(sr.received)}`, 'done');
     prev.srName = sr ? sr.name : null; prev.srDone = !!(sr && sr.done);
-    const flist = (sd.mounted && !rec && sd.files) ? sd.files : [];
-    let filesHtml = '';
-    if (flist.length) {   // directory order ≈ oldest first; show the newest few
-      for (const [n, sz] of flist.slice(-5)) {
-        const base = n.split('/').pop();
-        let extra;
-        if (sr && !sr.done && sr.name === base)
-          extra = `<span class="pullprog"><i style="width:${sr.total ? Math.round(sr.received / sr.total * 100) : 0}%"></i></span><span class="note dim push">${kb(sr.received)} / ${kb(sr.total)}</span>`;
-        else if (sr && sr.done && sr.name === base)
-          extra = `<a class="link push" href="/file?name=${encodeURIComponent(base)}">download</a>`;
-        else
-          extra = `<button class="tiny push" data-pull="${esc(n)}" ${sr && !sr.done ? 'disabled' : ''}>⬇ pull to Mac</button>`;
-        filesHtml += `<li><span class="fname mono" title="${esc(n)}">${esc(base)}</span><span class="note dim">${kb(sz)}</span>${extra}</li>`;
-      }
-    }
-    $('#sdFiles').innerHTML = filesHtml;
+    const allFiles = (sd.mounted && !rec && sd.files) ? sd.files : [];
+    const isLog = (n) => EV_FILES.includes(n.split('/').pop());
+    const flist = allFiles.filter(([n]) => !isLog(n));   // pcaps; the event-log files get their own list below
+    const fileRow = ([n, sz]) => {
+      const base = n.split('/').pop();
+      let extra;
+      if (sr && !sr.done && sr.name === base)
+        extra = `<span class="pullprog"><i style="width:${sr.total ? Math.round(sr.received / sr.total * 100) : 0}%"></i></span><span class="note dim push">${kb(sr.received)} / ${kb(sr.total)}</span>`;
+      else if (sr && sr.done && sr.name === base)
+        extra = `<a class="link push" href="/file?name=${encodeURIComponent(base)}">download</a>`;
+      else
+        extra = `<button class="tiny push" data-pull="${esc(n)}" ${sr && !sr.done ? 'disabled' : ''}>⬇ pull to Mac</button>`;
+      return `<li><span class="fname mono" title="${esc(n)}">${esc(base)}</span><span class="note dim">${kb(sz)}</span>${extra}</li>`;
+    };
+    // directory order ≈ oldest first; show the newest few
+    $('#sdFiles').innerHTML = flist.slice(-5).map(fileRow).join('');
+    renderEvents(s, allFiles.filter(([n]) => isLog(n)), fileRow);
     $('#sdInfo').innerHTML = !sd.mounted
       ? 'No card — insert a microSD to record pcaps on the device.'
       : rec
         ? `<span class="recdot"></span><b>${fmt(sd.frames)}</b> frames · ${kb(sd.bytes)}` +
           `${sd.err ? ` · <b style="color:var(--critical)">${fmt(sd.err)} write errors</b>` : ''}<br><code title="${esc(sd.file)}">${esc((sd.file || '').split('/').pop())}</code>`
         : `${fmt(sd.mb)} MB card ready${sd.clock === 0 ? ' · <b>clock not set</b> (files will be numbered)' : ''}` +
-          (flist.length ? `<br>${flist.length}${(sd.file_total || 0) > flist.length ? ` of ${sd.file_total}` : ''} file${flist.length > 1 ? 's' : ''} on card` : '') +
+          (allFiles.length ? `<br>${allFiles.length}${(sd.file_total || 0) > allFiles.length ? ` of ${sd.file_total}` : ''} file${allFiles.length > 1 ? 's' : ''} on card` : '') +
           (savedNote(saved.sd) ? `<br>${savedNote(saved.sd)}` : '');
 
     // --- BLE scan policy card (only in BLE mode) ---
@@ -641,6 +659,34 @@
       else if (saved.sd && saved.sd.last) toast('SD recording saved', `${(saved.sd.last || '').split('/').pop()} · ${fmt(saved.sd.frames)} frames, ${kb(saved.sd.bytes)}`, 'done');
     }
     prev.capOn = !!cap; prev.sdOn = rec;
+  }
+
+  // C4 SD event log: status from the device's "ev" object (absent on firmware before C4 - hide the block then).
+  function renderEvents(s, logFiles, fileRow) {
+    const ev = s.events;
+    $('#evBox').hidden = !ev;
+    if (!ev) return;
+    const on = !!ev.on;
+    if (pending.ev && (Date.now() - pending.ev > 6000 || (prev.evOn !== undefined && on !== prev.evOn))) pending.ev = 0;
+    prev.evOn = on;
+    const btn = $('#evBtn');
+    if (!pending.ev) { btn.textContent = on ? 'Stop event log' : 'Start event log'; btn.disabled = false; }
+    btn.classList.toggle('stop', on);
+    const n = (v) => fmt(v || 0);
+    let html;
+    if (!on) html = 'Off - nothing is logged.';
+    else if (!ev.card)
+      html = `<span class="recdot"></span>armed - no card, buffering (${n(ev.pending)} waiting)` +
+        (ev.wait ? `<br><span class="dim">${n(ev.wait)} new-device checks skipped until a baseline loads</span>` : '') +
+        `<br><span class="dim">retries the card every 30 s</span>`;
+    else
+      html = `<span class="recdot"></span>logging - <b>${n(ev.written)}</b> rows written, ${n(ev.pending)} pending` +
+        `<br>${n(ev.new)} new, ${n(ev.surv)} surveillance · <span title="${n(ev.file)} MACs in seen.csv">baseline ${n(ev.base)}</span>`;
+    if (ev.drop || ev.err)
+      html += `<br><b style="color:var(--critical)">${ev.drop ? `${n(ev.drop)} rows dropped` : ''}${ev.drop && ev.err ? ' · ' : ''}${ev.err ? `${n(ev.err)} card errors` : ''}</b>`;
+    $('#evInfo').innerHTML = html;
+    // pull buttons for the log and the baseline, once the card listing has them
+    $('#evFiles').innerHTML = logFiles.filter(([f]) => EV_PULL.includes(f.split('/').pop())).map(fileRow).join('');
   }
 
   function renderHero(s) {

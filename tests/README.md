@@ -33,8 +33,8 @@ records what `send()` would write), feeds it protocol lines through `handle_line
   markers published per region, fallback when markers stop, torn (`complete=0`) frames held up to
   `MIRROR_HOLD_S`, stale back buffer published by the status poll, MF sequence gaps and 16-bit wrap, malformed
   regions, and the `screen_status()` `complete` flag (regression test, see below).
-- `test_http.py`: the real `make_handler()` on an ephemeral port - `/` is v2 by default, `/v2` and `/classic`
-  always reachable, `--ui classic`, missing v2 fallback, `/api/state`, `/api/screen`, `/screen.bin`, `/file`
+- `test_http.py`: the real `make_handler()` on an ephemeral port - the dashboard at `/` and `/v2`, `/classic`
+  a 301 to `/` (classic removed in v1.19), `--ui` accepted and ignored, a missing page 404s, `/api/state`, `/api/screen`, `/screen.bin`, `/file`
   (download + traversal), and every `/api/cmd` mapped to its exact device string; bad input (bad MACs, newline
   injection, unknown values, `sdread` names outside `CARD_TEXT_FILES` / the pcap pattern, path traversal, > 39
   chars) answered 400 with nothing sent.

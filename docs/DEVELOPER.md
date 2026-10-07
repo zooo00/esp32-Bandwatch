@@ -199,17 +199,13 @@ Vendor names: IEEE OUI CSV cached in `~/.cache/bandwatch/oui.csv`
 (downloaded once in the background) with a built-in fallback; Bluetooth company ids, Apple continuity types,
 GAP appearance categories and common service UUIDs are small tables at the top of the file.
 
-Two dashboards, both always served: `dashboard2.html` (the default, at `/` and `/v2`) and the classic
-`dashboard.html` (at `/classic`). `--ui classic` swaps which one sits at `/`; the other paths keep resolving,
-and each page links to the other by absolute path. `host/run-v2.sh` is a leftover alias for the default.
-`dashboard2.html`: same polling and data, controls in a sticky left rail (band/park, capture, hunt/deauth action
+One dashboard: `dashboard2.html`, served at `/` (and `/v2`, `/v2.html`, `/index.html` for old links). The classic
+tabbed `dashboard.html` was removed in v1.19; git tag `v1.18.2` has the last copy. `/classic` and `/classic/`
+answer `301` to `/`, and `--ui` is still parsed but ignored (with a note on stdout) so old scripts keep running;
+`host/run-v2.sh` went with it. `make_handler(bw, page_path)` takes the one page.
+`dashboard2.html`: no framework, polls `/api/state` once a second; controls in a sticky left rail (band/park, capture, hunt/deauth action
 bar, LCD mirror with page buttons, SD card list with pull-to-Mac), one scrolling main column, and only the active
-radio's device table open (the other two fold into "last seen" caches). Newer features (LCD mirror, §19) exist
-only here.
-
-`dashboard.html` (classic): no framework, polls `/api/state` once a second. Tabs: Overview (bar chart, trend, channel
-table), Wi‑Fi devices, Bluetooth LE, Zigbee/Thread; a hunt panel appears when a hunt is active and a red deauth
-card with the frame counter while an attack runs. Tables are
+radio's device table open (the other two fold into "last seen" caches). Tables are
 rendered keyed by device id so rows keep identity; while the mouse is over a table (or the page is paused with
 the button / space bar) rows neither move nor re-render, so buttons stay put. Colours follow a light/dark token
 set; charts are inline SVG.
@@ -984,7 +980,6 @@ a mirror line within 3 s), and the v2 canvas shows *in sync* / *repairing droppe
 **v2 dashboard** (`dashboard2.html`) has a *Start mirror* card: the toggle POSTs `mirror 1|0`, a 4 Hz poll
 watches `seq`, and on a change it fetches `/screen.bin` and paints it onto a `<canvas>` (RGB565 LE → RGBA,
 `image-rendering: pixelated`). `sendHello` carries `"mir"` so the button reflects the device state on load.
-The classic dashboard does not have the mirror card.
 
 The mirror panel lives in the v2 **left control rail** (the 172×320 canvas fits its width). Alongside it are
 **Page ‹ ›** buttons that POST `page prev|next`, which the device handles with `stepPage()` (`lcd_ui.cpp`) —

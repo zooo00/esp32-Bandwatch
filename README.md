@@ -118,18 +118,17 @@ Notes for this board:
 ```sh
 python3 host/bandwatch_host.py            # http://127.0.0.1:8080 , pcaps in ./captures
 python3 host/bandwatch_host.py --port /dev/cu.usbmodem21101 --http 8080 --captures ~/pcaps
-python3 host/bandwatch_host.py --ui classic   # the older tabbed layout at "/" instead
 ```
 
-The page polls the device state once a second. The default layout (`dashboard2.html`, also at `/v2`) groups the
+The page polls the device state once a second. The dashboard (`dashboard2.html`, also at `/v2`) groups the
 controls into a left rail — band and park, capture start/stop, hunt/deauth sharing one action bar, and the live LCD
 mirror with page buttons — next to one scrolling column: stat tiles, a busy‑score bar chart per channel (grouped by
 band segment, current channel marked), the channel‑load trend, the spectrum views, only the active radio's device
 table open (the other two fold away as "last seen" caches), and the device log. Every file on the SD card gets a
 *pull to Mac* button that streams it back over serial and offers a download.
 
-The classic tabbed layout (`dashboard.html`) is still served at `/classic`; `--ui classic` puts it back at `/`.
-Both pages cross‑link, whichever one is at `/`.
+The classic tabbed layout (`dashboard.html`) was removed in v1.19; git tag `v1.18.2` has the last copy. `/classic`
+now redirects to `/`, and `--ui` is still accepted but ignored, so old bookmarks and scripts keep working.
 
 The dashboard is served on `127.0.0.1` only. `/api/cmd` has no authentication and can start a deauth attack,
 so think before using `--bind` to expose it beyond the loopback interface.
@@ -337,7 +336,7 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 - **1.9** — **Dashboard v2, and a review pass.** A fresh dashboard layout (`dashboard2.html`: left‑rail controls,
   one scrolling column instead of tabs, the active radio's device table open while the other two fold into "last seen"
   caches, hunt/deauth sharing one action bar) ships in parallel — `--ui v2` or `./host/run-v2.sh` puts it at `/`, and
-  both pages cross‑link. The host finally reassembles the `sdread` file chunks it had been dropping into the log pane:
+  both pages cross‑link (the classic page, `--ui` and `run-v2.sh` were retired in v1.19). The host finally reassembles the `sdread` file chunks it had been dropping into the log pane:
   `S <n> <base64>` lines now become a real pcap under `captures/`, served back for download (the new UI's pull button).
   Firmware review fixes: the internal‑kick deauth sequence now encodes like its outer path — the old bytes put the
   sequence's low nibble into the *fragment* field and repeated every 256 frames; `finishDwell()` lost the spec branch

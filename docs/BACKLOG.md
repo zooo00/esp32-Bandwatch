@@ -17,27 +17,67 @@ State as of **v1.18.2** (2026-10-07).
 ## Bugs
 
 ### B1 · Dashboard v2 hides a running deauth while a hunt is active — P1, bug
-- **Where:** `host/dashboard2.html`, `renderAct()` - the single action bar picks the hunt first.
-- **Symptom:** with both active, the deauth status is not shown: its frame counter, the "rejected by the driver"
-  count and the unpatched-image warning `#actWarn`. A running transmit is then invisible in the default UI.
-  Classic shows both (`#huntCard` + `#deauthCard`), so classic is the reference.
-- **Fix outline:** render the two states independently. Either two bars, or one bar with two sections. The deauth
-  part must stay visible whenever `s.deauth` is set.
-- **Done when:** with `s.hunt` and `s.deauth` both set, both statuses are visible, and either can be stopped from
-  the bar.
-- **Test:** add a tier-1 render check (the jsdom approach in the v2-parity work, or a DOM-string check) that feeds a
-  snapshot with both set and asserts both status elements are present and not hidden.
-- *Note: an automated agent was stopped by a safety classifier while editing this area, so it was left for a
-  person.*
+**Symptom.** With a hunt and a deauth running at the same time, the v2 action bar shows only the hunt. The deauth's
+frame counter, the "rejected by the driver" count and the unpatched-image warning are hidden, and the bar's single
+Stop button stops the hunt only. A running transmit is then invisible in the default UI. Classic shows both
+(`#huntCard` + `#deauthCard` in `host/dashboard.html`, `renderHunt()` / `renderDeauth()`): use it as the reference.
+
+**Where (host/dashboard2.html, v1.18.2 line numbers):**
+- Markup: `<section class="card actbar" id="actBar">` (~line 259). One status block (`#actTitle`, `#actNum`,
+  `#actUnit`, `#actMeter`, `#actSub`), one middle block (`#actMeta`, `#actTrend`, `#actWarn`) and one `#actStop`
+  button.
+- Render: `renderAct(s)` (~line 776). `actMode = h ? 'hunt' : k ? 'deauth' : ''` picks one mode and fills the shared
+  elements, with an `if (h) {...} else {...}` per mode.
+- Stop: the `#actStop` click handler (~line 525) branches on `actMode`.
+- Styles: `.actbar` (~line 67, grid of 3 columns; ~line 170 for the narrow layout). `[hidden]` already forces
+  `display: none` (~line 148).
+
+**Steps:**
+1. **Markup:** turn the one bar into two independent bars with the same inner layout, e.g. `#huntBar` and
+   `#deauthBar`. Give each its own title/number/unit/meter/sub/meta/stop elements, with ids prefixed per bar
+   (`#huntNum`, `#deauthNum`, ...). Only the hunt bar needs the trend `<svg>`; only the deauth bar needs the warning
+   `<div>`. Reuse the `.actbar` class for both so the styles apply unchanged.
+2. **Render:** split `renderAct(s)` into `renderHuntBar(s)` and `renderDeauthBar(s)`. Each shows or hides its own bar
+   from its own field (`s.hunt`, `s.deauth`). Move the existing two branches into them as they are, retargeted to the
+   new ids. Drop the global `actMode`.
+3. **Stop buttons:** give each bar its own handler. The hunt one posts `{cmd:'hunt', mac:null}`. The deauth one keeps
+   the existing `armPending('deauth', <button>, 'Stopping…')` + `{cmd:'deauth', mac:null}`.
+4. **Call sites:** replace the `renderAct(s)` call in `render()` with the two calls. Grep for `renderAct` and
+   `actMode` to catch every reference.
+5. **Order:** put the deauth bar first (above the hunt). A transmit in progress should be the most prominent thing on
+   the page.
+
+**Done when:**
+- With `s.hunt` and `s.deauth` both set, both bars are visible with their own numbers, and each Stop stops only its
+  own activity.
+- With only one set, the page looks as it does today.
+- The narrow (mobile) layout still stacks cleanly.
+
+**Test:** add a tier-1 render test in `tests/host/`. It can load `dashboard2.html`'s script under a small stub DOM, or
+assert on the HTML string a render produces. Feed a snapshot with both `hunt` and `deauth` set, and assert both bars
+exist and neither is hidden. Add a second case with only `hunt` set.
 
 ### B2 · Deauth table buttons can stay stuck on "…" after an attack stops — P2, bug
-- **Where:** `host/dashboard2.html`, `renderAct()` - the code that clears `pending.deauth` only runs while a deauth
-  is active.
-- **Symptom:** click Deauth, stop it, and the row buttons keep the pending "…" label until reload.
-- **Fix outline:** clear the pending state whenever the reported state matches what was requested, including "no
-  attack".
-- **Done when:** starting then stopping from the dashboard returns the buttons to normal within one poll.
-- **Test:** tier-1 render check, as for B1.
+**Symptom.** Click Deauth on a table row, then stop the attack, and every row's Deauth button can keep showing a
+disabled "…" until the page reloads.
+
+**Why:** `deauthBtn()` (~line 1132) renders "…" while `pending.deauth` is set. The only code that clears it is inside
+`renderAct()`'s deauth branch (~line 806), which runs only *while a deauth is active*. So when the attack ends
+before the latch is released (or a hunt is active, B1), nothing ever clears it.
+
+**Steps:**
+1. Move the latch release out of the deauth-only branch into code that runs on every render. The current condition is
+   right: release after 6 s, or when the reported on/off state (`!!s.deauth`) differs from `prev.deauthOn`.
+   `prev.deauthOn = !!s.deauth` must also update on every render, active or not.
+2. Re-enable whichever Stop button `armPending` disabled. After B1 that is the deauth bar's Stop.
+3. Do B1 first. B2's fix lands naturally in the new `renderDeauthBar()`, as long as the release runs before its
+   "hidden when no deauth" early return.
+
+**Done when:** start a deauth from a row, stop it from the bar or the row, and the row buttons return to "Deauth"
+within one poll (1 s).
+
+**Test:** a tier-1 render test that sets `pending.deauth`, renders a snapshot with `deauth: null`, and asserts the row
+button is no longer "…".
 
 ### B3 · `page prev` skipped unavailable pages forward — fixed in v1.18.2
 Kept here for one release so the history is visible. `showPage(n, dir)` now skips in the step's direction. The

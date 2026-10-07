@@ -110,7 +110,7 @@ file-local helpers live in an anonymous namespace.
 - `capture.cpp` — the capture ring: `ensureCapRing()` (sized against free heap, with a post-allocation floor —
   §16), `releaseCapture()`, single-producer reserve/commit (`capReserve/capCommit`), base64 streaming and the
   per-loop bounded drain.
-- `sd_sink.cpp` — microSD pcap sink: on-demand FATFS mount (§12), byte-compatible writer, `sdls` / `sdread`;
+- `sd_sink.cpp` — microSD pcap sink: on-demand FATFS mount (§12), byte-compatible writer, `sdls` / `sdread` / `sdrm`;
   since 1.18 also card presence (`sdSetPresent()`, the one place it changes; the idle CMD0 probe
   `sdServicePresence()`) and the one I/O-failure path for a card pulled mid-capture (§12).
 - `events.cpp` — the C4 event log (1.18, §20): `eventFlag()` (radio side, under `g_devMux`), `serviceEvents()`
@@ -150,7 +150,7 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"pr",...}` | a directed probe request (Wi‑Fi modes, C1) | `mac` (the probing client; often a randomized, locally administered MAC), `rssi`, `ch`, `ssid` (the network it asked for, control-stripped). Wildcard probes (empty SSID) are not sent. The device suppresses a repeat of the same (MAC, SSID) pair for 60 s (32-entry table in `host_proto.cpp`); the host keeps history and expires pairs after 15 min (`PROBE_TTL_S`), grouping by SSID because phones randomize per burst |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
 | `{"t":"ev","ev":{...}}` | every 5 s while the event log is armed, in every mode (`sendEventStatus()`, 1.18) | `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}`: armed; card usable (last attach worked); baseline hashes in RAM; entries in `/seen.csv` (counted at load, plus this session's appends); rows written to `/events.csv`; rows buffered; surveillance rows; new-device rows; rows dropped (2 KB buffer full, rows discarded by `events 0` on a busy card, or the 16-entry radio queue full); card errors (failed mount/write); novelty checks skipped for want of a baseline. The same object rides on `hello` and the `events` ack. §20 |
-| `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete |
+| `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete. Since the C4 follow-up: `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` after a delete, `"ok":0,"msg":"no such file"|"remove failed"` when the card refused it; refusals before the card is touched are `{"t":"err","msg":"sdrm: ..."}` (`bad file name ...`, `busy - a file is being pulled (sdread)`, `/x is being recorded - stop sdcap first`, `busy - the event log is writing to the card`, `no card`). `{"t":"log","msg":"seen.csv rotated: N -> M"}` when an attach trims `/seen.csv` (§20) |
 | `M <x> <y> <w> <h> <base64>` / `MF <seq> <complete>` | while `mirror 1` | one repainted LCD slice (RGB565-LE, <= ~2 KB base64) / end of one LVGL refresh; `complete` 1 = nothing dropped and no repair pending (§19) |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
 | `{"t":"sdls","files":[[name, bytes], ...],"total":N,"sent":M}` | after `sdls` | files in the card root; `sent < total` = the serial buffer filled mid-list (host slow or absent) and whole entries were dropped |
@@ -168,6 +168,9 @@ device rejects anything else) / `dca 0`,
 will not allocate), `sdprobe` (diagnostic: `{"t":"ack","cmd":"sdprobe","r1":N,"present":0|1}` — the raw CMD0
 reply of the presence probe; `r1` is -1 when the card is mounted or busy and the probe was not sent),
 `sdface 0|1` (diagnostic: show the card-out / card-in LCD face for 3 s without touching the card).
+`sdrm <name>` deletes one file in the card root (§12 "Deleting card files"): `<name>` is `/x` or `x`, 1-39 chars of
+`[A-Za-z0-9._-]`, no `..`; ack `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` (or `"ok":0,"msg":...`), refusals as
+`sdrm: ...` err lines (table above). The host re-sends `sdls` after a delete.
 
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
@@ -496,6 +499,36 @@ every `kSdFlushMs` (5 s), so a power cut costs at most a few seconds. Because ca
 tens of milliseconds and `hopIfNeeded()` shares this task, `drainCapture()` gives SD at most `kSdBudgetUs`
 (8 ms) per loop iteration. Park on one channel for long captures; while hopping, heavy SD load will skew
 dwell timing and therefore the busy score.
+
+### Deleting card files (`sdrm`, C4 follow-up)
+
+`sdrm <name>` (`sdRemoveFile()` in `sd_sink.cpp`, loop task like every card user) deletes one file in the card
+root. The rules, in the order they are checked:
+
+- **Plain names only.** One optional leading `/`, then 1-39 chars of `[A-Za-z0-9._-]` and no `..`, so no nested
+  path and no traversal. The 39 is the same limit as the host's `sdread` guard: the device's command line holds
+  47 chars and `sdrm /` takes 6, so a longer name would arrive truncated and delete a *different* file. The
+  charset also keeps the name safe to echo in the JSON ack. Every name the firmware writes fits.
+- **Not while an `sdread` streams** (any file: the pull holds the card and one open file handle).
+- **Not the file `sdcap` is recording** (`sd.path`). Other files may go while a capture runs: the capture's mount
+  is reused and `sdUnmount()` leaves it in place.
+- **Not while the event log is mid-flush** (`eventsFlushing()`: `flush()` has `/events.csv` / `/seen.csv` open
+  between `attachCard()` and its unmount). Commands and flushes both run on the loop task, so today a command
+  always lands between flushes; the check keeps that true if flushing ever becomes incremental.
+- **Mount on demand, unmount after** (`sdMount()` / `sdUnmount()`); no card → `sdrm: no card`.
+- **Deleting `/seen.csv` while the event log is armed resets novelty** (`eventsFileRemoved()` in `events.cpp`): the
+  baseline is reloaded from the card - now empty - instead of keeping the RAM set, and the MACs still waiting to be
+  appended are dropped with the file they belonged to (their `new` rows are already in `/events.csv`). From then on
+  every globally unique device counts as new again and `/seen.csv` starts over. Deleting `/events.csv` needs
+  nothing special: the next flush recreates it with its header, and rows still buffered land there.
+
+The host (`POST /api/cmd {"cmd":"sdrm","path":"/name"}`) applies the same guard as `sdread` (`card_file_name()`:
+the device's pcap names or `CARD_TEXT_FILES`), drops the file from its cached listing when the ack says `ok` and
+re-asks `sdls`. **Copies already pulled into the captures dir are never touched** - deleting on the card is not
+deleting the local file, and the dashboard says so under the list. Dashboard v2 lists every card file (newest
+four pcaps plus `events.csv` / `seen.csv` by default, "show all" for the rest), each with Download (pull ->
+progress -> the browser saves it) and a two-click Delete (`Delete` -> `Really delete?` for 4 s; no
+`window.confirm()`, which blocks automation), disabled for the file being recorded and during a pull.
 
 ### Removal, insertion and a missing card (1.18)
 
@@ -1025,8 +1058,22 @@ On attach, `loadBaseline()` reads `/seen.csv` and keeps the **newest 2048 entrie
 sorted 32-bit FNV-1a hashes for binary search; `kBaseCap` = 2560 leaves room for 512 new devices this session
 (past that a MAC is still logged as new but not remembered in RAM, so a re-created slot could log it again). New
 MACs are appended to `/seen.csv` on each flush, so the baseline grows with every walk and a device counts as new
-once per card. The file itself is never trimmed. A 32-bit hash can collide; a collision makes a new device look
-known (a missed row), never the reverse.
+once per card. A 32-bit hash can collide; a collision makes a new device look known (a missed row), never the
+reverse.
+
+**Rotation.** When an attach finds more than `kSeenRotate` = 4096 entries (2 x `kBaseLoad`), `loadBaseline()`
+trims the file while the card is still mounted (`rotateSeen()`): `/seen.csv` is renamed to `/seen.old.csv`
+(replacing an older one), a fresh `/seen.csv` is written with the newest 2048 entries - exactly the set the RAM
+baseline just loaded, so novelty does not change - and `{"t":"log","msg":"seen.csv rotated: N -> M"}` is sent.
+Why 4096: each attach reads the whole file on the loop task, so it is kept at <= ~74 KB (18 B a line), and the
+rewrite (~37 KB) is paid at most once per 2048 new devices. How it stays bounded: the RAM set holds hashes, which
+cannot be turned back into MACs, and buffering 2048 MACs would cost 12 KB; instead a second pass over the old file
+with the same 40-byte line buffer skips the first `total - 2048` entries and copies the rest (both passes parse
+lines through `readSeenLine()`, so they agree on what counts). Transient cost is two FATFS file objects (~4.3 KB
+each); the rotation is skipped below 24 kB free heap and retried on the next attach. If the new file cannot be
+opened or written, `/seen.old.csv` is renamed back, so the baseline is never lost; a power cut mid-copy leaves the
+complete history in `/seen.old.csv` and a short `/seen.csv` (only older novelty history is lost). One generation
+is kept, like `/events.old.csv`. `g_evStats.baseFile` (`ev.file`) reports the trimmed count.
 
 ### Buffering and flushing
 Rows go into a 2 KB heap buffer (~25-30 rows); overflow is counted in `drop`, not hidden. The card is **not**
@@ -1049,8 +1096,9 @@ and rows keep buffering meanwhile.
 ### Status line
 `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}` (§4) rides on `hello`, the `events`
 ack, and a `{"t":"ev"}` line every 5 s while armed, in every mode. Both dashboards show it with an arm/disarm
-control and pull buttons for `events.csv` / `seen.csv`; the host's `sdread` guard accepts the card's text files
-(`CARD_TEXT_FILES`: `events.csv`, `events.old.csv`, `seen.csv`, `surveil.csv`) besides the pcap naming scheme.
+control; the card's file list (§12) offers download and delete for every file. The host's `sdread`/`sdrm` guard
+accepts the card's text files (`CARD_TEXT_FILES`: `events.csv`, `events.old.csv`, `seen.csv`, `seen.old.csv`,
+`surveil.csv`) besides the pcap naming scheme. Deleting `seen.csv` while armed starts novelty over (§12).
 
 ### `/surveil.csv` (1.6.4)
 Up to 64 extra OUIs, one `AA:BB:CC,<category 1-7>` per line (categories as `kSurvName` in `surv_ouis.h`),
@@ -1072,4 +1120,5 @@ added *after* that test, because `base` read 32 instead of about 52 — it has n
   1.6.1's transient-alert proposal so `driveLed()` gets one decision, not three.
 - The presence probe has no open items (card out reads `0xFF`, card in `0x01`, removal detected within ~4 s;
   §12). Hot-pulling the card can intermittently reset the board over USB (`rst: usb`, a hardware effect, §12).
-- Not yet measured: free heap at peak load with the log armed; behaviour with a large (> 2048-entry) `/seen.csv`.
+- Not yet measured: free heap at peak load with the log armed; the time a `/seen.csv` rotation takes on hardware
+  (a > 4096-entry file; written, compiled, not yet run on the board).

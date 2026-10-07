@@ -36,7 +36,8 @@ Serial protocol (one line each):
 Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
 "deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), 
 "dca <client_mac> <ap_bssid>" / "dca 0" (targeted deauth to one client),
-"sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info",
+"sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "sdrm <path>" (delete one
+card-root file; the pulled local copy stays), "time <epoch>", "info",
 "events 0|1" (C4: arm/disarm the SD event log - /events.csv rows for surveillance hits and MACs new to this card's
 /seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s).
 

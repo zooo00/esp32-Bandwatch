@@ -3,7 +3,9 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
-## Unreleased
+## v1.19.5
+
+Tooling only; firmware changes only `kVersion`.
 
 `smoke.py` moved to `tools/smoke.py` and made read-only: it sends only `info`, `sdinfo` and `sdls` (it used to start a
 real broadcast deauth, a capture, and switch and persist the band), opens the port like `tests/device` (DTR/RTS asserted,

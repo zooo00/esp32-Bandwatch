@@ -1,0 +1,408 @@
+"""Hardware tier: protocol tests against a connected, running Bandwatch board.
+
+    BANDWATCH_PORT=/dev/cu.usbmodem101 python3 -m unittest discover -s tests/device -v
+
+Stop the host tool first (it holds the port; the port is opened exclusively, so a clash fails at once instead
+of interleaving two readers). The port is opened with DTR/RTS asserted and HUPCL cleared - no edges, no reset
+(CLAUDE.md rule 1). Nothing here reboots the board, flashes it, or runs esptool.
+
+Each test restores what it changed (band, park, USB capture, SD capture, mirror, event log - compared against
+the hello read at the start); the LCD page is restored by the page test, but a band change also picks a page,
+so the page shown after a run can differ. `sdcap` (only when a card is in) leaves one small pcap on the card.
+
+Env: BANDWATCH_PORT (required), BANDWATCH_SOAK_S (per-mode soak length, default 30).
+Runtime: ~6-7 minutes with the default soak.
+"""
+import os
+import re
+import time
+import unittest
+
+from board import (Board, validate_line, BAND_NAMES, EXPECTED_CHS, EV_KEYS, LCD_W, LCD_H, MIN_FREE_HEAP,
+                   WIFI_ROWS_PER_LINE, M_RE, MF_RE, P_RE, MAC_RE)
+
+PORT = os.environ.get("BANDWATCH_PORT")
+SOAK_S = float(os.environ.get("BANDWATCH_SOAK_S", "30"))
+
+board = None
+ORIG = None          # the hello read before any test ran
+
+
+def setUpModule():
+    global board, ORIG
+    if not PORT:
+        raise unittest.SkipTest("set BANDWATCH_PORT to the board's serial port to run the hardware tier")
+    board = Board(PORT)
+    time.sleep(0.5)
+    ORIG = board.hello(timeout=8)
+
+
+def tearDownModule():
+    if board is not None:
+        try:
+            restore()
+        finally:
+            board.close()
+
+
+def restore():
+    """Put band / park / capture / SD capture / mirror / event log back to what ORIG reported."""
+    h = board.hello(timeout=8)
+    if h.get("mir") != ORIG.get("mir"):
+        board.command("mirror %d" % (ORIG.get("mir") or 0))
+    if (h.get("sd") or {}).get("cap") and not (ORIG.get("sd") or {}).get("cap"):
+        board.command("sdcap 0")
+    if h.get("cap") and not ORIG.get("cap"):
+        board.command("cap 0")
+    if h.get("band") != ORIG["band"]:
+        board.set_band(ORIG["band"], settle=1.0)
+    if (board.hello().get("park") or 0) != (ORIG.get("park") or 0):
+        board.command("park %d" % (ORIG.get("park") or 0))
+    if ORIG.get("cap") and not h.get("cap"):
+        board.command("cap 1")
+    ev0, ev1 = ORIG.get("ev"), h.get("ev")
+    if ev0 is not None and ev1 is not None and ev0.get("on") != ev1.get("on"):
+        board.command("events %d" % ev0.get("on"))
+    board.clear()
+
+
+class BoardTest(unittest.TestCase):
+    def setUp(self):
+        board.clear()
+
+    def tearDown(self):
+        restore()
+
+    def assertAllValid(self, lines, context):
+        bad = [(why, raw[:120]) for raw in lines for why in [validate_line(raw)] if why]
+        self.assertEqual(bad[:10], [], "%d malformed line(s) %s (first 10 shown)" % (len(bad), context))
+
+
+class T01Hello(BoardTest):
+    def test_info_hello_fields(self):
+        h = board.hello()
+        self.assertEqual(h["fw"], "bandwatch")
+        self.assertRegex(h["ver"], r"^\d+\.\d+(\.\d+)?$")
+        for k in ("dwell_ms", "spec_step", "band", "country", "bandmode", "proto", "promisc", "chs", "park", "cap",
+                  "snap", "heap", "up", "rst", "hunt", "h", "deauth", "sd", "mir", "ev"):
+            self.assertIn(k, h)
+        self.assertIn(h["band"], BAND_NAMES)
+        self.assertEqual(h["chs"], EXPECTED_CHS[h["band"]])
+        self.assertIn(h["spec_step"], (1, 2, 5))
+        self.assertGreater(h["dwell_ms"], 0)
+        self.assertGreater(h["heap"], MIN_FREE_HEAP)
+        self.assertIn(h["cap"], (0, 1))
+        self.assertIn(h["mir"], (0, 1))
+        self.assertTrue(32 <= h["snap"] <= 1600)
+        self.assertIsInstance(h["rst"], str)
+        self.assertEqual(set(h["sd"]), {"mounted", "mb", "cap", "file", "frames", "bytes", "err", "clock"})
+        self.assertEqual(set(h["ev"]), EV_KEYS)
+        self.assertTrue(all(isinstance(v, int) for v in h["ev"].values()))
+
+    def test_unknown_command_is_an_error(self):
+        idx = board.mark()
+        board.send("frobnicate")
+        board.wait_json(lambda o: o.get("t") == "err" and o.get("msg") == "unknown command", 3, idx)
+
+
+class T02Bands(BoardTest):
+    def check_mode_traffic(self, mode, chs):
+        idx = board.mark()
+        if mode == "ble":
+            o = board.wait_json(lambda o: o.get("t") == "ble", 6, idx, "a BLE heartbeat")
+            self.assertIn("devs", o)
+        elif mode == "spec":
+            o = board.wait_json(lambda o: o.get("t") == "fd", 6, idx, "an fd line")
+            self.assertTrue(2400 <= o["mhz"] <= 2483)
+        else:
+            o = board.wait_json(lambda o: o.get("t") == "d", 6, idx, "a dwell line")
+            self.assertIn(o["c"], chs)
+
+    def test_band_round_trips(self):
+        for mode in ("both", "ble", "154", "spec", "5g", "2.4g"):
+            with self.subTest(mode=mode):
+                if board.band == mode:
+                    board.set_band("ble" if mode != "ble" else "154")
+                idx = board.mark()
+                board.send("band " + mode)
+                ack = board.wait_json(lambda o: o.get("t") == "ack" and o.get("cmd") == "band", 15, idx, "band ack")
+                self.assertEqual(ack["band"], mode)
+                h = board.wait_json(lambda o: o.get("t") == "hello", 10, idx, "hello after band")
+                self.assertEqual(h["band"], mode)
+                self.assertEqual(h["chs"], EXPECTED_CHS[mode])
+                time.sleep(1.5)
+                self.check_mode_traffic(mode, EXPECTED_CHS[mode])
+
+    def test_unknown_band_keeps_mode(self):
+        before = board.hello()["band"]
+        ack = board.command("band 6g", timeout=8)
+        self.assertEqual(ack["band"], before)
+
+
+class T03Park(BoardTest):
+    def test_park_wifi(self):
+        board.set_band("2.4g")
+        self.assertEqual(board.command("park 6")["park"], 6)
+        time.sleep(1.0)                                    # let the in-flight dwell finish
+        idx = board.mark()
+        time.sleep(3.0)
+        ds = board.json_since(idx, "d")
+        self.assertGreaterEqual(len(ds), 2)
+        self.assertEqual({d["c"] for d in ds}, {6})
+        self.assertEqual({d["park"] for d in ds}, {6})
+        self.assertEqual(board.command("park 0")["park"], 0)
+        idx = board.mark()
+        time.sleep(4.0)
+        self.assertGreater(len({d["c"] for d in board.json_since(idx, "d")}), 1, "still parked after park 0")
+
+    def test_park_channel_not_in_mode(self):
+        board.set_band("2.4g")
+        self.assertEqual(board.command("park 36")["park"], 0)
+        self.assertEqual(board.command("park 999")["park"], 0)
+
+    def test_park_spec_holds_fine_sweep(self):
+        board.set_band("spec")
+        step = board.hello()["spec_step"]
+        self.assertEqual(board.command("park 15")["park"], 15)
+        # bandwatch.cpp advanceChannel(): the bin nearest the 15.4 channel's centre (2425 MHz)
+        centre = 2405 + 5 * (15 - 11)
+        want = 2400 + ((centre - 2400 + step // 2) // step) * step
+        time.sleep(1.0)
+        idx = board.mark()
+        time.sleep(4.0)
+        fds = board.json_since(idx, "fd")
+        self.assertGreaterEqual(len(fds), 3)
+        self.assertEqual({o["mhz"] for o in fds}, {want}, "parked spec sweep must hold one bin")
+        self.assertEqual(board.json_since(idx, "fs"), [], "full sweeps (fs) must pause while parked")
+        self.assertEqual(board.command("park 0")["park"], 0)
+        idx = board.mark()
+        time.sleep(3.0)
+        self.assertGreater(len({o["mhz"] for o in board.json_since(idx, "fd")}), 1, "sweep did not resume")
+
+
+class T04Capture(BoardTest):
+    def test_cap_ring_and_frames(self):
+        board.set_band("154")                              # a mode change releases any old ring ...
+        board.set_band("2.4g")                             # ... so cap 1 has to allocate a fresh one
+        idx = board.mark()
+        ack = board.command("cap 1")
+        self.assertEqual(ack["cap"], 1, "cap 1 refused: %s" % board.json_since(idx, "err"))
+        logs = [o["msg"] for o in board.json_since(idx, "log")]
+        ring = [m for m in logs if re.match(r"capture ring(: \d+ slots| re-sized to \d+ slots)", m)]
+        self.assertTrue(ring, "no 'capture ring: N slots' log (got %s)" % logs)
+        self.assertGreater(int(re.search(r"(\d+) slots", ring[0]).group(1)), 0)
+        time.sleep(4.0)
+        lines = board.raw_since(idx)
+        ds = board.json_since(idx, "d")
+        self.assertTrue(ds and all(d["cap"] == 1 for d in ds[1:]))
+        p = [l for l in lines if l.startswith(b"P ")]
+        if any(d["f"] for d in ds):
+            self.assertTrue(p, "frames were counted on air but no P line arrived")
+        self.assertAllValid(p, "in the P stream")
+        self.assertEqual(board.command("cap 0")["cap"], 0)
+        time.sleep(1.0)
+        late = [l for l in board.collect(2.0) if l.startswith(b"P ")]
+        self.assertEqual(late, [], "P lines kept coming after cap 0")
+
+    def test_cap_refused_in_spec(self):
+        board.set_band("spec")
+        self.assertEqual(board.command("cap 1")["cap"], 0)
+
+    def test_cap_and_sdcap_keep_heap_floor(self):
+        if not card_present():
+            self.skipTest("no microSD card in the slot")
+        board.set_band("2.4g")
+        self.assertEqual(board.command("cap 1")["cap"], 1)
+        r = board.command_or_err("sdcap 1", timeout=10)
+        self.assertEqual(r.get("t"), "ack", "sdcap 1 failed: %s" % r.get("msg"))
+        self.assertEqual(r["sdcap"], 1)
+        heaps = []
+        idx = board.mark()
+        # Walk every LCD page while both sinks run: the ring must leave room for the heaviest one (section 16).
+        walk_pages(dwell=1.5)
+        time.sleep(4.0)
+        heaps += [o["heap"] for o in board.json_since(idx, "s") if o.get("heap")]
+        heaps.append(board.hello()["heap"])
+        self.assertGreaterEqual(min(heaps), MIN_FREE_HEAP,
+                                "free heap fell to %d B with USB + SD capture (floor %d)" % (min(heaps), MIN_FREE_HEAP))
+        ds = board.json_since(idx, "d")
+        self.assertTrue(any(d.get("sdc") == 1 for d in ds))
+        self.assertEqual(board.command("sdcap 0", timeout=10)["sdcap"], 0)
+        self.assertEqual(board.command("cap 0")["cap"], 0)
+
+
+def card_present():
+    h = board.hello()
+    if (h.get("sd") or {}).get("mounted"):
+        return True
+    for _ in range(3):
+        r = board.command("sdprobe")
+        if r["r1"] != -1:
+            return r["r1"] == 1
+        time.sleep(1.0)
+    return False
+
+
+class T05Events(BoardTest):
+    def test_events_ack_shape(self):
+        idx = board.mark()
+        r = board.command_or_err("events 1", timeout=8)
+        self.assertEqual(r.get("t"), "ack", "events 1 failed: %s" % r.get("msg"))
+        self.assertEqual(set(r["ev"]), EV_KEYS)
+        self.assertTrue(all(isinstance(v, int) for v in r["ev"].values()))
+        self.assertEqual(r["ev"]["on"], 1)
+        st = board.wait_json(lambda o: o.get("t") == "ev", 8, idx, "an ev status line while armed")
+        self.assertEqual(set(st["ev"]), EV_KEYS)
+        self.assertEqual(board.hello()["ev"]["on"], 1)
+        if not ORIG["ev"]["on"]:
+            r = board.command("events 0", timeout=8)
+            self.assertEqual(r["ev"]["on"], 0)
+
+
+class T06SdProbe(BoardTest):
+    def test_sdprobe_r1(self):
+        for _ in range(5):
+            r = board.command("sdprobe")
+            if r["r1"] != -1:                              # -1: card mounted/busy, the probe was not sent
+                break
+            time.sleep(1.0)
+        self.assertIn(r["r1"], (1, 255), "CMD0 R1 should be 0x01 (card idle) or 0xFF (empty slot)")
+        self.assertIn(r["present"], (0, 1))
+
+
+class T07Mirror(BoardTest):
+    def test_mirror_regions_and_markers(self):
+        ack = board.command("mirror 1")
+        self.assertEqual((ack["mirror"], ack["w"], ack["h"]), (1, LCD_W, LCD_H))
+        idx = board.mark()
+        end = time.monotonic() + 10
+        while time.monotonic() < end:
+            lines = board.raw_since(idx)
+            if any(l.startswith(b"M ") for l in lines) and any(l.startswith(b"MF ") for l in lines):
+                break
+            time.sleep(0.25)
+        lines = board.raw_since(idx)
+        m = [l for l in lines if l.startswith(b"M ")]
+        mf = [l for l in lines if l.startswith(b"MF ")]
+        self.assertTrue(m, "no M region lines after mirror 1")
+        self.assertTrue(mf, "no MF frame markers after mirror 1")
+        self.assertAllValid(m + mf, "in the mirror stream")
+        seqs = [int(MF_RE.match(l).group(1)) for l in mf]
+        self.assertTrue(all(((b - a) & 0xFFFF) >= 1 for a, b in zip(seqs, seqs[1:])), "MF seq went backwards")
+        self.assertEqual(board.command("mirror 0")["mirror"], 0)
+        time.sleep(1.5)
+        late = [l for l in board.collect(2.0) if l.startswith((b"M ", b"MF "))]
+        self.assertEqual(late, [], "mirror lines kept coming after mirror 0")
+
+
+def walk_pages(dwell=0.0):
+    """Step the LCD once round every page available in this mode with `page next` (pausing `dwell` s on each)
+    and end on the page it started from. Uses only `next`: see test_page_prev_is_inverse_of_next for why."""
+    cycle = [board.command("page next")["page"]]
+    for _ in range(7):
+        time.sleep(dwell)
+        p = board.command("page next")["page"]
+        if p == cycle[0]:
+            break
+        cycle.append(p)
+    else:
+        raise AssertionError("page next never came back round: %s" % cycle)
+    for _ in cycle[1:]:                                    # from cycle[0] to cycle[-1], the starting page
+        board.command("page next")
+    return cycle
+
+
+class T08Page(BoardTest):
+    def test_page_next_cycles_and_restores(self):
+        cycle = walk_pages()
+        self.assertTrue(all(0 <= p < 6 for p in cycle), cycle)
+        self.assertEqual(len(set(cycle)), len(cycle), cycle)
+        self.assertIn(5, cycle, "the System page is always available")
+
+    def test_page_prev_is_inverse_of_next(self):
+        """`page prev` should step back to the previous *available* page. lcd_ui.cpp stepPage() calls
+        showPage(currentPage - 1), and showPage() skips unavailable pages by scanning *forward*, so when the page
+        before the current one is unavailable (Spectrum outside spec mode, Hunt with no hunt) prev lands on the
+        current page again and the LCD does not move."""
+        cycle = walk_pages()                               # leaves the LCD where it was
+        if len(cycle) < 2:
+            self.skipTest("only one page available in this mode")
+        start = cycle[-1]
+        results = []
+        for _ in cycle:                                    # try prev from every page in the cycle
+            here = board.command("page next")["page"]
+            back = board.command("page prev")["page"]
+            want = cycle[(cycle.index(here) - 1) % len(cycle)]
+            results.append((here, back, want))
+            p = back
+            while p != here:                               # re-sync onto `here` with next only
+                p = board.command("page next")["page"]
+        while board.command("page next")["page"] != start:   # back to the starting page
+            pass
+        wrong = [(h, b, w) for h, b, w in results if b != w]
+        self.assertEqual(wrong, [], "page prev went (from, to, expected): %s; cycle %s" % (wrong, cycle))
+
+
+class T09Soak(BoardTest):
+    """No truncated or malformed line in any mode (rule 6: lines are dropped whole, never cut)."""
+
+    def soak(self, mode, seconds, mirror=False):
+        board.set_band(mode)
+        if mirror:
+            board.command("mirror 1")
+        board.clear()
+        board.send("info")
+        time.sleep(seconds / 2)
+        board.send("info")
+        time.sleep(seconds / 2)
+        lines = board.raw_since(0)
+        board.clear()
+        if mirror:
+            board.command("mirror 0")
+        return lines
+
+    def test_every_line_parses_in_each_mode(self):
+        for mode in ("5g", "2.4g", "both", "ble", "154", "spec"):
+            with self.subTest(mode=mode):
+                lines = self.soak(mode, SOAK_S)
+                self.assertGreater(len(lines), 10, "almost nothing received in %s" % mode)
+                self.assertAllValid(lines, "during a %.0f s soak in %s" % (SOAK_S, mode))
+                ts = {l[6:9] for l in lines if l.startswith(b'{"t":"')}
+                self.assertIn(b'hel', ts)
+
+    def test_soak_with_mirror_in_spec(self):
+        """The heaviest serial load: the mirror on the fast-changing spectrum page."""
+        lines = self.soak("spec", max(10.0, SOAK_S / 2), mirror=True)
+        self.assertTrue(any(l.startswith(b"M ") for l in lines))
+        self.assertAllValid(lines, "with the mirror on in spec")
+
+
+class T10WifiChunks(BoardTest):
+    def test_w_chunks_at_most_24_rows(self):
+        board.set_band("2.4g")
+        idx = board.mark()
+        board.send("info")
+        time.sleep(12.0)
+        ws = board.json_since(idx, "w")
+        self.assertTrue(ws, "no w lines in 12 s")
+        for w in ws:
+            self.assertLessEqual(len(w["dev"]), WIFI_ROWS_PER_LINE)
+            macs = [r[0] for r in w["dev"]]
+            self.assertEqual(len(macs), len(set(macs)), "a MAC repeated inside one w line")
+            for r in w["dev"]:
+                self.assertEqual(len(r), 17)
+                self.assertRegex(r[0], MAC_RE)
+                self.assertRegex(r[16], r"^([0-9a-f]{6})?$")
+        print("\n  w lines: %d, max rows/line %d, distinct MACs %d"
+              % (len(ws), max(len(w["dev"]) for w in ws), len({r[0] for w in ws for r in w["dev"]})))
+
+
+class T99NoReboot(BoardTest):
+    def test_board_did_not_reboot(self):
+        h = board.hello()
+        self.assertGreaterEqual(h["up"], ORIG["up"], "uptime went backwards: the board rebooted during the run "
+                                                     "(rst=%s)" % h.get("rst"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -131,6 +131,9 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
   content lands on separate rows.
 
 ## Testing without the LCD
+Regression suite in `tests/` (`tests/README.md`): `tests/run_offline.sh` runs the host + firmware tiers (no board;
+the firmware tier compiles and gates static RAM); `BANDWATCH_PORT=<port> python3 -m unittest discover -s tests/device`
+runs the hardware tier against a live board (stop the host tool first).
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`,

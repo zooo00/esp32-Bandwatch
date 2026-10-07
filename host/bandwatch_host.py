@@ -399,7 +399,8 @@ class Bandwatch:
         self.screen_framed = False       # MF markers seen: publish at markers, not per region
         self.screen_m_since_mf = 0       # regions since the last marker (a long run means no markers any more)
         self.screen_complete = False     # the published frame is a clean, fully-repaired one
-        self.screen_stats = {"frames": 0, "complete": 0, "held": 0, "gaps": 0}
+        self.screen_stats = {"frames": 0, "complete_frames": 0, "held": 0, "gaps": 0}   # not "complete": that key is
+        # the published frame's flag in screen_status(), and **screen_stats there would overwrite it
         self.screen_mf_seq = None
         self.screen_lock = threading.Lock()
         self.cap_band = None
@@ -576,6 +577,11 @@ class Bandwatch:
             if raw.strip():
                 self.state["log"].append(raw.decode("utf-8", "replace")[:160])
             return
+        if not isinstance(msg, dict):
+            # Valid JSON but not an object (boot noise like a bare number): log it. Passing it on would raise
+            # in the except clause below (msg.get), out of handle_line, and end the serial session.
+            self.state["log"].append(raw.decode("utf-8", "replace")[:160])
+            return
         # A line that parses as JSON but has a field missing or the wrong shape must not escape to
         # reader(): an exception there drops the serial session and silently stops a running capture.
         try:
@@ -587,6 +593,8 @@ class Bandwatch:
         t = msg.get("t")
         st = self.state
         if t == "hello":
+            if not isinstance(msg.get("chs", []), list):   # before any state changes: snapshot() iterates chs
+                raise ValueError("chs is not a list")
             st["hello"] = msg
             # A hold of the BOOT button changes band on the device and switches capture off there; without
             # this the host would keep an open pcap that never grows again (hello is the only line we get).
@@ -802,7 +810,6 @@ class Bandwatch:
                 if d is None:
                     d = {"mac": mac, "first": now, "hist": deque(maxlen=DEV_HIST_LEN), "ssid": "", "sec": "", "phy": "",
                          "bw": None, "util": None, "stations": None, "cc": ""}
-                    self.wifi_devs[mac] = d
                 d["vendor"] = self.oui.lookup(mac)
                 # tier 2 = we heard it transmit; tier 1 = only ever seen as a frame destination (addr1)
                 dest_only = bool(flags & 4)
@@ -815,6 +822,9 @@ class Bandwatch:
                 if flags & 2:
                     d.update({"sec": sec_string(sec, pmf), "phy": phy_string(phy, ch), "bw": bw * 10 if bw else None,
                               "util": round(util * 100 / 255) if util else None, "stations": stations, "cc": cc})
+                # Insert only once the row parsed: a malformed row must not leave a half-built entry (no "last")
+                # that makes every later _expire()/snapshot() raise.
+                self.wifi_devs[mac] = d
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.wifi_devs, now)
@@ -900,7 +910,6 @@ class Bandwatch:
                 d = self.ble_devs.get(mac)
                 if d is None:
                     d = {"mac": mac, "first": now, "hist": deque(maxlen=DEV_HIST_LEN), "name": ""}
-                    self.ble_devs[mac] = d
                 random_addr = bool(atype) or bool(int(mac[0:2], 16) & 0x02)
                 vendor = BLE_COMPANY.get(company) or ("" if random_addr else self.oui.lookup(mac))
                 kinds = []
@@ -918,6 +927,7 @@ class Bandwatch:
                           "connectable": bool(flags & 1), "legacy": bool(flags & 2), "kind": ", ".join(dict.fromkeys(kinds)),
                           "surv": SURV_CAT.get(bsurv, ""), "surv_kind": SURV_KIND.get(bsurv, ""),
                           "tier": 2 if bsurv else 0})
+                self.ble_devs[mac] = d   # only once the row parsed (see merge_wifi)
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.ble_devs, now)
@@ -933,7 +943,6 @@ class Bandwatch:
                 d = self.z_devs.get(key)
                 if d is None:
                     d = {"key": key, "first": now, "hist": deque(maxlen=DEV_HIST_LEN)}
-                    self.z_devs[key] = d
                 ext = bool(flags & 1)
                 d.update({"rssi": rssi, "max": mx, "frames": frames, "last": now - age / 1000.0, "ch": ch,
                           "pan": None if pan == 0xFFFF else f"{pan:04x}", "short": None if short == 0xFFFF else f"{short:04x}",
@@ -941,6 +950,7 @@ class Bandwatch:
                           "proto": PROTO_154.get(proto, "?"), "proto_id": proto,
                           "beacons": bool(flags & 2), "permit_join": bool(flags & 4), "mac_secured": bool(flags & 8),
                           "data": bool(flags & 16), "lqi": lqi})
+                self.z_devs[key] = d     # only once the row parsed (see merge_wifi)
                 if age < 4000 and (not d["hist"] or now - d["hist"][-1][0] >= 1.5):
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.z_devs, now)
@@ -1234,7 +1244,7 @@ class Bandwatch:
             # back, unless nothing has been published for MIRROR_HOLD_S - a page that changes faster than the
             # link can carry would otherwise freeze; it then shows the best frame available, as before.
             if complete:
-                st["complete"] += 1
+                st["complete_frames"] += 1
                 self._publish_screen(now, complete=True)
             elif now - self.screen_pub_t >= MIRROR_HOLD_S:
                 self._publish_screen(now, complete=False)
@@ -1480,7 +1490,7 @@ def make_handler(bw, classic_path, v2_path=None, ui="v2"):
                     # accept either and normalize to "/name". "sdread /" is 8 chars and the device's line buffer
                     # holds 47, so the name must be <= 39 or its last char is silently dropped on the way in.
                     # Besides the pcaps, the C4 event-log files can be pulled (fixed names, all well under 39).
-                    if (re.match(r"^bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name)
+                    if (re.match(r"^bandwatch-(?:wifi|ble|802154)-[^\s/\\]+\.pcap$", name)
                             or name in CARD_TEXT_FILES) and len(name) <= 39:
                         bw.send(f"sdread /{name}")
                     else:

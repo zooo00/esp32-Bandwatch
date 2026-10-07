@@ -38,6 +38,11 @@ records what `send()` would write), feeds it protocol lines through `handle_line
   (download + traversal), and every `/api/cmd` mapped to its exact device string; bad input (bad MACs, newline
   injection, unknown values, `sdread` names outside `CARD_TEXT_FILES` / the pcap pattern, path traversal, > 39
   chars) answered 400 with nothing sent.
+- `test_sdrm.py`: deleting a card file - `card_file_name()` (the guard `sdread` and `sdrm` share: pcaps and
+  `CARD_TEXT_FILES` incl. `seen.old.csv`, 39-char edge; traversal, nested paths, `//`, 40 chars, other files,
+  non-strings rejected), `POST sdrm` mapping and 400s, the `sdrm` ack (ok drops the file from the cached listing,
+  lowers `file_total`, re-sends `sdls`; ok 0 keeps it), `sdrm: ...` refusal err lines, the pulled local copy left
+  alone, and a failed `sdread` reporting `failed` so the dashboard stops showing progress.
 
 ## 2. Firmware (`tests/firmware/`) - offline, no board
 
@@ -65,12 +70,14 @@ and in spec (the `fd` MHz stays on the parked channel's centre bin, `fs` pauses)
 lines, refusal in spec; `cap 1` + `sdcap 1` while walking every LCD page keeps free heap >= 24 kB (skipped
 without a card); `events 1` ack shape and `{"t":"ev"}`; `sdprobe` R1 in {1, 255}; `mirror 1` `M` + `MF` lines,
 silence after `mirror 0`; `page next` cycle and `page prev`; a soak per mode (plus spec with the mirror on) where
-every line must be well-formed JSON or a valid `P`/`S`/`M`/`MF` line; `w` chunks of at most 24 rows; and no
-reboot during the run.
+every line must be well-formed JSON or a valid `P`/`S`/`M`/`MF` line; `w` chunks of at most 24 rows; `sdrm` (bad
+names refused before the card is touched; with a card: a short `sdcap` pcap found by `sdls`, deleted, gone from
+the next `sdls`, a second delete answers `no such file`; deleting the file being recorded is refused and the
+recording keeps running); and no reboot during the run.
 
 Every test restores what it changed (band, park, USB/SD capture, mirror, event log) against the hello read at the
-start. Side effects that remain: a band change also selects an LCD page, and the `sdcap` test leaves one small
-pcap on the card.
+start. Side effects that remain: a band change also selects an LCD page, and the `sdcap` heap test leaves one small
+pcap on the card (the `sdrm` tests delete their own).
 
 ## Host fixes made alongside these tests
 

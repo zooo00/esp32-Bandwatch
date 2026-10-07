@@ -417,7 +417,7 @@ screen. Open items:
 
 ---
 
-## 1.9 — dashboard v2 (shipped, now the default)
+## 1.9 — dashboard v2 (shipped; classic retired in v1.19)
 
 `dashboard2.html`: controls grouped into a sticky left rail, one scrolling column instead of five tabs, the active
 radio's device table open while the other two fold into "last seen" caches, and hunt/deauth sharing a single action
@@ -427,8 +427,9 @@ files stream back over serial (`sdread`) and become downloadable from the new UI
 
 Open items:
 
-- ~~**Promote it.**~~ Done: v2 is the default at `/` (`--ui` defaults to `v2`); classic stays at `/classic`
-  (`--ui classic` restores it at `/`) until the remaining parity gaps are closed and it can be dropped.
+- ~~**Promote it.**~~ Done: v2 is the default at `/`.
+- ~~**Retire classic.**~~ Done in v1.19: `host/dashboard.html` and `host/run-v2.sh` removed (git tag `v1.18.2` has
+  the last copy), `/classic` 301-redirects to `/`, `--ui` is accepted and ignored.
 - **SD pull still stops at download.** One step away from opening the pulled pcap in Wireshark directly; a tiny
   "open" affordance or an in‑page frame counter would close that gap.
 

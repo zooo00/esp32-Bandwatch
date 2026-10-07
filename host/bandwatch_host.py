@@ -1015,12 +1015,14 @@ class Bandwatch:
         with self.dlock:
             self.spec_explained.clear()
 
-    def _spec_analyze(self):
+    def _spec_analyze(self, remember=True):
         """Classify every 2.4 GHz energy bin carrying sustained power by the specific device that accounts for
         it (wifi/ble/zigbee), or 'unexplained'. A live decode (device seen < SPEC_KNOWN_AGE_S) writes a sticky
         entry per frequency; between scans a bin falls back to its sticky entry, flagged with its age, until a
         newer decode overwrites it or the user clears it. Returns {unidentified, cls:{mhz:source},
-        expl:{mhz:device}, age:{mhz:seconds}} - age 0 = live, >0 = cached. 'unexplained' is evidence, not an id."""
+        expl:{mhz:device}, age:{mhz:seconds}} - age 0 = live, >0 = cached. 'unexplained' is evidence, not an id.
+        remember=False (outside spec mode: the energy is a cached sweep) classifies read-only - it never writes
+        sticky entries, so stale energy cannot extend the remembered explanations."""
         now = time.time()
         spans = self._spec_known_spans(now)
         # Snapshot the per-bin history and the sticky map under the lock (the reader thread appends to the
@@ -1053,7 +1055,7 @@ class Bandwatch:
             else:
                 cls[mhz] = "unexplained"
                 unid.append({"freq_mhz": mhz, "peak_dbm": peak, "floor_dbm": floor, "duty": round(duty, 2)})
-        if new_sticky:
+        if new_sticky and remember:
             with self.dlock:
                 self.spec_explained.update(new_sticky)
         unid.sort(key=lambda e: e["peak_dbm"], reverse=True)
@@ -1306,8 +1308,10 @@ class Bandwatch:
         st = self.state
         now = time.time()
         # Analyze the spectrum once per snapshot: the unexplained list and the per-bin {mhz: source} map both
-        # come from it, so the bar colours and the table agree.
-        spec_analysis = self._spec_analyze() if st["band"] == "spec" else {"unidentified": [], "cls": {}, "expl": {}, "age": {}}
+        # come from it, so the bar colours and the table agree. Outside spec mode this runs on the cached sweep
+        # history (read-only, see remember) so the dashboards can show the last unexplained count in any mode;
+        # it is a few thousand samples at most (<= 84 bins x SPEC_HIST_LEN) and returns early with no history.
+        spec_analysis = self._spec_analyze(remember=st["band"] == "spec")
         spec_cls, spec_expl, spec_age = spec_analysis["cls"], spec_analysis["expl"], spec_analysis["age"]
         chans = [dict(ch=c, **st["channels"].get(c, {})) for c in st["chs"]]
         with self.dlock:

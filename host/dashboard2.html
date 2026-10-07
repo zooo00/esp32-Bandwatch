@@ -142,6 +142,9 @@
   #zoneSpec { display: grid; gap: 14px; align-content: start; min-width: 0; }
   #zoneSpec[hidden] { display: none; }   /* an id's display:grid overrides [hidden]'s display:none - restore it */
 
+  /* last-known data shown outside the mode that produces it */
+  .stalenote { margin: 4px 0 8px; color: var(--warning); font-size: 12.5px; }
+  .card.cached svg, .card.cached table { opacity: .6; }
   .logcard summary { cursor: pointer; font-weight: 650; font-size: 14.5px; }
   .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--page); border-radius: 8px; padding: 10px 13px; margin-top: 9px; max-height: min(320px, 40vh); overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
 
@@ -279,6 +282,7 @@
 
       <section class="card" id="zoneProbe" hidden>
         <h2>Networks being sought <small>directed probe requests: clients naming a network they want to join · last 15 min</small></h2>
+        <p class="note stalenote" id="probeStale" hidden></p>
         <div style="overflow-x:auto"><table id="probeTbl"><thead><tr>
           <th class="l">Network (SSID)</th><th>Clients asking</th><th class="l">Of which</th><th>Strongest</th><th>Last asked</th>
         </tr></thead><tbody></tbody></table></div>
@@ -1087,8 +1091,13 @@
 
   // C1: networks clients are asking for. Grouped by SSID because most phones randomize the MAC per probe burst;
   // "nearby" means an AP beaconing that SSID is in the device table right now.
-  function renderProbes(s) {
+  function renderProbes(s, live) {
     const groups = s.probes || [];
+    const newest = groups.length ? Math.min(...groups.map(g => g.age == null ? Infinity : g.age)) : null;
+    const st = $('#probeStale');
+    st.hidden = live;
+    if (!live) st.textContent = `cached — last heard ${newest == null || newest === Infinity ? 'a while' : ago(newest)} ago · switch Mode to a Wi‑Fi band to refresh`;
+    $('#zoneProbe').classList.toggle('cached', !live);
     const tb = $('#probeTbl tbody');
     tb.innerHTML = groups.length ? groups.map(g => `<tr><td class="l"><b>${esc(g.ssid)}</b>${g.nearby_ap ? ' <span class="sub">· AP nearby</span>' : ''}</td>
       <td>${g.macs}</td><td class="l"><span class="sub">${g.random === g.macs ? 'all randomized MACs' : `${g.random} randomized`}${g.sample.length ? ' · ' + g.sample.map(x => `<span class="mono">${x.mac}</span>${x.vendor ? ' ' + esc(x.vendor) : ''}`).join(', ') : ''}</span></td>
@@ -1183,8 +1192,10 @@
     const hop = ['5g', '2.4g', 'both', '154'].includes(s.band);
     $('#zoneHopBars').hidden = !hop;  $('#zoneTrend').hidden = !hop;
     const wifiBand = ['5g', '2.4g', 'both'].includes(s.band);
-    $('#zoneProbe').hidden = !wifiBand;
-    if (wifiBand) renderProbes(s);
+    // Probe groups are kept 15 min by the host, so outside the Wi-Fi bands they are still worth showing - as a cache.
+    const probesShown = wifiBand || (s.probes || []).length > 0;
+    $('#zoneProbe').hidden = !probesShown;
+    if (probesShown) renderProbes(s, wifiBand);
     $('#zoneBle').hidden = s.band !== 'ble';
     $('#zoneSpec').hidden = s.band !== 'spec';
     $('#chCard').hidden = !hop;

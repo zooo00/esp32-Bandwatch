@@ -4,8 +4,9 @@
 > 1.15.3 — see `CLAUDE.md` history and `DEVELOPER.md` §16. Two corrections from review: F1's suggested
 > `releaseCapture()` would also close the SD file and stop USB capture (shipped as `refitCapRing()` instead), and
 > F3's Wi-Fi bump to 140 would exceed the 8 KB TX buffer at 64 rows (left at 126). F3's "drops whole" is also
-> wrong: an under-budget line truncates mid-write. Remaining items (the ~45 kB Channels page, other F6
-> candidates) are in `ROADMAP.md` under *Memory budget*.
+> wrong: an under-budget line truncates mid-write. v1.15.4 then custom-drew the Channels page (+50 kB
+> on that page) and added page-switch headroom to the ring sizing; the rest of F6 is parked in `ROADMAP.md` under
+> *Memory budget*.
 
 Audit of the firmware (`bandwatch/`) plus host tool, focused on memory leaks and RAM savings. All findings are
 **verified against commit `c0b2bd7` (v1.15.2)** on a plugged-in Waveshare ESP32-C5-LCD-1.47; no fixes implemented yet.

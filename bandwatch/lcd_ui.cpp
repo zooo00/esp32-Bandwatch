@@ -53,6 +53,7 @@ constexpr RgbColor LED_WHITE  = {210, 210, 210}; // both sinks at once
 
 // UI objects
 lv_obj_t* pages[PAGE_COUNT] = {nullptr};
+uint32_t pageCostB[PAGE_COUNT] = {0};   // heap each page took to build, largest seen (lcdPageHeadroomB)
 // overview
 lv_obj_t* chanLabel = nullptr;
 lv_obj_t* globalBar = nullptr;
@@ -68,11 +69,16 @@ lv_obj_t* statsLine2 = nullptr;
 lv_obj_t* footLabel = nullptr;
 // channels
 lv_obj_t* listChanLabel = nullptr;
-constexpr int kListSlots = 39;   // 3 columns x 13 rows
-lv_obj_t* listRow[kListSlots] = {nullptr};
-lv_obj_t* listName[kListSlots] = {nullptr};
-lv_obj_t* listBar[kListSlots] = {nullptr};
-lv_obj_t* listVal[kListSlots] = {nullptr};
+// Channels grid: one custom-drawn object, not 39 rows x (row + 2 labels + bar). As widgets the page cost
+// ~156 LVGL objects - by far the heaviest page (docs/DEVELOPER.md §16). refreshChannels() fills this snapshot
+// and invalidates only the cells that changed; chanGridDraw() paints them from it.
+constexpr int kChanCols = 3, kChanRowsPerCol = 13, kChanColW = 53, kChanColGap = 2, kChanRowH = 20;
+constexpr int kListSlots = kChanCols * kChanRowsPerCol;   // 39
+enum : uint8_t { CELL_DATA = 0, CELL_NODATA = 1, CELL_UNAVAIL = 2, CELL_CURRENT = 0x80 };
+struct ChanCell { uint8_t ch; uint8_t val; uint8_t state; };   // state: CELL_* | CELL_CURRENT
+lv_obj_t* chanGrid = nullptr;
+ChanCell chanCells[kListSlots];
+int chanCellCount = 0;
 lv_obj_t* listFoot = nullptr;
 // devices
 lv_obj_t* devHdrRight = nullptr;
@@ -318,34 +324,83 @@ void buildOverviewPage(lv_obj_t* page) {
     lv_obj_set_style_text_align(footLabel, LV_TEXT_ALIGN_CENTER, 0);
 }
 
+// lv_area_intersect() is private API in LVGL 9.3 (lv_area_private.h); this is the same few lines.
+bool areaIntersect(lv_area_t& out, const lv_area_t& a, const lv_area_t& b) {
+    out.x1 = LV_MAX(a.x1, b.x1); out.y1 = LV_MAX(a.y1, b.y1);
+    out.x2 = LV_MIN(a.x2, b.x2); out.y2 = LV_MIN(a.y2, b.y2);
+    return out.x1 <= out.x2 && out.y1 <= out.y2;
+}
+
+void chanCellArea(int slot, lv_area_t& a) {
+    lv_obj_get_coords(chanGrid, &a);
+    const int32_t x = a.x1 + (slot / kChanRowsPerCol) * (kChanColW + kChanColGap);
+    const int32_t y = a.y1 + (slot % kChanRowsPerCol) * kChanRowH;
+    a.x1 = x; a.y1 = y; a.x2 = x + kChanColW - 1; a.y2 = y + kChanRowH - 1;
+}
+
+// One text run clipped to its box, the way LV_LABEL_LONG_CLIP kept "165"/"100" inside their columns:
+// the draw task records the layer's clip area when it is created, so narrow it just for this call.
+void drawClippedText(lv_layer_t* layer, lv_draw_label_dsc_t& l, const lv_area_t& box) {
+    const lv_area_t saved = layer->_clip_area;
+    lv_area_t clip;
+    if (areaIntersect(clip, saved, box)) {
+        layer->_clip_area = clip;
+        lv_draw_label(layer, &l, &box);
+    }
+    layer->_clip_area = saved;
+}
+
+// Same geometry as the old widget rows: name 20 px right-aligned, 2 px, bar 11x8, 2 px, value 18 px.
+void chanGridDraw(lv_event_t* e) {
+    lv_layer_t* layer = lv_event_get_layer(e);
+    const lv_font_t* font = &lv_font_montserrat_12;
+    const int32_t ty = (kChanRowH - lv_font_get_line_height(font)) / 2;
+    for (int i = 0; i < chanCellCount; i++) {
+        lv_area_t cell, tmp;
+        chanCellArea(i, cell);
+        if (!areaIntersect(tmp, cell, layer->_clip_area)) continue;   // only repaint what is dirty
+        const ChanCell& c = chanCells[i];
+        const uint8_t st = c.state & ~CELL_CURRENT;
+        char num[4], val[4];
+
+        lv_draw_label_dsc_t l;
+        lv_draw_label_dsc_init(&l);
+        l.font = font;
+        l.text_local = 1;   // draw tasks run later: copy the stack buffer
+        snprintf(num, sizeof(num), "%u", c.ch);
+        l.text = num;
+        l.align = LV_TEXT_ALIGN_RIGHT;
+        l.color = (c.state & CELL_CURRENT) ? c565(CYAN_565) : st == CELL_UNAVAIL ? c565(GREY_565) : c565(WHITE_565);
+        drawClippedText(layer, l, lv_area_t{cell.x1, cell.y1 + ty, cell.x1 + 19, cell.y2 - ty});
+
+        lv_draw_rect_dsc_t r;
+        lv_draw_rect_dsc_init(&r);
+        r.radius = 2;
+        r.bg_color = c565(BLACK_565);
+        r.bg_opa = LV_OPA_30;
+        lv_area_t bar{cell.x1 + 22, cell.y1 + 6, cell.x1 + 32, cell.y1 + 13};
+        lv_draw_rect(layer, &r, &bar);
+        const int fill = (st == CELL_DATA) ? (11 * c.val + 50) / 100 : 0;
+        if (fill > 0) {
+            r.bg_color = scoreColor(c.val);
+            r.bg_opa = LV_OPA_COVER;
+            bar.x2 = bar.x1 + fill - 1;
+            lv_draw_rect(layer, &r, &bar);
+        }
+
+        snprintf(val, sizeof(val), "%u", c.val);
+        l.text = st == CELL_UNAVAIL ? "x" : st == CELL_NODATA ? "-" : val;
+        l.align = LV_TEXT_ALIGN_LEFT;
+        l.color = c565(GREY_565);
+        drawClippedText(layer, l, lv_area_t{cell.x1 + 35, cell.y1 + ty, cell.x2, cell.y2 - ty});
+    }
+}
+
 void buildChannelsPage(lv_obj_t* page) {
     make_header(page, "Channels", &listChanLabel);
-    lv_obj_t* grid = make_panel(page, 262, BG_565, 0);
-    lv_obj_set_flex_flow(grid, LV_FLEX_FLOW_ROW);
-    lv_obj_set_style_pad_column(grid, 2, 0);
-    lv_obj_t* cols[3];
-    for (int c = 0; c < 3; c++) {
-        cols[c] = lv_obj_create(grid);
-        lv_obj_set_size(cols[c], 53, LV_PCT(100));
-        lv_obj_set_style_bg_opa(cols[c], LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_width(cols[c], 0, 0);
-        lv_obj_set_style_pad_all(cols[c], 0, 0);
-        lv_obj_set_style_pad_row(cols[c], 0, 0);
-        lv_obj_set_flex_flow(cols[c], LV_FLEX_FLOW_COLUMN);
-        lv_obj_remove_flag(cols[c], LV_OBJ_FLAG_SCROLLABLE);
-    }
-    for (int i = 0; i < kListSlots; i++) {
-        lv_obj_t* row = make_row(cols[i / 13], 20, 2);
-        listRow[i] = row;
-        listName[i] = make_label(row, "", c565(WHITE_565), &lv_font_montserrat_12);
-        lv_obj_set_width(listName[i], 20);
-        lv_obj_set_style_text_align(listName[i], LV_TEXT_ALIGN_RIGHT, 0);
-        lv_label_set_long_mode(listName[i], LV_LABEL_LONG_CLIP);   // "165" just fits; no wrapping into the next row
-        listBar[i] = make_bar(row, 11, 8);
-        listVal[i] = make_label(row, "-", c565(GREY_565), &lv_font_montserrat_12);
-        lv_obj_set_width(listVal[i], 18);   // a maxed "100" is ~22 px: CLIP keeps it inside its column
-        lv_label_set_long_mode(listVal[i], LV_LABEL_LONG_CLIP);
-    }
+    chanGrid = make_panel(page, 262, BG_565, 0);
+    lv_obj_add_event_cb(chanGrid, chanGridDraw, LV_EVENT_DRAW_MAIN_END, nullptr);
+    chanCellCount = 0;   // a fresh page is wholly dirty; the first refresh fills every cell
     listFoot = make_label(page, "", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(listFoot, LV_PCT(100));
     lv_obj_set_style_text_align(listFoot, LV_TEXT_ALIGN_CENTER, 0);
@@ -479,6 +534,7 @@ void showPage(int n) {
         if (pages[i]) { lv_obj_delete(pages[i]); pages[i] = nullptr; }
     }
     currentPage = n;
+    const uint32_t before = ESP.getFreeHeap();
     lv_obj_t* pg = make_page(lv_scr_act());
     pages[n] = pg;
     switch (n) {
@@ -489,6 +545,24 @@ void showPage(int n) {
         case PAGE_HUNT:     buildHuntPage(pg); break;
         default:            buildSystemPage(pg); break;
     }
+    // Keep the largest build cost seen per page (radio tasks allocating mid-build only push it up, which errs
+    // safe). lcdPageHeadroomB() turns it into the reserve the capture ring must leave for a page switch.
+    const uint32_t after = ESP.getFreeHeap();
+    if (before > after && before - after > pageCostB[n]) {
+        pageCostB[n] = before - after;
+        if (serialRoom(80))
+            Serial.printf("{\"t\":\"log\",\"msg\":\"page %d build cost %lu B\"}\n", n, static_cast<unsigned long>(pageCostB[n]));
+    }
+}
+
+// Heap a switch from the visible page to the heaviest page available in this mode would take. The capture ring
+// leaves this on top of kMinFreeHeapB (capture.cpp), or starting a capture on a light page (Channels, System)
+// and stepping to Overview lands under the floor - measured 16.4 kB in 1.15.3 before this existed.
+uint32_t lcdPageHeadroomB() {
+    uint32_t worst = 0;
+    for (int i = 0; i < PAGE_COUNT; i++) if (pageAvailable(i) && pageCostB[i] > worst) worst = pageCostB[i];
+    const uint32_t cur = pages[currentPage] ? pageCostB[currentPage] : 0;
+    return worst > cur ? worst - cur : 0;
 }
 
 // --- Live LCD mirror pacing ---------------------------------------------------------------------
@@ -701,29 +775,25 @@ void refreshChannels(float global) {
     lv_label_set_text(listChanLabel, buf);
     applyRecColor(listChanLabel);
     int slot = 0;
+    lv_area_t a;
     for (int i = 0; i < kChannelCount && slot < kListSlots; i++) {
         if (!chanEnabled(i)) continue;
         const ChannelState& ch = channels[i];
-        lv_obj_remove_flag(listRow[slot], LV_OBJ_FLAG_HIDDEN);
-        snprintf(buf, sizeof(buf), "%u", kChannels[i]);
-        lv_label_set_text(listName[slot], buf);
-        lv_obj_set_style_text_color(listName[slot], (i == currentIdx && monitorReady) ? c565(CYAN_565)
-                                                    : ch.unavailable ? c565(GREY_565) : c565(WHITE_565), 0);
-        if (ch.unavailable) {
-            lv_label_set_text(listVal[slot], "x");
-            lv_bar_set_value(listBar[slot], 0, LV_ANIM_OFF);
-        } else if (!ch.hasData) {
-            lv_label_set_text(listVal[slot], "-");
-            lv_bar_set_value(listBar[slot], 0, LV_ANIM_OFF);
-        } else {
-            snprintf(buf, sizeof(buf), "%.0f", ch.busyEma);
-            lv_label_set_text(listVal[slot], buf);
-            lv_bar_set_value(listBar[slot], static_cast<int>(ch.busyEma + 0.5f), LV_ANIM_OFF);
-            lv_obj_set_style_bg_color(listBar[slot], scoreColor(ch.busyEma), LV_PART_INDICATOR);
+        ChanCell c{kChannels[i], 0, CELL_DATA};
+        if (ch.unavailable) c.state = CELL_UNAVAIL;
+        else if (!ch.hasData) c.state = CELL_NODATA;
+        else c.val = static_cast<uint8_t>(ch.busyEma + 0.5f);
+        if (i == currentIdx && monitorReady) c.state |= CELL_CURRENT;
+        const ChanCell& old = chanCells[slot];
+        if (slot >= chanCellCount || old.ch != c.ch || old.val != c.val || old.state != c.state) {
+            chanCells[slot] = c;
+            chanCellArea(slot, a);
+            lv_obj_invalidate_area(chanGrid, &a);
         }
         slot++;
     }
-    for (; slot < kListSlots; slot++) lv_obj_add_flag(listRow[slot], LV_OBJ_FLAG_HIDDEN);
+    for (int i = slot; i < chanCellCount; i++) { chanCellArea(i, a); lv_obj_invalidate_area(chanGrid, &a); }   // rows gone
+    chanCellCount = slot;
     const bool is154 = mode154();   // "APs" is Wi-Fi-only; show live node count in 802.15.4
     snprintf(buf, sizeof(buf), "max %.0f  sweep %lu  %s %u", global, static_cast<unsigned long>(sweepCount),
              is154 ? "nodes" : "APs", is154 ? static_cast<unsigned>(collect154Refs(g_devRefs, kDev154Slots, kDevLcdFreshMs)) : lastApSeen);

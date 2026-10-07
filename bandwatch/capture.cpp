@@ -34,9 +34,11 @@ bool ensureCapRing() {
     const uint32_t freeHeap = ESP.getMaxAllocHeap();
     int slots = (freeHeap > kCapHeapReserve) ? static_cast<int>((freeHeap - kCapHeapReserve) / sizeof(CapFrame)) : 0;
     if (slots > kCapSlotsMax) slots = kCapSlotsMax;
-    // Also leave the floor below standing: a smaller ring beats refusing outright when heap is tight.
+    // Also leave the floor below standing - plus what stepping to the heaviest LCD page would take, or a
+    // capture started on a light page goes under it on the next BOOT tap. A smaller ring beats refusing.
     const uint32_t totalFree = ESP.getFreeHeap();
-    const int floorSlots = (totalFree > kMinFreeHeapB) ? static_cast<int>((totalFree - kMinFreeHeapB) / sizeof(CapFrame)) : 0;
+    const uint32_t keep = kMinFreeHeapB + lcdPageHeadroomB();
+    const int floorSlots = (totalFree > keep) ? static_cast<int>((totalFree - keep) / sizeof(CapFrame)) : 0;
     if (slots > floorSlots) slots = floorSlots;
     if (slots >= kCapSlotsMin) {
         capRing = static_cast<CapFrame*>(malloc(sizeof(CapFrame) * slots));
@@ -90,7 +92,7 @@ void releaseCapture() {
 // than sit below kMinFreeHeapB. Both sinks stay enabled; the frames still in the old ring are lost. On
 // failure the whole capture is released (USB sink included) and false returned.
 bool refitCapRing() {
-    if (!capRing || ESP.getFreeHeap() >= kMinFreeHeapB) return ensureCapRing();
+    if (!capRing || ESP.getFreeHeap() >= kMinFreeHeapB + lcdPageHeadroomB()) return ensureCapRing();
     const uint32_t before = ESP.getFreeHeap();
     capActive = false;
     freeCapRing();

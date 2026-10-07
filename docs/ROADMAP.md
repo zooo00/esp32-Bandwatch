@@ -1,7 +1,7 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.12** (boot photos - an LCD nicety, no candidate
-features moved). Batch one shipped in v1.11 (C3 + C6 + C8); C1/C2/C4/C5/C7/C9/C10/C11 still candidates, C12 the exit
+Planned work, open questions and known gaps. Current release: **v1.15.4** (v1.12 boot photos, v1.13-1.14 LCD mirror,
+v1.15.x review/dashboard passes and the 2026-10 RAM audit - none moved a candidate). Batch one shipped in v1.11 (C3 + C6 + C8); C1/C2/C4/C5/C7/C9/C10/C11 still candidates, C12 the exit
 ramp.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
@@ -9,7 +9,7 @@ with its numbers; anything assumed is labelled as such.
 
 ---
 
-## 1.11 — candidate features (draft)
+## Candidate features (C1-C12)
 
 Twelve candidates collected for analysis. They are independent unless noted, and each is sized to ship
 as its own release or in small batches. Written so an analyst who has not seen the code can evaluate:
@@ -18,7 +18,7 @@ of being assumed.
 
 **How to analyze.** Rank by value-for-effort against this project's identity (portable Wi‑Fi/BLE/15.4
 surveillance + interference tool; one time-shared radio). Check the RAM math in the preamble — static
-headroom is thin now. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
+is ~6 kB under the line since v1.11, and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
 `merge_*` in `bandwatch_host.py` ↔ the §4 table in DEVELOPER.md); UI-only candidates skip that cost.
 The quick hits (C6–C11) are cheap enough to batch; the big ones each justify their own release.
 
@@ -30,19 +30,24 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   LCD pages, `sendHello`'s `chs`, dashboard buttons (checklist in DEVELOPER §6).
 - **RAM is the constraint.** No PSRAM; statics and heap share ~320 kB DRAM. Static usage: v1.10 was
   **80,544 B** (over the round "well under ~80 kB" line, CLAUDE.md rule 4); the v1.11 reclaim pass (smaller
-  LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to **74,480 B**. Free heap at runtime: Wi‑Fi idle ≈83 kB, BLE ≈95 kB, SD capture (tightest) **31.9 kB**;
-  `ensureCapRing()` refuses a ring that leaves < `kMinFreeHeapB` = 24 kB total free. `WifiDev` is packed to
-  exactly 64 B behind a `static_assert` (`devices.h`) and lives in two 64-slot arrays, so +1 byte of *padding*
-  can cost 512 B static. For reference: `BleDev` ≈56 B × 48 slots (hand-computed — add a static_assert before
-  relying on it), `Dev154` = 24 B × 48, `CapFrame` = 1,610 B × up to 20.
+  LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to 74,480 B, and
+  v1.15.4 to **74,032 B**. Free heap at runtime (`both`, v1.15.4) depends on the LCD page: Overview ≈87.6 kB
+  (now the heaviest), Devices ≈91, System ≈102, Channels ≈106; BLE ≈88 kB. USB + SD capture bottoms out at
+  **~30.8 kB** on any page: `ensureCapRing()` sizes the ring to leave `kMinFreeHeapB` = 24 kB *plus*
+  `lcdPageHeadroomB()` (the step to the heaviest page), and `sdcap` re-fits a ring `cap 1` made before the
+  FATFS mount (`refitCapRing()`). `WifiDev` is packed to exactly 64 B behind a `static_assert` (`devices.h`) in
+  one 64-slot array, so +1 byte of *padding* costs 256 B static. For reference: `BleDev` = 56 B × 48 slots
+  (measured from the ELF; no static_assert yet), `Dev154` = 24 B × 48, `CapFrame` = 1,610 B × 4-20.
 - **Three contexts + one ISR.** Loop task (LVGL timer + `Bandwatch_Loop`, ~2 ms cadence), Wi‑Fi task
   (`promiscuousCb` in `wifi_sniff.cpp`), NimBLE host task (`bleGapEvent` in `ble_scan.cpp`), and the 802.15.4
   true ISR. Radio paths are `IRAM_ATTR`, spinlocked, no heap / no Serial. SD writes and capture draining run
   on the loop task only — a radio-side event must flag-then-drain (existing pattern: `s_edReady` in
   `ieee154.cpp`, `bleScan.activeUntilMs`).
 - **Serial never blocks.** 8 kB TX buffer, `setTxTimeoutMs(0)`, every line checks `serialRoom()` and is
-  dropped whole. Current budgets: hello 900 (measured), dwell 380, sweep 1500 (fine-spectrum up to ~1.7 kB),
-  Wi‑Fi device rows `40 + n·126` (a full 64-device table ≈ 7–8 kB of the buffer). New per-line fields grow these.
+  dropped whole *if its budget is honest* - a line that passes the check and then outgrows its budget is
+  truncated mid-JSON. Current budgets: hello 900 (measured), dwell 420, sweep 1500, fine-spectrum `fs`
+  80 + 22/bin (~1.9 kB at 1 MHz), device rows Wi‑Fi `40 + n·126` (the 8 kB ceiling at 64 rows - do not raise),
+  BLE `40 + n·116`, 15.4 `40 + n·80`. New per-line fields grow these.
 - **No RTC.** Timestamps come from the host's `time <epoch>`; without it, uptime-based times and counter-named
   files. Anything persisting to SD inherits this.
 - **Anything that transmits needs a dead-man's switch** (`kDeauthMaxMs` = 5 min auto-stop) — there is no other
@@ -286,7 +291,7 @@ layout pass measured font widths for this page — verify it fits). Edge case: t
 
 **What.** Two small knobs for the attack: (a) **rate** — frames-per-tick is hardcoded to 4 in `serviceDeauth()`
 (~33/s); a `deauthrate <1..16>` command makes both polite and aggressive reachable. (b) **auto-stop on handshake** —
-count key-management frames (`fc0 & 0xF0 == 0xB0`) while the attack runs; stop after N of them (default e.g. 4, or the
+count EAPOL frames - data frames (`(fc0 & 0x0C) == 0x08`) whose LLC/SNAP header carries ethertype `0x888E`; `fc0 & 0xF0 == 0xB0` is the *Authentication* management subtype, not EAPOL - while the attack runs; stop after N of them (default e.g. 4, or the
 first one naming our target in `dca` mode). The README's "catch WPA2 handshakes" loop closes itself: the attack stops
 when it got what it was for.
 
@@ -332,9 +337,9 @@ Not a feature: the migration that unlocks features the pinned Arduino core canno
 offsets stop being pinned to one exact core build — though they still need re-deriving, which is part of the cost. **What you lose:**
 arduino-cli + the ctags wrapper simplicity (`setup.sh`, rule 12), the LVGL Arduino glue, and a known-good prebuilt blob.
 **When it pays off:** when extended-adv-only environments (certain wearables/tags) matter more than build friction — i.e. after
-C1–C11 are done and BLE coverage is the wall left. Everything else ships inside the current core; list this as the exit ramp, not 1.11.
+C1–C11 are done and BLE coverage is the wall left. Everything else ships inside the current core; list this as the exit ramp, not a feature release.
 
-**Suggested sequencing (to be argued with).** Batch one: **C3 + C6 + C8** — all small, no transmit duty, protocol cost
+**Suggested sequencing (to be argued with).** Batch one (**C3 + C6 + C8**) shipped in v1.11 — all small, no transmit duty, protocol cost
 limited to a dwell field; banks RAM-headroom knowledge for the rest. Batch two: **C1** alone — the identity feature
 (surveillance evidence), and its design questions deserve their own release. Then C2 (stage 1 before stage 2), C4 (with the
 shared LED decision from 1.6.1/C10), C5, then C7 and C9 as natural attachés of the hunt/deauth families. C11 rides any host
@@ -342,12 +347,19 @@ change; C12 when BLE coverage is the wall left.
 
 ---
 
+## 1.13 — live LCD mirror (shipped, 1.13-1.14)
+
+`mirror 1|0` streams repainted regions over serial; the v2 dashboard paints them and can step pages (§19).
+Open: fast-updating pages (spectrum) tear - the 8 kB TX buffer and USB-serial bandwidth cannot keep up with
+whole-page repaints, so drops trigger re-scans. Paging away is the practical answer today; a per-region
+sequence number or lower mirror frame rate would be the next step if it matters.
+
 ## 1.12 — boot photos (shipped)
 
 Eight pictures (`bootlogo/boot_*.png`, already panel-sized; sources in `bootlogo/orginals/`) are embedded as RGB565
 arrays by `tools/img2c.py` -> `bandwatch/boot_logos.h`. A random one shows full-screen for 2 s at boot (then the mode
 card), and the BOOT hold-walk gains a stop after Spectrum - release on it and the picture lingers 5 s while taps step
-through them in order; tapping past the last page flashes one on the way around.
+through them in order; (the page-wrap flash 1.12 added was removed in 1.12.2: pictures appear only at boot and on the walk's photo stop).
 
 - **Flash, not RAM.** ~860 KB of const pixels in flash (app image now ~2.77 MB of a 3.14 MB partition, ~88%); LVGL draws
   from there, so the only RAM cost is the existing draw buffer. Regenerate after changing `bootlogo/`:
@@ -401,8 +413,7 @@ an identification. See [DEVELOPER.md §18](DEVELOPER.md). Known limits (the coar
   at a selectable 1/2/5 MHz step (`specstep`). Sub-MHz swept-centre-frequency resolution would still need driver
   work and is unverified.
 - **Correlation is time-separated.** One radio can't decode and energy-scan at once, so "unexplained" is
-  relative to the last Wi-Fi/BLE/15.4 sweep. An automatic round-robin (dwell in `spec`, periodically dip into
-  the decode modes to refresh the "known" picture) is a possible future improvement.
+  relative to the last Wi-Fi/BLE/15.4 sweep. The fix is candidate C5 (patrol mode).
 
 ---
 
@@ -430,16 +441,16 @@ whatever was showing, rather than becoming a new permanent state. Not yet agreed
 Untethered means nobody is watching the dashboard, so hits must persist: MAC, category, tier, RSSI, channel,
 timestamp, appended to a file on the card. This is the actual deliverable of a walk-around.
 
-Blocked on the memory-budget question below: a 32-entry in-RAM ring is ~512 B, which does not fit under the
-current static-RAM rule. Alternatives are writing straight through to SD on each hit (simplest, but mounts
-FATFS on every hit) or buffering only a handful of entries.
+No longer RAM-blocked: static is ~74 kB (v1.15.4), ~6 kB under the line, so a ~512 B in-RAM ring fits. The
+concrete design is candidate C4 (events.csv + novelty baseline).
 
 ### 1.6.3 Control without a host
 
 `sdcap`, `time` and band/park are all host commands today. Recording-start was deliberately made
 host-only in 1.3 (the alternative was explicitly considered and rejected then), but untethered use changes
 that trade-off. Needs a BOOT-button path, and a decision about the LCD page/long-press mapping, which is
-already carrying "tap = page, hold = mode, hold on Hunt = stop hunt".
+already carrying "tap = page, hold = walk the mode cards (photo stop after Spectrum), release = commit; hold on
+Hunt = stop hunt, then walk".
 
 Also unresolved untethered: the device has no RTC, so with no host to send `time <epoch>` the hit log and
 pcap filenames fall back to a counter and uptime-based timestamps.
@@ -448,7 +459,7 @@ pcap filenames fall back to a counter and uptime-based timestamps.
 
 A 64-prefix table goes stale, upstream already withdrew two Flock prefixes as Ubiquiti false positives, and
 reflashing in the field is not an option. Reading `/surveil.csv` at mount and falling back to the built-in
-table would make the list updatable by dropping a file on the card. Folds naturally into 1.6.2.
+table would make the list updatable by dropping a file on the card. Folds into C4.
 
 ---
 
@@ -461,45 +472,50 @@ line stuck. **It is an empirical heuristic, not a derived limit, and nobody has 
 
 The mechanism behind it is real: static allocations and the heap share one 320 KB DRAM pool, so every static
 byte costs a heap byte 1:1. Note the build output is actively misleading here — it reports *"leaving 248104
-bytes for local variables"*, but measured free heap at runtime is ~83 kB, because the Wi-Fi/BLE driver stacks
+bytes for local variables"*, but measured free heap at runtime is ~88-106 kB in Wi-Fi depending on the LCD page, because the Wi-Fi/BLE driver stacks
 and FreeRTOS task stacks take the rest.
 
 What actually binds is **free heap at peak concurrent load**. Measured on hardware:
 
 | state | free heap |
 | --- | --- |
-| idle, Wi-Fi | ~83 kB |
-| idle, BLE | ~95 kB |
-| SD capture (tightest normal state; page not recorded - see §16 for the ±45 kB page swing) | **31.9 kB** |
-| BLE + SD capture | 32.3 kB |
+| idle, Wi-Fi `both` (v1.15.4: Overview / Devices / System / Channels) | 87.6 / 91 / 102 / 106 kB |
+| idle, BLE | ~88 kB |
+| USB + SD capture, any page, any order (v1.15.4) | **~30.8 kB** (worst on Overview; 11 ring slots) |
+| `cap 1` then `sdcap 1` before 1.15.3 | 16.1 kB |
+| capture started on Channels, then step to Overview (1.15.3, before page headroom) | 16.4 kB |
+| BLE + SD capture (pre-1.11, not re-measured) | 32.3 kB |
 | SD capture with the pre-1.3 ring ordering | 12.5 kB — where LVGL page rebuilds start failing |
 
 Done in this review pass: `ensureCapRing()` (`capture.cpp`) checks total free heap against `kMinFreeHeapB`
 (24 kB) right after allocating the ring and *refuses* capture with a JSON error when it falls below — checkable
 at runtime, tied to the actual failure mode (worst concurrent case: capture ring + FATFS + an LVGL page rebuild
 landing together). The static-RAM rule stays as the backstop for everything else; under such a rule the 512-byte
-hit log stops being a rule violation.
+hit log stops being a rule violation. Since 1.15.3 it *sizes* the ring down toward `kCapSlotsMin` to keep the
+floor instead of refusing, and `sdcap` re-fits a ring that `cap 1` made before the FATFS mount (`refitCapRing()`);
+since 1.15.4 the floor also includes `lcdPageHeadroomB()` - each page records the heap it took to build, and the
+ring leaves room to step to the heaviest page available in the current mode.
 
-Current static usage is 79,592 B — about 408 B under the existing line. (Measured on the merged 1.5.5 tree;
-the two branches it came from were 79,560 B at 1.5.2 and 79,584 B at 1.5.4, so carrying both feature sets
-cost 8 B over the larger of them.) That headroom is the edge of an unverified budget, not a wall.
+Current static usage is **74,032 B** (v1.15.4; it was 79,592 B at 1.5.5 and 80,544 B at 1.10 before the v1.11
+reclaim - smaller LVGL buffer + DevRef listing path). About 6 kB under the line, which is still an unverified
+budget, not a wall.
 
 1.5.4 is a worked example of the squeeze it causes: adding a station's BSSID to `WifiDev` should have been
 6 bytes, but that struct is in two `kWifiDevSlots` arrays and would have rounded 64 → 68, i.e. 512 B, which
 does not fit. Repacking the struct to exactly 64 bytes bought 3 bytes of former padding for free instead — a
 good outcome here, but the reason only 3 of the 6 bytes are on the device is this unverified line, not
-anything about the radio.
+anything about the radio. (Since v1.11 the DevSnap copy is gone and `WifiDev` lives in one array, so the same
+rounding would now cost 256 B.)
 
-**Next lever: the Channels LCD page (~45 kB of heap).** The 2026-10 RAM audit measured free heap per LCD page in
-`both` band: System ≈ 101.4 kB, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8** — its 39 rows of
-row + 2 labels + bar are ~156 LVGL objects at ~280 B each. That is more than every static-RAM candidate combined,
-and it is the one allocation the capture floor cannot guard (switching to Channels *after* `cap`/`sdcap` started
-allocates on the page side). Plan: draw the grid as one object with an `LV_EVENT_DRAW_MAIN` handler (rects +
-`lv_draw_label` per row, data read from `channels[]` at draw time, `lv_obj_invalidate` from `refreshChannels`),
-expected back ~35-40 kB on that page. Measure before/after with `tools/probe_pages.py`; check the LCD for flicker
-and the mirror (§19) still sees the repaint. Then decide whether a page switch should also consult the floor.
-Smaller candidates parked from the same audit: heap `specFine[]` only in spec (504 B, needs null guards in five
-readers), `buf1` `/21` → `/30` (~1.6 kB, flicker risk), `Deauth.slotPad` (§9 territory - leave).
+**Done in v1.15.4: the Channels LCD page.** The 2026-10 RAM audit measured free heap per LCD page in `both` band:
+System ≈ 101.4 kB, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8** - its 39 rows of row + 2 labels + bar were
+~156 LVGL objects. v1.15.4 draws the grid as one object (`chanGridDraw()` on `LV_EVENT_DRAW_MAIN_END`, a 3-byte
+`ChanCell` snapshot per row, only changed cells invalidated): Channels now sits at **≈106.3 kB** (+50 kB) and builds
+in ~1.9 kB, making it the lightest page. That inverted the risk - a capture sized on Channels went under the floor on
+the next step to Overview (16.4 kB) - hence `lcdPageHeadroomB()`. Next heaviest pages if more is ever needed:
+Overview (~20 kB to build) and Devices (~16 kB), the same custom-draw treatment would apply. Parked from the audit,
+not worth their risk at this headroom: heap `specFine[]` only in spec (504 B, null guards in five readers), `buf1`
+`/21` → `/30` (~1.6 kB, flicker risk), `Deauth.slotPad` (§9 territory - leave).
 
 ---
 
@@ -537,7 +553,7 @@ readers), `buf1` `/21` → `/30` (~1.6 kB, flicker risk), `Deauth.slotPad` (§9 
 
 ## Blocked
 
-Nothing, as of 1.6. Both entries that stood here are resolved; they are kept struck through because the
+Nothing, as of 1.15.4. Both entries that stood here are resolved; they are kept struck through because the
 conclusions reversed.
 
 - ~~**Deauth does not work and the root cause is unidentified.**~~ Resolved in 1.6 by building the second

@@ -282,7 +282,7 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
 
 - Device tables and hunt counters are shared with both radio contexts and are only touched under `g_devMux`
   (`portENTER_CRITICAL_ISR` in the radio paths). `g_accum` likewise under `g_accumMux`.
-- `devSnap` (the union scratch buffer) and `devRows` are loop-task only — `sendDevices()` and `refreshDevices()`
+- `g_devRefs` (the compact `DevRef` listing buffer, v1.11) and `devRows` are loop-task only — `sendDevices()` and `refreshDevices()`
   cannot interleave, since both run from `loop()`.
 - The capture ring is single-producer (radio) / single-consumer (loop). Freeing it from the loop task
   (`releaseCapture()`) is safe **only** because this is a single-core part: the radio callbacks re-read
@@ -665,12 +665,21 @@ together. That last row is not hypothetical: 1.3 shipped briefly with the ring s
 mount, which left 12.5 kB free and put the device back in exactly the regime the original crashes came from.
 `sdcap` now opens the file before sizing the ring so `kCapHeapReserve` is reserved against post-mount heap.
 
-**The LCD page is a ~45 kB swing on its own** (RAM audit, 2026-10, `both` band, stable to ±0.1 kB across
-passes, `tools/probe_pages.py`): System ≈ 101.4 kB free, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8**
-(39 rows × row/2 labels/bar ≈ 156 LVGL objects, ~280 B each). The table above was not taken on a stated page,
-so treat it as Overview-ish. The tightest real state is SD capture *while on the Channels page*, and switching
-to Channels after a capture started is a page-side allocation nothing on the capture side can refuse - see the
-ROADMAP entry for drawing that page as one custom-draw object.
+**The LCD page is a big swing on its own.** The 2026-10 audit (`both` band, `tools/probe_pages.py`) measured
+System ≈ 101.4 kB free, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8** - 39 rows × row/2 labels/bar was
+~156 LVGL objects. v1.15.4 draws that grid as **one object** (`chanGridDraw()` on `LV_EVENT_DRAW_MAIN_END` in
+`lcd_ui.cpp`, painting from a 3-byte `ChanCell` snapshot that `refreshChannels()` fills; only cells that changed
+are invalidated, so the LCD and the §19 mirror see small dirty regions, not a 262-row repaint). Measured after:
+Channels **≈106.3 kB** (+50 kB), Overview ≈87.6, Devices ≈91.2, System ≈102.2 - Overview is now the heaviest.
+Text in the drawn grid is clipped to its column by narrowing `layer->_clip_area` around each `lv_draw_label`,
+which is what `LV_LABEL_LONG_CLIP` did for the widgets.
+
+A page switch allocates on the LVGL side, which nothing on the capture side could refuse: a capture sized while
+on a light page went under the floor on the next BOOT tap (measured 16.4 kB, Channels → Overview). So `showPage()`
+records each page's build cost (largest seen, logged as `page N build cost B` when it grows: Overview ~20 kB,
+Devices ~16 kB, System ~5.7 kB, Channels ~1.9 kB), and `lcdPageHeadroomB()` - the step from the current page to
+the heaviest page available in this mode - is added to `kMinFreeHeapB` when the ring is sized or re-fitted.
+Measured: USB + SD capture started on any page bottoms out at **~30.8 kB** on Overview.
 
 ### The floor, as built (see [ROADMAP.md](ROADMAP.md))
 
@@ -680,9 +689,9 @@ JSON error — better than OOMing an LVGL page rebuild later. Since 1.15.3 the r
 floor standing (it shrinks toward `kCapSlotsMin` instead of being refused), and `sdcap` calls `refitCapRing()`:
 a ring that `cap 1` made before the FATFS mount was floor-checked against the pre-mount heap, so `cap 1` then
 `sdcap 1` used to land at **16.1 kB** free (measured). Refit re-sizes it against the post-mount heap without
-touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order gives 9 slots, 33.8 kB). It guards only the one biggest allocation, so rule 4
-still keeps the rest honest: current static usage is 79,560 B, about 440 B under the line, and that headroom is
-the edge of an unverified budget rather than a wall.
+touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order gives 9 slots, 33.8 kB). It guards only the one biggest allocation (plus the page-switch
+headroom above), so rule 4 still keeps the rest honest: current static usage is 74,032 B (v1.15.4), about 6 kB
+under the line, and that headroom is the edge of an unverified budget rather than a wall.
 
 ## 17. Station-to-BSS association (1.5.4, ported to the module layout in 1.5.5)
 
@@ -704,8 +713,9 @@ only the unambiguous single-hop cases (802.11-2020 9.3.2.1, table 9-26):
 Both `trackWifiDevice` call sites (also `wifi_sniff.cpp`) pass their case's BSSID, so a tier-1 device (heard only as `addr1`, §15)
 gets an association too — which is exactly the sleepy-camera case that tier 1 exists for.
 
-**Why only three bytes.** `WifiDev` sits in two arrays of `kWifiDevSlots` (the live table and the `devSnap`
-snapshot buffer), so a byte added to it costs 128 bytes of static RAM. The struct was 64 bytes with three
+**Why only three bytes.** At the time `WifiDev` sat in two arrays of `kWifiDevSlots` (the live table and the
+`devSnap` snapshot buffer, removed in v1.11 - today it is one array, so a byte costs 64), so a byte added to it
+cost 128 bytes of static RAM. The struct was 64 bytes with three
 bytes of interior padding; the full 6-byte BSSID would have rounded it to 68 and cost 512 B, against ~420 B
 of headroom under the rule in §16. Reordering the fields so the `uint32_t` leads packs it to **exactly 64
 bytes with no padding**, which is where `apSuffix[3]` now lives — measured cost zero. A

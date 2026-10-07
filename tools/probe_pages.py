@@ -57,8 +57,9 @@ sample(12, "(warmup)")
 # now walk pages: expect order 0 -> 1 -> 3 -> 5 -> 0 ...
 print("\npass structure: sample 8 s on each of overview/channels/devices/system, twice")
 for p in range(2):
-    for name in ("overview","channels","devices","system"):
-        got = step()
+    for _ in range(4):
+        got = step()   # name the page from the device's ack, not from an assumed starting page
+        name = {0: "overview", 1: "channels", 3: "devices", 5: "system"}.get(got, f"page {got}")
         r = sample(8)
         if r: print(f"pass{p+1} {name:9s} (pg {got})  min={r[0]:6d} med={r[1]:6d} max={r[2]:6d} n={r[3]}")
     # back to overview for a clean loop start

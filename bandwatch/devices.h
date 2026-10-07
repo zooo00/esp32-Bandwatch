@@ -9,8 +9,8 @@ constexpr int kBleDevSlots = 48;
 constexpr int kDevProbe = 8;
 
 // Field order here is deliberate and load-bearing: it packs to exactly 64 bytes with no padding, which
-// is what let apSuffix be added in 1.5.4 at zero static-RAM cost (the table and the snapshot buffer each
-// hold kWifiDevSlots of these, so every byte counts twice). Re-check the static_assert after any edit.
+// is what let apSuffix be added in 1.5.4 at zero static-RAM cost (wifiDevs holds kWifiDevSlots of these, so a
+// byte of padding costs 64 x 4 = 256 B once alignment rounds the struct up). Re-check the static_assert after any edit.
 struct WifiDev {
     uint32_t lastMs;     // 0 = empty slot
     uint8_t mac[6];

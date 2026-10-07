@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.15.3";
+constexpr const char* kVersion = "1.15.4";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -393,6 +393,7 @@ CapFrame* IRAM_ATTR capReserve(uint8_t& nextHead);
 void IRAM_ATTR capCommit(uint8_t nextHead);
 bool ensureCapRing();
 bool refitCapRing();
+uint32_t lcdPageHeadroomB();   // lcd_ui.cpp: heap a switch to the heaviest page would take
 void releaseCapture();
 void syncCapActive();
 void drainCapture();

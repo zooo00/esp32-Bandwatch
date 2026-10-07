@@ -229,6 +229,19 @@
         </div>
       </section>
 
+      <section class="card railcard" id="alertCard" hidden>
+        <h3>LED alerts</h3>
+        <button class="block" id="alertBtn">LED alerts on</button>
+        <div class="seg" style="margin-top:8px">
+          <button class="small" data-ledtest="surv" title="Orange double flash">Test surv</button>
+          <button class="small" data-ledtest="join" title="Purple double flash">join</button>
+          <button class="small" data-ledtest="new" title="White single blink">new</button>
+        </div>
+        <p class="note dim" style="margin:8px 0 0">A short blip on the board's LED: <b>orange</b> double flash for a
+          surveillance-OUI device, <b>purple</b> double for a Zigbee/Thread network opening to joins, <b>white</b> blink
+          for a new device (needs the event log). At most one per 2 s; never over a running deauth. Stays on the device.</p>
+      </section>
+
       <section class="card railcard" id="bleScanCtl" hidden>
         <h3>BLE scan</h3>
         <div class="vseg" id="bleScanSeg">
@@ -522,6 +535,16 @@
     toast(on ? 'Event log armed' : 'Event log off', on ? 'new devices and surveillance hits go to events.csv' : 'no further rows are logged');
     post({ cmd: 'events', value: on });
   });
+  $('#alertBtn').addEventListener('click', () => {
+    const on = !(state && state.alerts);
+    armPending('alerts', $('#alertBtn'), on ? 'Turning on…' : 'Turning off…');
+    post({ cmd: 'alerts', value: on });
+  });
+  $('#alertCard').addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-ledtest]'); if (!b) return;
+    post({ cmd: 'ledtest', value: b.dataset.ledtest });
+    toast('LED test', 'watch the board: ' + b.title.toLowerCase());
+  });
   $('#actStop').addEventListener('click', () => {
     if (actMode === 'hunt') post({ cmd: 'hunt', mac: null });
     else if (actMode === 'deauth') { armPending('deauth', $('#actStop'), 'Stopping…'); post({ cmd: 'deauth', mac: null }); }
@@ -705,6 +728,19 @@
       else if (saved.sd && saved.sd.last) toast('SD recording saved', `${(saved.sd.last || '').split('/').pop()} · ${fmt(saved.sd.frames)} frames, ${kb(saved.sd.bytes)}`, 'done');
     }
     prev.capOn = !!cap; prev.sdOn = rec;
+  }
+
+  // LED alert blips (v1.19): s.alerts is null on firmware without them - hide the card then.
+  function renderAlerts(s) {
+    const a = s.alerts;
+    $('#alertCard').hidden = a === null || a === undefined;
+    if ($('#alertCard').hidden) return;
+    const on = !!a;
+    if (pending.alerts && (Date.now() - pending.alerts > 6000 || (prev.alertsOn !== undefined && on !== prev.alertsOn))) pending.alerts = 0;
+    prev.alertsOn = on;
+    const btn = $('#alertBtn');
+    if (!pending.alerts) { btn.textContent = on ? 'Turn LED alerts off' : 'Turn LED alerts on'; btn.disabled = false; }
+    btn.classList.toggle('stop', on);
   }
 
   // C4 SD event log: status from the device's "ev" object (absent on firmware before C4 - hide the block then).
@@ -1237,7 +1273,7 @@
     $('#fw').textContent = s.hello ? `firmware ${s.hello.fw}${s.hello.ver ? ' ' + s.hello.ver : ''} · mode ${s.band} · heap ${fmt((s.heap || 0) / 1024)} KB` : '';
     $('#app').classList.toggle('stale', !s.connected);
     if (s.hello && !mirrorInit) { mirrorInit = true; if (s.hello.mir) { mirrorOn = true; mirrorSetBtn(); } }
-    renderRail(s); renderHero(s); renderAct(s); renderExplain(s); renderUnidPill(s);
+    renderRail(s); renderAlerts(s); renderHero(s); renderAct(s); renderExplain(s); renderUnidPill(s);
     if (pending.spec && (s.band === 'spec' || Date.now() - pending.spec > 6000)) {
       pending.spec = 0;
       document.querySelectorAll('[data-startspec]').forEach(b => { b.disabled = false; b.textContent = 'Scan 2.4 GHz'; });

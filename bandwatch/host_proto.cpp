@@ -135,7 +135,7 @@ void sendHello() {
     // 900, not 780: "both" mode (38 channels) + an active hunt + a targeted deauth + an SD path summed to
     // ~790, and a line that passes the check and then overruns is truncated mid-JSON, which is exactly what
     // the drop-whole-lines rule exists to prevent.
-    if (!serialRoom(900)) return;
+    if (!serialRoom(920)) return;   // +20 for "alerts" (v1.19)
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"spec_step\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(dwellMs()), static_cast<unsigned>(specStepMhz), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),

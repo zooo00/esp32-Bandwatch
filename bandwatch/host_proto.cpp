@@ -22,17 +22,24 @@ static bool mirFrameDrop = false;    // a region of the refresh in progress was 
 void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px, bool last) {
     const int w = x2 - x1 + 1, h = y2 - y1 + 1;
     if (w > 0 && h > 0) {
-        const int nbytes = w * h * 2;   // RGB565, little-endian (LV_COLOR_16_SWAP is 0)
-        // base64 is 4/3 the raw size. Keep whole lines - a region is sent intact or not at all (the drop-whole-
-        // lines rule, section 6): if the TX buffer can't hold it, fold it into the pending repair rectangle,
-        // which serviceMirror() re-sends in TX-sized strips once the buffer drains.
-        if (serialRoom(nbytes * 4 / 3 + 48)) {
-            Serial.printf("M %d %d %d %d ", x1, y1, w, h);
-            writeBase64(px, static_cast<size_t>(nbytes));
+        // Sent in row slices of <= ~2 KB base64, each its own whole "M" line (the drop-whole-lines rule, section 6).
+        // A flush chunk is up to ~15 full-width rows (~7 KB base64): sent as one line it only fit a nearly empty
+        // 8 KB TX buffer, so on busy pages most chunks dropped and the repair never caught up (no complete
+        // frame ever). Slices go out while there is room; only the rows that did not fit join the repair.
+        const int rowBytes = w * 2;                     // RGB565, little-endian (LV_COLOR_16_SWAP is 0)
+        int sliceRows = 1536 / rowBytes;                // ~2 KB once base64-encoded
+        if (sliceRows < 1) sliceRows = 1;
+        for (int y = y1; y <= y2; y += sliceRows) {
+            const int rows = (y + sliceRows - 1 <= y2) ? sliceRows : (y2 - y + 1);
+            const int nbytes = rows * rowBytes;
+            if (!serialRoom(nbytes * 4 / 3 + 48)) {     // no room for this slice: the rest of the region is repair
+                mirFrameDrop = true;
+                mirrorNoteDrop(x1, y, x2, y2);
+                break;
+            }
+            Serial.printf("M %d %d %d %d ", x1, y, w, rows);
+            writeBase64(px + static_cast<size_t>(y - y1) * rowBytes, static_cast<size_t>(nbytes));
             Serial.write('\n');
-        } else {
-            mirFrameDrop = true;
-            mirrorNoteDrop(x1, y1, x2, y2);
         }
     }
     if (!last) return;

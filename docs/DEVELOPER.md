@@ -151,6 +151,7 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
 | `{"t":"ev","ev":{...}}` | every 5 s while the event log is armed, in every mode (`sendEventStatus()`, 1.18) | `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}`: armed; card usable (last attach worked); baseline hashes in RAM; entries in `/seen.csv` (counted at load, plus this session's appends); rows written to `/events.csv`; rows buffered; surveillance rows; new-device rows; rows dropped (2 KB buffer full, rows discarded by `events 0` on a busy card, or the 16-entry radio queue full); card errors (failed mount/write); novelty checks skipped for want of a baseline. The same object rides on `hello` and the `events` ack. §20 |
 | `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete |
+| `M <x> <y> <w> <h> <base64>` / `MF <seq> <complete>` | while `mirror 1` | one repainted LCD slice (RGB565-LE, <= ~2 KB base64) / end of one LVGL refresh; `complete` 1 = nothing dropped and no repair pending (§19) |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
 | `{"t":"sdls","files":[[name, bytes], ...],"total":N,"sent":M}` | after `sdls` | files in the card root; `sent < total` = the serial buffer filled mid-list (host slow or absent) and whole entries were dropped |
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
@@ -945,28 +946,41 @@ host decodes each pixel as a little-endian `uint16` — which is the colour the 
 displays LVGL's intended colours correctly. `LCD_WriteData_nbyte` uses `SPI.writeBytes` (no swap, no mutation),
 so reading `px_map` after the panel write is safe.
 
-### Pacing: why a naïve full-frame drops
-All dirty regions in one `lv_timer_handler()` flush **synchronously** back-to-back, and `Serial` is
-non-blocking with an 8 KB TX buffer (`setTxTimeoutMs(0)`, §6) — it never drains mid-handler. A bulk repaint
-(page switch, mode splash, the first frame after enabling) is ~21 chunks of ~7 KB each; only the first fits,
-the rest are dropped whole (never truncated, §6). Re-invalidating the whole screen would just re-send the top
-and livelock.
+### Pacing, frames and repair (1.18.1; replaces the 1.13 full re-scan)
+All dirty regions in one `lv_timer_handler()` flush **synchronously** back-to-back, and `Serial` is non-blocking with
+an 8 KB TX buffer (`setTxTimeoutMs(0)`, §6) - it never drains mid-handler. Three mechanisms keep the host's copy
+honest:
 
-So `serviceMirror()` (`lcd_ui.cpp`, called once per `Bandwatch_Loop`) re-sends the screen **one ~10-row strip
-per loop** via `lv_obj_invalidate_area()` — each strip is ~4.6 KB base64, well under the TX buffer, and the
-buffer drains between loops, so a full frame converges over ~40 loops (<1 s). Steady-state label updates are
-tiny and flush immediately. A strip can still be dropped when it collides with a data-refresh flush in the
-same `lv_timer_handler` (their combined bytes exceed the TX buffer); `mirrorOnFlush` then calls
-`mirrorNoteDrop()`, which sets a flag so `serviceMirror()` runs **another full pass after the current one**,
-repeating until a pass completes with no drop. Restarting the scan on every drop instead would livelock on a
-busy screen, and ignoring mid-pass drops (the 1.13 bug) left permanent black/stale bands where a strip was
-lost in the single initial scan. Enabling the mirror (`mirror 1`) calls `mirrorRequestFull()` for the first
-frame.
+1. **Row slices.** `mirrorOnFlush()` sends each flushed region as `M` lines of <= ~2 KB base64 (as many rows as fit
+   1536 raw bytes), each a whole line. A flush chunk is up to ~15 full-width rows (~7 KB base64); sent as one line
+   it fitted only a nearly empty buffer, so on busy pages nearly every chunk dropped. Slices go out while there is
+   room, and only the rows that did not fit are noted as dropped.
+2. **Repair rectangle.** A dropped slice is unioned into **one** pending repair rectangle (`mirX1..mirY2` in
+   `lcd_ui.cpp`, a bounding box - 8 bytes, no per-region list). `serviceMirror()` (once per loop) re-invalidates that
+   rectangle top-down in ~10-row strips, as many per LVGL refresh as the TX buffer has room for (`mirInflightB`
+   counts bytes invalidated but not yet flushed; a 250 ms guard stops a refresh that never ends from stalling it).
+   LVGL re-renders the *current* pixels there and the flush path emits them; a strip that drops again just goes back
+   in. `mirror 1` (`mirrorRequestFull()`) starts with the whole screen as the rectangle - the first full frame is the
+   same code. The 1.13.1 design re-scanned the whole screen after any drop, which kept a busy page's mirror a mix of
+   strips from different moments.
+3. **Frame markers.** The flush callback passes `lv_display_flush_is_last(disp)`; after the last region of a refresh
+   `mirrorOnFlush()` emits `MF <seq> <complete>` (`seq` a wrapping u16). `complete = 1` means nothing in this refresh
+   dropped **and** no repair is outstanding - the host's copy then equals the panel exactly.
+
+Measured (1.18.1, 20 s windows): on the Wi-Fi pages ~57% of frames arrive complete. On the **BLE Devices page none
+do**: it re-sorts and repaints all 12 rows every 500 ms, ~110 KB of base64 per repaint (~220 KB/s), more than the
+USB serial link carries, so the repair can never catch up. That is a bandwidth limit the framing makes visible,
+not something it can fix; the dashboard says "repairing" there.
 
 ### Host + dashboard
-`handle_mirror()` (`bandwatch_host.py`) parses the `M` line and blits the region into a 172×320 RGB565
-framebuffer under `screen_lock`, bumping `screen_seq`. `GET /screen.bin` serves the raw bytes (with
-`X-Screen-W/H/Seq` headers); `GET /api/screen` returns `{on, seq, w, h}` (`on` = an `M` line within 3 s). The
+`handle_mirror()` (`bandwatch_host.py`) blits each `M` region into a **back buffer**; `handle_mirror_frame()` copies
+it to the served framebuffer (`screen`, bumping `screen_seq`) only at an `MF` marker. A complete frame is published at
+once; a torn one is held back unless nothing has been published for `MIRROR_HOLD_S` (0.5 s) - a page faster than the
+link would otherwise freeze, so it then shows the newest frame available. Firmware without markers is detected (a run
+of `MIRROR_LEGACY_REGIONS` regions with no `MF`) and published per region as before; a lost final marker is covered by
+publishing a quiet back buffer after `MIRROR_STALE_S`. `GET /screen.bin` serves the published frame (with
+`X-Screen-W/H/Seq` headers); `GET /api/screen` returns `{on, seq, w, h, framed, complete, ...frame counters}` (`on` =
+a mirror line within 3 s), and the v2 canvas shows *in sync* / *repairing dropped regions* / *unframed*. The
 **v2 dashboard** (`dashboard2.html`) has a *Start mirror* card: the toggle POSTs `mirror 1|0`, a 4 Hz poll
 watches `seq`, and on a change it fetches `/screen.bin` and paints it onto a `<canvas>` (RGB565 LE → RGBA,
 `image-rendering: pixelated`). `sendHello` carries `"mir"` so the button reflects the device state on load.
@@ -976,9 +990,9 @@ The mirror panel lives in the v2 **left control rail** (the 172×320 canvas fits
 **Page ‹ ›** buttons that POST `page prev|next`, which the device handles with `stepPage()` (`lcd_ui.cpp`) —
 the same action as a BOOT tap (`showPage(currentPage ± 1)`, skipping pages that don't apply to the mode, and
 clearing any mode splash). This lets you drive the LCD from the browser and hold on a page. It matters because
-the serial link can't keep up with a continuously-repainting page: in `spec` mode the bars redraw several
-times a second, so more pixels change per second than fit through the TX buffer and the mirror tears / re-scans
-continuously. Stepping to a mostly-static page (Devices, System, a parked channel) lets it settle to a clean
+the serial link can't keep up with a continuously-repainting page: in `spec` mode the bars, and in BLE the
+device list, redraw several times a second, so more pixels change per second than the link carries and frames
+stay "repairing". Stepping to a mostly-static page (Devices, System, a parked channel) lets it settle to a clean
 frame. This is a bandwidth limit, not a bug — a full 172×320 frame is ~147 KB of base64 and USB-CDC is the
 cap.
 

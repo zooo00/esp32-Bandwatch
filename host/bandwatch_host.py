@@ -3,7 +3,10 @@
 
     python3 host/bandwatch_host.py                # auto-detects /dev/cu.usbmodem*, serves http://127.0.0.1:8080
     python3 host/bandwatch_host.py --port /dev/cu.usbmodem21101 --http 8080 --captures ./captures
-    python3 host/bandwatch_host.py --ui v2        # the new dashboard at "/" (classic stays at /classic); see run-v2.sh
+    python3 host/bandwatch_host.py --ui classic   # the classic dashboard at "/" instead of v2
+
+The v2 dashboard (dashboard2.html) is the default at "/". Both pages stay reachable at /v2 and /classic,
+whatever --ui puts at "/".
 
 Only needs Python 3 and pyserial (pip install pyserial). The port is opened with DTR/RTS held asserted
 (no edges), which is what keeps the ESP32-C5 from resetting when the host connects.
@@ -1231,7 +1234,7 @@ class Bandwatch:
         }
 
 
-def make_handler(bw, classic_path, v2_path=None, ui="classic"):
+def make_handler(bw, classic_path, v2_path=None, ui="v2"):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -1390,8 +1393,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="serial port (default: first /dev/cu.usbmodem*)")
     ap.add_argument("--http", type=int, default=8080, help="HTTP port (default 8080)")
-    ap.add_argument("--ui", choices=("classic", "v2"), default="classic",
-                    help="which dashboard sits at '/' — the other stays reachable at /classic or /v2 (default: classic)")
+    ap.add_argument("--ui", choices=("classic", "v2"), default="v2",
+                    help="which dashboard sits at '/'; both stay reachable at /v2 and /classic (default: v2)")
     ap.add_argument("--bind", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     ap.add_argument("--captures", default=os.path.join(os.getcwd(), "captures"), help="pcap output directory")
     ap.add_argument("--no-fcs", action="store_true", help="do not mark frames as carrying an FCS in radiotap")
@@ -1406,7 +1409,7 @@ def main():
     threading.Thread(target=bw.reader, daemon=True).start()
     html_classic = os.path.join(HERE, "dashboard.html")
     v2_candidate = os.path.join(HERE, "dashboard2.html")
-    html_v2 = v2_candidate if os.path.isfile(v2_candidate) else None   # the new UI is optional until promoted
+    html_v2 = v2_candidate if os.path.isfile(v2_candidate) else None   # "/" falls back to classic if it is missing
     srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, html_classic, html_v2, args.ui))
     other = "/classic" if args.ui == "v2" else "/v2"
     print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/ ({'new UI' if args.ui == 'v2' else 'classic UI'}, "

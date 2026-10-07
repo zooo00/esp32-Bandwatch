@@ -186,7 +186,15 @@ Vendor names: IEEE OUI CSV cached in `~/.cache/bandwatch/oui.csv`
 (downloaded once in the background) with a built-in fallback; Bluetooth company ids, Apple continuity types,
 GAP appearance categories and common service UUIDs are small tables at the top of the file.
 
-`dashboard.html`: no framework, polls `/api/state` once a second. Tabs: Overview (bar chart, trend, channel
+Two dashboards, both always served: `dashboard2.html` (the default, at `/` and `/v2`) and the classic
+`dashboard.html` (at `/classic`). `--ui classic` swaps which one sits at `/`; the other paths keep resolving,
+and each page links to the other by absolute path. `host/run-v2.sh` is a leftover alias for the default.
+`dashboard2.html`: same polling and data, controls in a sticky left rail (band/park, capture, hunt/deauth action
+bar, LCD mirror with page buttons, SD card list with pull-to-Mac), one scrolling main column, and only the active
+radio's device table open (the other two fold into "last seen" caches). Newer features (LCD mirror, §19) exist
+only here.
+
+`dashboard.html` (classic): no framework, polls `/api/state` once a second. Tabs: Overview (bar chart, trend, channel
 table), Wi‑Fi devices, Bluetooth LE, Zigbee/Thread; a hunt panel appears when a hunt is active and a red deauth
 card with the frame counter while an attack runs. Tables are
 rendered keyed by device id so rows keep identity; while the mouse is over a table (or the page is paused with

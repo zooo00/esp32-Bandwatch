@@ -20,8 +20,9 @@ serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
   `surv_ouis.h` = surveillance-OUI table. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h` = display glue (from
   the upstream C6 project, pins changed); `boot_logos.h` = generated boot-photo arrays (`tools/img2c.py` from
   `bootlogo/`).
-- `host/bandwatch_host.py` — serial reader, HTTP API, pcap writer, OUI/vendor lookup. `host/dashboard.html` —
-  the single-page UI (no build step, no dependencies).
+- `host/bandwatch_host.py` — serial reader, HTTP API, pcap writer, OUI/vendor lookup. `host/dashboard2.html` —
+  the default single-page UI at `/` (no build step, no dependencies); `host/dashboard.html` is the classic tabbed
+  layout, still served at `/classic` (`--ui classic` puts it at `/`).
 - `build.sh` (compile/flash via arduino-cli), `setup.sh` (install toolchain), `tools/ctags/` (Apple-Silicon
   workaround), `tools/witness/` (RX-only ESP32-S3 monitor + `verify.py`, the on-air oracle for §11),
   `tools/deauth/patch_raw_tx.py` (post-build raw-TX patch), `docs/` (developer docs), `captures/` (pcaps,
@@ -118,7 +119,8 @@ Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (se
   little-endian**: reverse it for anything that displays or keys on a MAC, keep it raw for the pcap.
 - **BLE mode emits no `{"t":"d"}` dwell lines**, so any live counter the dashboard needs must be added to
   `sendBleStatus()` as well as `sendDwell()`, or it will silently stop updating in BLE (`DEVELOPER.md` §14).
-- Dashboard: `host/dashboard.html`, one `render*()` per section, polled from `/api/state` once a second. The
+- Dashboard: `host/dashboard2.html` is the default (at `/` and `/v2`); `host/dashboard.html` is the classic layout
+  (at `/classic`) and still gets new features only if you add them twice. One `render*()` per section, polled from `/api/state` once a second. The
   poll is only 1 Hz, so anything the user clicks must latch a local pending state (see `armPending`) or it
   looks dead. `.capinfo` also carries `.control`, which is `display:grid` — override to block or inline
   content lands on separate rows.

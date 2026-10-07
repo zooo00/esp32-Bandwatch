@@ -106,19 +106,18 @@ Notes for this board:
 ```sh
 python3 host/bandwatch_host.py            # http://127.0.0.1:8080 , pcaps in ./captures
 python3 host/bandwatch_host.py --port /dev/cu.usbmodem21101 --http 8080 --captures ~/pcaps
-./host/run-v2.sh                          # the new dashboard at "/" (classic moves to /classic)
+python3 host/bandwatch_host.py --ui classic   # the older tabbed layout at "/" instead
 ```
 
-The page polls the device state once a second: band and park controls, capture start/stop, stat tiles, a busy‑score
-bar chart per channel (grouped by band segment, current channel marked), a 10‑minute trend of the max score, a
-per‑channel table and the device log.
+The page polls the device state once a second. The default layout (`dashboard2.html`, also at `/v2`) groups the
+controls into a left rail — band and park, capture start/stop, hunt/deauth sharing one action bar, and the live LCD
+mirror with page buttons — next to one scrolling column: stat tiles, a busy‑score bar chart per channel (grouped by
+band segment, current channel marked), the channel‑load trend, the spectrum views, only the active radio's device
+table open (the other two fold away as "last seen" caches), and the device log. Every file on the SD card gets a
+*pull to Mac* button that streams it back over serial and offers a download.
 
-A second layout ships alongside it (`dashboard2.html`, always served at `/v2`): controls grouped into a left rail,
-one scrolling column instead of tabs, only the active radio's device table open — the other two fold away as
-"last seen" caches — and hunt/deauth sharing one action bar. `--ui v2` (or `run-v2.sh`) puts it at `/`; both pages
-cross‑link, so you can flip between them without restarting until you are ready to promote one. The new page also
-shows the SD pull flow: every file on the card gets a *pull to Mac* button that streams it back over serial and
-offers a download.
+The classic tabbed layout (`dashboard.html`) is still served at `/classic`; `--ui classic` puts it back at `/`.
+Both pages cross‑link, whichever one is at `/`.
 
 The dashboard is served on `127.0.0.1` only. `/api/cmd` has no authentication and can start a deauth attack,
 so think before using `--bind` to expose it beyond the loopback interface.

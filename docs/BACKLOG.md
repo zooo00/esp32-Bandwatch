@@ -80,12 +80,17 @@ within one poll (1 s).
 **Test:** a tier-1 render test that sets `pending.deauth`, renders a snapshot with `deauth: null`, and asserts the row
 button is no longer "…".
 
-### B4 · USB serial went silent while the firmware kept running — P1, bug (reproduce first)
+### B4 · USB serial went silent while the firmware kept running — P2, bug (likely a second reader; confirm)
 - **Seen once, 2026-10-07, v1.19:** right after the full tier-3 suite finished (26/26, `T99NoReboot` passed), the next
   session on the port got **zero bytes**: no idle traffic and no reply to `info`/`sdls`/`sdread`. The LCD kept updating
   (the firmware was alive). `esptool --before no-reset` could not reach the ROM loader (not download mode). Only the
   RESET button recovered it; afterwards everything worked (hello `up 60`, sdread fine).
-- **Suspects:** (1) the device suite's port handling - `tests/device/board.py` clears HUPCL so closing the port does
+- **Likely explained (same day):** a second process reading the port. macOS lets two programs open it; they split the
+  bytes, each sees "readiness to read but returned no data" or nothing at all, and esptool gets "No serial data
+  received" - exactly what was seen. The user had a host running alongside; with one reader there were 0 errors in 30 s.
+  v1.19.1 opens the port **exclusively** in the host (a second one is refused with a clear message). Keep this item
+  open until the device suite + a fresh open no longer reproduces it.
+- **Earlier suspects:** (1) the device suite's port handling - `tests/device/board.py` clears HUPCL so closing the port does
   not drop DTR; the next open by another process may leave the USB-Serial-JTAG CDC in a state where the device thinks
   no host is reading (Arduino HWCDC) and silently discards TX, or RX stops; (2) an HWCDC TX stall after a long burst
   at a full buffer (`setTxTimeoutMs(0)`).

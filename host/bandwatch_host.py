@@ -452,6 +452,10 @@ class Bandwatch:
         # on open; keeping them asserted (no edge) leaves the board running. Dropping them reboots it.
         s.dtr = True
         s.rts = True
+        # Exclusive (flock): a second host on the same port used to open it too, and the two then split the
+        # incoming bytes - each saw "readiness to read but returned no data", reconnected every few seconds, and
+        # lost lines, which looked exactly like a hung board. Now the second one is refused with a clear message.
+        s.exclusive = True
         s.open()
         return s
 
@@ -480,9 +484,17 @@ class Bandwatch:
                 ser = self.open(port)
             except Exception as e:
                 self.state["connected"] = False
-                self.state["log"].append(f"open {port}: {e}")
+                busy = "lock" in str(e).lower() or "busy" in str(e).lower() or "resource temporarily unavailable" in str(e).lower()
+                msg = (f"open {port}: in use by another program (a second bandwatch_host.py, the device tests, "
+                       f"power_profile.py or a serial monitor?) - close it; retrying") if busy else f"open {port}: {e}"
+                if not self.state["log"] or self.state["log"][-1] != msg:   # don't flood the log while retrying
+                    self.state["log"].append(msg)
+                if busy and not getattr(self, "_busy_warned", False):
+                    print(msg, file=sys.stderr)
+                    self._busy_warned = True
                 time.sleep(1.5)
                 continue
+            self._busy_warned = False
             with self.lock:
                 self.ser = ser
             self.state["connected"] = True
@@ -633,7 +645,15 @@ class Bandwatch:
             self._hunt_update(msg.get("h"))
             self._set_deauth(msg.get("deauth"))
             if msg.get("sd") is not None:
-                st["sd"] = msg["sd"]
+                # hello's sd has no file listing: keep the one we have while the card is still there, so a
+                # reconnect or an "info" does not blank the dashboard's file card until the next sdls.
+                old = st.get("sd") or {}
+                sd = dict(msg["sd"])
+                if sd.get("mounted") and old.get("mounted"):
+                    for k in ("files", "file_total"):
+                        if k in old:
+                            sd[k] = old[k]
+                st["sd"] = sd
                 self._sd_track(st["sd"])
             self._set_events(msg.get("ev"))
             if "alerts" in msg:

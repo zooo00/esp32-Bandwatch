@@ -83,6 +83,19 @@
   .files .acts { margin-left: auto; display: flex; gap: 5px; align-items: center; flex: none; white-space: nowrap; }
   .files .fsize { flex: none; }
   .filesfoot { margin-top: 7px; }
+  .fgroup { margin-top: 12px; }
+  .fgroup h3 { font-size: 13px; margin: 0 0 4px; display: flex; flex-wrap: wrap; gap: 4px 10px; align-items: baseline; }
+  .fgroup h3 small { color: var(--muted); font-weight: 400; }
+  .ftable { width: 100%; border-collapse: collapse; }
+  .ftable td { padding: 5px 12px 5px 0; border-top: 1px solid var(--border); font-size: 12.5px; vertical-align: middle; text-align: left; }
+  .ftable .fwhen { width: 1%; }   /* shrink-to-fit: the name column takes the rest */
+  .ftable .fn { word-break: break-all; }
+  .ftable .fwhen, .ftable .fsz { white-space: nowrap; color: var(--muted); }
+  .ftable .fsz { text-align: right; }
+  .ftable .acts { white-space: nowrap; text-align: right; padding-right: 0; }
+  .ftable .acts button, .ftable .acts a { margin-left: 5px; }
+  .fgroup .more { margin-top: 4px; }
+  @media (max-width: 640px) { .ftable .fwhen { display: none; } }
   .filesfoot p { margin: 5px 0 0; }
 
   .devcard { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
@@ -220,11 +233,7 @@
         <h3>SD card</h3>
         <button class="primary block" id="sdBtn">Record to SD</button>
         <div class="note capinfo" id="sdInfo"></div>
-        <ul class="files" id="sdFiles"></ul>
-        <div id="sdFilesFoot" class="filesfoot" hidden>
-          <button class="tiny ghost" id="sdShowAll"></button>
-          <p class="note dim">Delete removes the file from the card only - copies already downloaded to this Mac stay.</p>
-        </div>
+        <a class="link note" id="sdFilesLink" href="#filesCard" hidden>Manage card files →</a>
         <div id="evBox" hidden>
           <h3 style="margin-top:14px">Event log</h3>
           <button class="block" id="evBtn">Start event log</button>
@@ -430,6 +439,13 @@
         </div>
       </section>
 
+      <section class="card" id="filesCard" hidden>
+        <h2>SD card files <small id="filesSum"></small></h2>
+        <div id="fileGroups"></div>
+        <p class="note dim" style="margin:10px 0 0">Download copies the file to this Mac (the captures folder) and saves it
+          in the browser. Delete removes it from the card only - copies already downloaded stay. Capture times are UTC.</p>
+      </section>
+
       <section class="card" id="chCard">
         <h2>Channels <small>last completed dwell per channel</small></h2>
         <p class="note stalenote" id="chStale" hidden></p>
@@ -460,10 +476,25 @@
   const prev = {};
   // C4 text files on the card (not pcaps), in list order. The first two are the live log and baseline, shown even
   // in the compact list; the rest (rotated .old files, the extra-OUI list) only under "show all".
-  const EV_FILES = ['events.csv', 'seen.csv', 'events.old.csv', 'seen.old.csv', 'surveil.csv'];
-  const EV_MAIN = ['events.csv', 'seen.csv'];
-  const SD_COMPACT_PCAPS = 4;                                  // newest pcaps in the compact list
-  let sdShowAll = false;                                       // "show all files" expander
+  const fileGroupOpen = {};                                     // per-group "show all" expanders (file card)
+  const FILE_GROUP_SHOW = 5;                                    // rows per group before "show all"
+  // Card files by kind. Capture names come from sdOpenCapture(): bandwatch-<radio>-YYYYMMDD-HHMMSS.pcap (UTC, host
+  // clock set) or bandwatch-<radio>-NNNN.pcap (no clock). The text files are the C4 event log and its baseline.
+  const FILE_GROUPS = [
+    { key: 'wifi', title: 'Wi-Fi captures', desc: '802.11 frames · radiotap pcap', test: b => /^bandwatch-wifi-/.test(b), cap: true },
+    { key: 'ble', title: 'BLE captures', desc: 'advertising packets · BLE LL pcap', test: b => /^bandwatch-ble-/.test(b), cap: true },
+    { key: '154', title: '802.15.4 captures', desc: 'Zigbee / Thread frames · 802.15.4-TAP pcap', test: b => /^bandwatch-802154-/.test(b), cap: true },
+    { key: 'events', title: 'Event log', desc: 'surveillance hits and new devices (CSV)', test: b => b === 'events.csv' || b === 'events.old.csv' },
+    { key: 'seen', title: 'Device baseline', desc: 'MACs already known on this card · deleting seen.csv restarts novelty', test: b => b === 'seen.csv' || b === 'seen.old.csv' },
+    { key: 'surv', title: 'Surveillance OUI list', desc: 'extra prefixes, read at boot', test: b => b === 'surveil.csv' },
+    { key: 'other', title: 'Other files', desc: '', test: () => true },
+  ];
+  function capWhen(b) {   // "2026-10-07 10:55:24" from the file name, or "#12" for an unclocked one
+    let m = b.match(/-(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})\.pcap$/);
+    if (m) return { label: `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}`, key: m.slice(1).join('') };
+    m = b.match(/-(\d{4})\.pcap$/);
+    return m ? { label: `#${+m[1]} (no clock)`, key: '' } : { label: '', key: '' };
+  }
   let rmArm = null;                                            // {name, t}: first Delete click, waiting for the second
   let rmPending = null;                                        // {name, t}: sdrm sent, until the host reports the result
   let pullReq = null;                                          // name the user asked to download (auto-save on done)
@@ -655,7 +686,12 @@
     }
     if (state) renderSdFiles(state);
   });
-  $('#sdShowAll').addEventListener('click', () => { sdShowAll = !sdShowAll; if (state) renderSdFiles(state); });
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-fgroup]');
+    if (!b) return;
+    fileGroupOpen[b.dataset.fgroup] = !fileGroupOpen[b.dataset.fgroup];
+    if (state) renderSdFiles(state);
+  });
   // The host's sd_rm {name, pending, ok, msg, t}: release the latch and say how it went, once per result.
   function sdRmTrack(r) {
     if (rmPending && Date.now() - rmPending.t > RM_PENDING_MS) { toast('Delete not confirmed', `${rmPending.name}: no answer from the device`, 'warn'); rmPending = null; }
@@ -664,8 +700,8 @@
     else toast('Delete refused', `${r.name}${r.msg ? ': ' + r.msg : ''}`, 'warn');
     rmPending = null;
   }
-  // SD card file list: compact by default (the live event log + baseline, and the newest few pcaps); "show all"
-  // adds the older pcaps, the rotated .old files and surveil.csv. Each row: Download and Delete.
+  // SD card files, grouped by kind in a full-width card (the rail only links to it): full file names, capture
+  // times parsed from the name, size, Download and two-click Delete. Long groups show the newest few + "show all".
   function renderSdFiles(s, files) {
     const sd = s.sd || {};
     if (files === undefined) files = (sd.mounted && sd.files) ? sd.files : [];
@@ -673,13 +709,7 @@
     const sr = s.sd_read, busy = pullActive(s);
     if (rmArm && Date.now() - rmArm.t >= RM_ARM_MS) rmArm = null;
     const base = (n) => String(n).split('/').pop();
-    const texts = EV_FILES.map(t => files.find(([n]) => base(n) === t)).filter(Boolean);
-    const pcaps = files.filter(([n]) => !EV_FILES.includes(base(n))).reverse();   // directory order ≈ oldest first
-    const compact = [...pcaps.slice(0, SD_COMPACT_PCAPS), ...texts.filter(([n]) => EV_MAIN.includes(base(n)))];
-    const all = [...pcaps, ...texts];
-    const rows = sdShowAll ? all : compact;
-    const row = ([n, sz]) => {
-      const b = base(n), isRec = b === recName;
+    const acts = (n, b, isRec) => {
       let dl;
       if (sr && sr.name === b && busy)
         dl = `<span class="pullprog" title="${kb(sr.received)} / ${kb(sr.total)}"><i style="width:${sr.total ? Math.round(sr.received / sr.total * 100) : 0}%"></i></span>`;
@@ -692,13 +722,35 @@
       else if (rmArm && rmArm.name === b) rm = `<button class="tiny stop" data-rm="${esc(n)}">Really delete?</button>`;
       else rm = `<button class="tiny ghost" data-rm="${esc(n)}" ${isRec || busy || rmPending ? 'disabled' : ''}
         title="${isRec ? 'being recorded right now - stop recording first' : busy ? 'wait for the download to finish' : 'delete on the card'}">Delete</button>`;
-      return `<li><span class="fname mono" title="${esc(n)}">${esc(b)}</span><span class="note dim fsize">${kb(sz)}</span><span class="acts">${dl}${rm}</span></li>`;
+      return dl + rm;
     };
-    $('#sdFiles').innerHTML = rows.map(row).join('');
-    const hidden = all.length - compact.length;
-    $('#sdFilesFoot').hidden = !all.length;
-    $('#sdShowAll').hidden = hidden <= 0;
-    $('#sdShowAll').textContent = sdShowAll ? 'Show fewer' : `Show all ${all.length} files (${hidden} more)`;
+    // Bucket every file into the first group whose test matches; captures newest first (clocked by time, then
+    // numbered ones by directory order, which is roughly oldest first).
+    const buckets = FILE_GROUPS.map(g => ({ g, rows: [] }));
+    files.forEach(([n, sz], idx) => {
+      const b = base(n);
+      buckets.find(x => x.g.test(b)).rows.push({ n, b, sz: sz || 0, idx, when: capWhen(b) });
+    });
+    let total = 0;
+    const html = buckets.filter(x => x.rows.length).map(({ g, rows }) => {
+      if (g.cap) rows.sort((a, c) => (c.when.key || '').localeCompare(a.when.key || '') || c.idx - a.idx);
+      const size = rows.reduce((t, r) => t + r.sz, 0); total += size;
+      const open = !!fileGroupOpen[g.key], shown = open ? rows : rows.slice(0, FILE_GROUP_SHOW);
+      const body = shown.map(r => {
+        const isRec = r.b === recName;
+        return `<tr><td class="fn mono" title="${esc(r.n)}">${esc(r.b)}${isRec ? ' <span class="recdot" title="being recorded"></span>' : ''}</td>` +
+          (g.cap ? `<td class="fwhen">${esc(r.when.label)}</td>` : '') +
+          `<td class="fsz">${kb(r.sz)}</td><td class="acts">${acts(r.n, r.b, isRec)}</td></tr>`;
+      }).join('');
+      const more = rows.length > FILE_GROUP_SHOW
+        ? `<div class="more"><button class="tiny ghost" data-fgroup="${g.key}">${open ? 'Show fewer' : `Show all ${rows.length} (${rows.length - FILE_GROUP_SHOW} more)`}</button></div>` : '';
+      return `<div class="fgroup"><h3>${g.title}<small>${rows.length} file${rows.length > 1 ? 's' : ''} · ${kb(size)}${g.desc ? ' · ' + g.desc : ''}</small></h3>` +
+        `<table class="ftable"><tbody>${body}</tbody></table>${more}</div>`;
+    }).join('');
+    $('#fileGroups').innerHTML = html;
+    $('#filesCard').hidden = !files.length;
+    $('#filesSum').textContent = files.length ? `${files.length} file${files.length > 1 ? 's' : ''} · ${kb(total)}${(sd.file_total || 0) > files.length ? ` · listing truncated (${sd.file_total} on card)` : ''}` : '';
+    $('#sdFilesLink').hidden = !files.length;
   }
 
   function spark(hist) {

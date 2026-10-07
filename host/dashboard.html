@@ -198,6 +198,11 @@
       </div>
       <div class="control capinfo" id="capInfo"></div>
       <div class="control capinfo" id="sdInfo"></div>
+      <div class="control" id="evCtl" style="display:none">
+        <label>SD event log</label>
+        <button class="primary" id="evBtn">Start event log</button>
+      </div>
+      <div class="control capinfo" id="evInfo" style="display:none"></div>
       <div class="control capinfo" id="bleCapNote" style="display:none">BLE capture records <b>advertising packets only</b>, reconstructed from HCI reports — no connections, no channel number. See DEVELOPER.md §13.</div>
     </div>
   </section>
@@ -382,6 +387,7 @@
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };
   const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
+  const kb = (b) => b >= 1048576 ? `${fmt(b / 1048576, 1)} MB` : `${fmt((b || 0) / 1024, 1)} KB`;
   const rate = (n) => n >= 10000 ? (n / 1000).toFixed(0) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n.toFixed(0);
   const band = (c) => (state && state.band === '154') ? '802.15.4' : (state && state.band === 'spec') ? '2.4 GHz' : c > 14 ? '5 GHz' : '2.4 GHz';
   const ED_FLOOR = -95, ED_CEIL = -20;   // dBm range for the spectrum display (matches firmware kEdFloor/Ceil)
@@ -417,9 +423,11 @@
   }
   // The state poll is only 1 Hz and starting an SD capture has to mount the card, so latch a pending
   // label on the button immediately; renderControls leaves it alone until the device confirms.
-  const pending = { cap: 0, sd: 0, deauth: 0 };
+  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0 };
   let explainPending = null;   // click latch for the Explain buttons until the host reports the run active (poll is 1 Hz)
   const prev = {};   // last seen on/off state per sink, so transitions can be announced once
+  const EV_FILES = ['events.csv', 'events.old.csv', 'seen.csv', 'surveil.csv'];   // C4 text files on the card (not pcaps)
+  const EV_PULL = ['events.csv', 'seen.csv'];                                     // the ones offered for pulling
   function armPending(which, btn, label) {
     pending[which] = Date.now();
     btn.disabled = true;
@@ -485,6 +493,19 @@
     armPending('sd', $('#sdBtn'), on ? 'Starting…' : 'Stopping…');
     toast(on ? 'Recording to microSD' : 'Stopping SD recording', on ? 'mounting the card…' : 'closing the file…');
     post({ cmd: 'sdcap', value: on });
+  });
+  $('#evBtn').addEventListener('click', () => {
+    const on = !(state && state.events && state.events.on);
+    armPending('ev', $('#evBtn'), on ? 'Arming…' : 'Disarming…');
+    toast(on ? 'Event log armed' : 'Event log off', on ? 'new devices and surveillance hits go to events.csv' : 'no further rows are logged');
+    post({ cmd: 'events', value: on });
+  });
+  // Pull an event-log file off the SD card over serial (bandwatch_host.py reassembles it into the captures dir).
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-pull]');
+    if (!b || (state && state.sd_read && !state.sd_read.done)) return;   // one pull at a time
+    post({ cmd: 'sdread', path: b.dataset.pull });
+    toast('Pulling from SD card', b.dataset.pull.split('/').pop(), 'rec');
   });
   $('#huntStop').addEventListener('click', () => post({ cmd: 'hunt', mac: null }));
   $('#deauthStop').addEventListener('click', () => { armPending('deauth', $('#deauthStop'), 'Stopping…'); post({ cmd: 'deauth', mac: null }); });
@@ -558,7 +579,6 @@
     if (sel.dataset.chs !== want) { sel.innerHTML = '<option value="0">hopping (sweep)</option>' + s.channels.map(c => `<option value="${c.ch}">park on ch ${c.ch} (${band(c.ch)})</option>`).join(''); sel.dataset.chs = want; }
     if (document.activeElement !== sel) sel.value = String(s.park || 0);
     const saved = s.saved || { usb: {}, sd: {} };
-    const kb = (b) => b >= 1048576 ? `${fmt(b / 1048576, 1)} MB` : `${fmt((b || 0) / 1024, 1)} KB`;
     const savedNote = (sv) => sv && sv.count
       ? `${sv.count} file${sv.count > 1 ? 's' : ''} saved this session · last <code>${esc((sv.last || '').split('/').pop())}</code> (${fmt(sv.frames)} frames, ${kb(sv.bytes)})`
       : '';
@@ -591,12 +611,14 @@
       sdlsAt = Date.now(); post({cmd: 'sdls'});
     }
     let sdFiles = '';
-    const flist = (sd.mounted && !rec && sd.files) ? sd.files : [];
+    const allFiles = (sd.mounted && !rec && sd.files) ? sd.files : [];
+    const isLog = (n) => EV_FILES.includes(n.split('/').pop());
+    const flist = allFiles.filter(([n]) => !isLog(n));   // pcaps; the event-log files are listed under the event log
     if (flist.length) {   // directory order ≈ oldest first; show the newest few
-      const cutShort = Math.max(0, (sd.file_total || 0) - flist.length);          // device dropped entries mid-list
+      const cutShort = Math.max(0, (sd.file_total || 0) - allFiles.length);       // device dropped entries mid-list
       const shown = flist.slice(-5);
       const hidden = flist.length - shown.length + cutShort;
-      sdFiles = `<br><span class="dim">${flist.length}${cutShort ? ` of ${sd.file_total}` : ''} files on card${hidden ? ` (+${hidden} not shown)` : ''}</span>` +
+      sdFiles = `<br><span class="dim">${flist.length} pcap${flist.length > 1 ? 's' : ''} on card${cutShort ? ' (listing truncated)' : ''}${hidden ? ` (+${hidden} not shown)` : ''}</span>` +
         shown.map(([n, sz]) => `<br>${esc(n.split('/').pop())} · ${kb(sz)}`).join('');
     }
     $('#sdInfo').innerHTML = !sd.mounted
@@ -620,6 +642,45 @@
       else if (saved.sd && saved.sd.last) toast('SD recording saved', `${(saved.sd.last || '').split('/').pop()} · ${fmt(saved.sd.frames)} frames, ${kb(saved.sd.bytes)}`, 'done');
     }
     prev.capOn = !!cap; prev.sdOn = rec;
+    renderEvents(s, allFiles.filter(([n]) => isLog(n)));
+  }
+
+  // C4 SD event log: status from the device's "ev" object (absent on firmware before C4 - hide the control then).
+  function renderEvents(s, logFiles) {
+    const ev = s.events;
+    $('#evCtl').style.display = ev ? '' : 'none';
+    $('#evInfo').style.display = ev ? '' : 'none';
+    if (!ev) return;
+    const on = !!ev.on;
+    if (pending.ev && (Date.now() - pending.ev > 6000 || (prev.evOn !== undefined && on !== prev.evOn))) pending.ev = 0;
+    prev.evOn = on;
+    const btn = $('#evBtn');
+    if (!pending.ev) { btn.textContent = on ? 'Stop event log' : 'Start event log'; btn.disabled = false; }
+    btn.classList.toggle('stop', on);
+    const n = (v) => fmt(v || 0);
+    let html;
+    if (!on) html = 'Event log: off - nothing is logged.';
+    else if (!ev.card)
+      html = `<span class="recdot"></span>Event log: armed - no card, buffering (${n(ev.pending)} waiting) · retries every 30 s` +
+        (ev.wait ? `<br><span class="dim">${n(ev.wait)} new-device checks skipped until a baseline loads</span>` : '');
+    else
+      html = `<span class="recdot"></span>Event log: logging - <b>${n(ev.written)}</b> rows written, ${n(ev.pending)} pending` +
+        ` · ${n(ev.new)} new, ${n(ev.surv)} surveillance · <span title="${n(ev.file)} MACs in seen.csv">baseline ${n(ev.base)}</span>`;
+    if (ev.drop || ev.err)
+      html += `<br><b style="color:var(--critical)">${ev.drop ? `${n(ev.drop)} rows dropped` : ''}${ev.drop && ev.err ? ' · ' : ''}${ev.err ? `${n(ev.err)} card errors` : ''}</b>`;
+    // pull buttons for the log and the baseline, once the card listing has them
+    const sr = s.sd_read;
+    for (const [f, sz] of logFiles.filter(([f]) => EV_PULL.includes(f.split('/').pop()))) {
+      const base = f.split('/').pop();
+      let act;
+      if (sr && !sr.done && sr.name === base) act = `<span class="dim">pulling ${kb(sr.received)} / ${kb(sr.total)}</span>`;
+      else if (sr && sr.done && sr.name === base) act = `<a href="/file?name=${encodeURIComponent(base)}">download</a>`;
+      else act = `<button class="ghost" data-pull="${esc(f)}" ${sr && !sr.done ? 'disabled' : ''}>pull to Mac</button>`;
+      html += `<br><code>${esc(base)}</code> · ${kb(sz)} ${act}`;
+    }
+    html += `<br><span class="dim">new = a MAC not seen on this card before (randomized MACs are ignored); the baseline ` +
+      `(seen.csv) grows as you walk. Rows go to events.csv; the setting stays on the device.</span>`;
+    $('#evInfo').innerHTML = html;
   }
 
   function renderHunt(s) {

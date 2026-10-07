@@ -21,6 +21,9 @@ Serial protocol (one line each):
     {"t":"pr", "mac":.., "ssid":..}  a directed probe request: a client asking for that network (C1;
                                   each (MAC, SSID) pair at most once a minute; Wi-Fi modes)
     {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
+    {"t":"ev", "ev":{...}}        SD event log status (every 5 s while armed; the same "ev" object rides on
+                                  hello and the "events" ack): on, card, base, file, written, pending,
+                                  surv, new, drop, err, wait - see _set_events()
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
     S <n> <base64>                               chunk of a file being read back (after "sdread")
@@ -28,7 +31,9 @@ Serial protocol (one line each):
 Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
 "deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), 
 "dca <client_mac> <ap_bssid>" / "dca 0" (targeted deauth to one client),
-"sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info".
+"sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "time <epoch>", "info",
+"events 0|1" (C4: arm/disarm the SD event log - /events.csv rows for surveillance hits and MACs new to this card's
+/seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s).
 
 pcap link types written: 127 radiotap (Wi-Fi), 283 IEEE 802.15.4-TAP, 256 BLE LL with pseudo-header. BLE
 records are advertising packets reconstructed from HCI reports - see docs/DEVELOPER.md section 13.
@@ -80,6 +85,9 @@ DEV_HIST_LEN = 120      # per-device RSSI samples (one per device report, ~2 s)
 DEV_EXPIRE_S = 600      # forget devices not seen for this long
 PROBE_TTL_S = 900       # C1: forget a (MAC, SSID) probe pairing not re-announced for this long (device repeats <= 1/min)
 PROBE_MAX = 512         # cap on probing MACs kept (randomized MACs make one per probe burst)
+# C4 event-log text files on the card that "sdread" may pull besides the pcaps (they land in the captures dir under
+# the same name, overwritten on re-pull, and download through /file like a pcap).
+CARD_TEXT_FILES = ("events.csv", "events.old.csv", "seen.csv", "surveil.csv")
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "bandwatch", "oui.csv")
 
@@ -360,6 +368,7 @@ class Bandwatch:
             "ble": {"devs": 0, "cycles": 0},
             "sd": None,              # {"mounted","mb","cap","file","frames","bytes","err","clock"}
             "sd_read": None,         # a card file being pulled off: {name,total,received,done,path}
+            "events": None,          # C4 SD event log status, the device's "ev" object (None = old firmware)
             # completed captures this session, per sink, for the dashboard counters
             "saved": {"usb": {"count": 0, "last": None, "frames": 0, "bytes": 0},
                       "sd":  {"count": 0, "last": None, "frames": 0, "bytes": 0}},
@@ -492,6 +501,14 @@ class Bandwatch:
             self.state["log"].append(f"sd capture saved: {prev['file']} ({prev.get('frames', 0)} frames)")
             self._sd_prev = None
 
+    def _set_events(self, ev):
+        """C4 event log status. The device's "ev" object: on (armed), card (last mount attempt worked), base
+        (baseline MACs in RAM), file (entries in /seen.csv), written / pending (/events.csv rows written / still
+        buffered), surv / new (rows by kind), drop (rows lost), err (card errors), wait (novelty checks skipped
+        because no baseline is loaded yet). Absent on firmware before C4: keep whatever we had (None)."""
+        if isinstance(ev, dict):
+            self.state["events"] = dict(ev)
+
     def _set_deauth(self, d):
         # device sends [bssid, park channel (0 if hopping), frames sent, frames failed] or null for broadcast mode;
         # or [client_mac, ap_bssid, targeted_flag=1, sent, fail] for targeted mode.
@@ -569,6 +586,9 @@ class Bandwatch:
             if msg.get("sd") is not None:
                 st["sd"] = msg["sd"]
                 self._sd_track(st["sd"])
+            self._set_events(msg.get("ev"))
+        elif t == "ev":
+            self._set_events(msg.get("ev"))
         elif t == "d":
             c = msg["c"]
             entry = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
@@ -710,6 +730,8 @@ class Bandwatch:
                         sd[dest] = msg[k]
                 st["sd"] = sd
                 self._sd_track(sd)
+            if msg.get("cmd") == "events":
+                self._set_events(msg.get("ev"))
             if msg.get("cmd") == "sdread":
                 self._sd_read_start(msg.get("file"), msg.get("bytes"))   # the ack precedes the S chunks
             elif msg.get("cmd") == "sdread_done":
@@ -727,6 +749,13 @@ class Bandwatch:
             st["log"].append(f"{t}: {msg.get('msg')}")
             if str(msg.get("msg", "")).startswith("sdread"):
                 self._sd_read_finish(False)   # the file will not be coming; close out the half-built buffer
+            elif t == "err" and str(msg.get("msg", "")).startswith("sdcap:") and "recording stopped" in str(msg.get("msg")):
+                # A card write failed (pulled mid-recording): the device has already stopped. Clear cap now
+                # rather than wait for the next d/ble line's "sdc", and let _sd_track count the partial file.
+                sd = st.get("sd") or {}
+                sd["cap"] = 0
+                st["sd"] = sd
+                self._sd_track(sd)
 
     def merge_wifi(self, rows):
         now = time.time()
@@ -1229,7 +1258,7 @@ class Bandwatch:
                               for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
-             "sd_read": st["sd_read"], "saved": st["saved"],
+             "sd_read": st["sd_read"], "saved": st["saved"], "events": st["events"],
             "oui_source": self.oui.source,
         }
 
@@ -1351,12 +1380,16 @@ def make_handler(bw, classic_path, v2_path=None, ui="v2"):
                     bw.send(f"dca {mac} {ap_bssid}" if mac and ap_bssid else "dca 0")
                 elif cmd == "sdcap":
                     bw.send(f"sdcap {1 if req.get('value') else 0}")
+                elif cmd == "events":   # C4 SD event log; persists on the device
+                    bw.send(f"events {1 if req.get('value') else 0}")
                 elif cmd == "sdread":
                     name = (req.get("path") or "").lstrip("/")
                     # The card lists bare names ("bandwatch-wifi-..."), but SD.open wants an absolute path, so we
                     # accept either and normalize to "/name". "sdread /" is 8 chars and the device's line buffer
                     # holds 47, so the name must be <= 39 or its last char is silently dropped on the way in.
-                    if re.match(r"^bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name) and len(name) <= 39:
+                    # Besides the pcaps, the C4 event-log files can be pulled (fixed names, all well under 39).
+                    if (re.match(r"^bandwatch-(?:wifi|ble|802154)-\S+\.pcap$", name)
+                            or name in CARD_TEXT_FILES) and len(name) <= 39:
                         bw.send(f"sdread /{name}")
                     else:
                         return self._json({"error": "bad card file path"}, 400)

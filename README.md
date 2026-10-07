@@ -261,6 +261,11 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.19.1** — Dashboard: the SD card file list is a full-width, grouped card (names, capture time, size, Download,
+  two-click Delete). The host opens the serial port exclusively, so a second host is refused instead of splitting the
+  bytes. Full detail in [`CHANGELOG.md`](CHANGELOG.md).
+- **1.19** — LED alert blips (surveillance hit, Zigbee permit-join, new device; `alerts 1|0`), classic dashboard
+  retired, `sdrm` deletes a card file, `/seen.csv` rotation. See [`CHANGELOG.md`](CHANGELOG.md).
 - **1.18** — **Event log on the microSD card** (`events 1|0`, persisted): `events.csv` rows for surveillance‑OUI
   matches and for devices new to the card's `seen.csv` baseline (randomized MACs excluded), buffered and flushed in
   short mounts, rotated at 1 MB; extra surveillance OUIs from `surveil.csv`. **Card removal handled**: a pulled

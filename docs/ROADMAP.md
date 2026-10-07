@@ -437,8 +437,8 @@ screen. Open items:
 
 `dashboard2.html`: controls grouped into a sticky left rail, one scrolling column instead of five tabs, the active
 radio's device table open while the other two fold into "last seen" caches, and hunt/deauth sharing a single action
-bar. Same data, same zero‑dependency hand‑rolled charts; served alongside the classic page — `--ui v2` /
-`./host/run-v2.sh` flips which one sits at `/`, and both pages cross‑link. The SD pull flow landed with it: card
+bar. Same data, same zero‑dependency hand‑rolled charts; first served alongside the classic page (`--ui v2` /
+`./host/run-v2.sh` flipped which sat at `/`; both removed in v1.19, see below). The SD pull flow landed with it: card
 files stream back over serial (`sdread`) and become downloadable from the new UI.
 
 Open items:

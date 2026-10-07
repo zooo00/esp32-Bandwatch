@@ -139,11 +139,12 @@ button is no longer "…".
 
 ## Improvements
 
-### I1 · Run the regression suite automatically — P2, feature
-- `tests/run_offline.sh` exists. Wire it into a git pre-push hook (`.git/hooks/pre-push` or a `tools/hooks/`
-  script plus a setup line in `setup.sh`), so tiers 1-2 run before every push.
-- **Done when:** a push with a failing host test or a static-RAM jump past `tests/firmware/static_ram_ceiling.json`
-  is refused.
+### I1 · Run the regression suite automatically — P3, feature (host tier done)
+- Done: `tools/pre-push` (installed per `AGENTS.md`) refuses force-pushes/deletions and runs the host tier
+  (`tests/host`) before every push.
+- Left: the firmware tier (compile + static-RAM ceiling in `tests/firmware/static_ram_ceiling.json`) is not in the hook
+  because it needs the toolchain and is slow; run `tests/run_offline.sh` before a release.
+- **Done when:** a static-RAM jump past the ceiling is refused at push time (or decide it stays a release step).
 
 ### I2 · Raise test coverage where bugs were found — P2, feature (partly done)
 - Since written: `tests/host/test_sdrm.py` (10), alerts command/protocol tests, `T11SdRm` and `T12Alerts` on the board.

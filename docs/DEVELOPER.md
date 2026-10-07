@@ -828,7 +828,7 @@ floor standing (it shrinks toward `kCapSlotsMin` instead of being refused), and 
 a ring that `cap 1` made before the FATFS mount was floor-checked against the pre-mount heap, so `cap 1` then
 `sdcap 1` used to land at **16.1 kB** free (measured). Refit re-sizes it against the post-mount heap without
 touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order gives 9 slots, 33.8 kB). It guards only the one biggest allocation (plus the page-switch
-headroom above), so rule 4 still keeps the rest honest: current static usage is 77,272 B (v1.18; 74,032 B at v1.15.4), under 3 kB
+headroom above), so rule 4 still keeps the rest honest: current static usage is 77,392 B (v1.19.1; 77,272 B at v1.18; 74,032 B at v1.15.4), under 3 kB
 below the line, and that headroom is the edge of an unverified budget rather than a wall.
 
 ### Where the static RAM went (symbol-level, v1.5.5 -> v1.10 -> v1.19.1)

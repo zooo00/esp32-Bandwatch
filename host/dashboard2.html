@@ -362,7 +362,7 @@
         </div>
         <div class="devbody">
           <div class="toolbar">
-            <input type="search" id="bleFilter" placeholder="filter name / MAC / vendor / kind">
+            <input type="search" id="bleFilter" placeholder="filter name / MAC / vendor / company / kind">
             <label class="note"><input type="checkbox" id="bleActive" checked> seen in last 60 s</label>
             <span class="note dim push" id="bleNote"></span>
           </div>
@@ -1116,7 +1116,7 @@
 
   function renderBle(s) {
     const f = $('#bleFilter').value.trim().toLowerCase(), active = $('#bleActive').checked;
-    let rows = (s.ble_devs || []).filter(d => (!active || d.age < 60) && (!f || [d.name, d.mac, d.vendor, d.kind].join(' ').toLowerCase().includes(f)));
+    let rows = (s.ble_devs || []).filter(d => (!active || d.age < 60) && (!f || [d.name, d.mac, d.vendor, d.kind, d.company_name].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'ble');
     $('#nBle').textContent = `${(s.ble_devs || []).filter(d => d.age < 60).length} now`;
     $('#bleNote').textContent = s.band === 'ble' ? `${rows.length} shown · ${(s.ble_devs || []).length} known · scan cycle ${fmt((s.ble || {}).cycles)}` : `${(s.ble_devs || []).length} known (stale cache — switch Mode to Bluetooth LE to refresh)`;

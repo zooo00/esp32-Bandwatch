@@ -665,11 +665,22 @@ together. That last row is not hypothetical: 1.3 shipped briefly with the ring s
 mount, which left 12.5 kB free and put the device back in exactly the regime the original crashes came from.
 `sdcap` now opens the file before sizing the ring so `kCapHeapReserve` is reserved against post-mount heap.
 
+**The LCD page is a ~45 kB swing on its own** (RAM audit, 2026-10, `both` band, stable to ±0.1 kB across
+passes, `tools/probe_pages.py`): System ≈ 101.4 kB free, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8**
+(39 rows × row/2 labels/bar ≈ 156 LVGL objects, ~280 B each). The table above was not taken on a stated page,
+so treat it as Overview-ish. The tightest real state is SD capture *while on the Channels page*, and switching
+to Channels after a capture started is a page-side allocation nothing on the capture side can refuse - see the
+ROADMAP entry for drawing that page as one custom-draw object.
+
 ### The floor, as built (see [ROADMAP.md](ROADMAP.md))
 
 The proposal landed in `ensureCapRing()` (`capture.cpp`): right after allocating the ring it checks total free
 heap against `kMinFreeHeapB` (24 kB); below that the ring goes back to the heap and capture is refused with a
-JSON error — better than OOMing an LVGL page rebuild later. It guards only the one biggest allocation, so rule 4
+JSON error — better than OOMing an LVGL page rebuild later. Since 1.15.3 the ring is also *sized* to leave the
+floor standing (it shrinks toward `kCapSlotsMin` instead of being refused), and `sdcap` calls `refitCapRing()`:
+a ring that `cap 1` made before the FATFS mount was floor-checked against the pre-mount heap, so `cap 1` then
+`sdcap 1` used to land at **16.1 kB** free (measured). Refit re-sizes it against the post-mount heap without
+touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order gives 9 slots, 33.8 kB). It guards only the one biggest allocation, so rule 4
 still keeps the rest honest: current static usage is 79,560 B, about 440 B under the line, and that headroom is
 the edge of an unverified budget rather than a wall.
 

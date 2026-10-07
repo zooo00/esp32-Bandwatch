@@ -537,14 +537,14 @@
     document.querySelectorAll('#bandSeg button').forEach(b => b.classList.toggle('active', b.dataset.band === s.band));
     const spec = s.band === 'spec';
 
-    // --- channel park (ignored in BLE; the spectrum sweep walks its own frequencies) ---
+    // --- channel park (ignored in BLE; in spec it holds the sweep on that 15.4 channel's frequency) ---
     const sel = $('#park');
     const want = ['0', ...s.channels.map(c => String(c.ch))].join(',');
     if (sel.dataset.chs !== want) { sel.innerHTML = '<option value="0">hopping (sweep)</option>' + s.channels.map(c => `<option value="${c.ch}">park on ch ${c.ch} (${band(c.ch)})</option>`).join(''); sel.dataset.chs = want; }
     if (document.activeElement !== sel) sel.value = String(s.park || 0);
-    sel.disabled = s.band === 'ble' || spec;
+    sel.disabled = s.band === 'ble';
     $('#parkNote').textContent = s.band === 'ble' ? 'Bluetooth LE has no channel list of its own.'
-      : spec ? 'The spectrum sweep walks its own frequencies — parking applies once you switch back to a hopping mode.' : '';
+      : spec ? 'Parking holds the sweep on that channel\'s centre frequency; full-band sweeps pause until you unpark. A park is dropped when you change mode.' : '';
 
     // --- capture → this Mac (the firmware refuses "cap" in spec mode: no RX armed) ---
     const cap = s.capture;

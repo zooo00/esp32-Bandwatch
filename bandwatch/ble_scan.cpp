@@ -210,7 +210,11 @@ void startBle() {
 void stopBle() {
     if (!bleScan.inited) return;
     ble_gap_disc_cancel();
-    BLEDevice::deinit(false);   // keep controller memory so BLE can be re-initialised later
+    // deinit(false), not (true): core 3.3.11's BLEDevice::init() refuses once btMemReleased(BT_MODE_BLE), so
+    // releasing would make "band ble" a one-shot. It is not a RAM cost: nimble_port_deinit() runs either
+    // way and hands back the host task + msys pools; measured retention is ~260 B after the first visit,
+    // ~0 after that (RAM audit, 2026-10). Re-check if the C5 BT config ever grows.
+    BLEDevice::deinit(false);
     bleScan.inited = false;
 }
 

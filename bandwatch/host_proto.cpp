@@ -248,7 +248,9 @@ void sendDevices() {
     }
     if (wifiMode()) {
         const int n = collectWifiRefs(refs, kWifiDevSlots, kDevFreshMs);
-        if (!serialRoom(40 + n * 126)) return;   // +8: the association suffix field added in 1.5.5
+        // +8: the association suffix field added in 1.5.5. Do not raise this: 64 slots x 126 + 40 = 8,104 B,
+        // just inside the 8 KB TX buffer - any more and a full table can never pass serialRoom() at all.
+        if (!serialRoom(40 + n * 126)) return;
         Serial.print("{\"t\":\"w\",\"dev\":[");
         int emitted = 0;
         for (int i = 0; i < n; i++) {
@@ -270,7 +272,9 @@ void sendDevices() {
         Serial.print("]}\n");
     } else {
         const int n = collectBleRefs(refs, kBleDevSlots, kDevFreshMs);
-        if (!serialRoom(40 + n * 102)) return;
+        // A maxed row is ~110 B (int8 -128s, uint16 65535s, a 20-char name) plus escapes in the name; an
+        // under-budget row truncates the line mid-write instead of dropping it whole. 48 x 116 + 40 = 5.6 kB.
+        if (!serialRoom(40 + n * 116)) return;
         Serial.print("{\"t\":\"b\",\"dev\":[");
         int emitted = 0;
         for (int i = 0; i < n; i++) {
@@ -326,11 +330,12 @@ void handleCommand(char* line) {
             Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: no RX armed in spec mode\"}\n");
         } else if (want && !sd.capEnabled) {
             // Open the file first: mounting FATFS costs ~30 KB, and the ring must be sized against what is
-            // left afterwards or kCapHeapReserve is not actually reserved.
+            // left afterwards or kCapHeapReserve is not actually reserved. A ring that "cap 1" already made
+            // was sized before the mount, so refit re-sizes it if the mount pushed heap under the floor.
             if (!sdOpenCapture()) {
                 Serial.printf("{\"t\":\"err\",\"msg\":\"sdcap: %s\"}\n",
                               sd.mounted ? "could not open file on card" : "no SD card (check it is inserted)");
-            } else if (!ensureCapRing()) {
+            } else if (!refitCapRing()) {
                 Serial.print("{\"t\":\"err\",\"msg\":\"sdcap: no capture ring\"}\n");
                 sdCloseCapture();
             } else if (serialRoom(140)) {

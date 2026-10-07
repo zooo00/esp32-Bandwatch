@@ -470,7 +470,7 @@ What actually binds is **free heap at peak concurrent load**. Measured on hardwa
 | --- | --- |
 | idle, Wi-Fi | ~83 kB |
 | idle, BLE | ~95 kB |
-| SD capture (tightest normal state) | **31.9 kB** |
+| SD capture (tightest normal state; page not recorded - see §16 for the ±45 kB page swing) | **31.9 kB** |
 | BLE + SD capture | 32.3 kB |
 | SD capture with the pre-1.3 ring ordering | 12.5 kB — where LVGL page rebuilds start failing |
 
@@ -489,6 +489,17 @@ cost 8 B over the larger of them.) That headroom is the edge of an unverified bu
 does not fit. Repacking the struct to exactly 64 bytes bought 3 bytes of former padding for free instead — a
 good outcome here, but the reason only 3 of the 6 bytes are on the device is this unverified line, not
 anything about the radio.
+
+**Next lever: the Channels LCD page (~45 kB of heap).** The 2026-10 RAM audit measured free heap per LCD page in
+`both` band: System ≈ 101.4 kB, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8** — its 39 rows of
+row + 2 labels + bar are ~156 LVGL objects at ~280 B each. That is more than every static-RAM candidate combined,
+and it is the one allocation the capture floor cannot guard (switching to Channels *after* `cap`/`sdcap` started
+allocates on the page side). Plan: draw the grid as one object with an `LV_EVENT_DRAW_MAIN` handler (rects +
+`lv_draw_label` per row, data read from `channels[]` at draw time, `lv_obj_invalidate` from `refreshChannels`),
+expected back ~35-40 kB on that page. Measure before/after with `tools/probe_pages.py`; check the LCD for flicker
+and the mirror (§19) still sees the repaint. Then decide whether a page switch should also consult the floor.
+Smaller candidates parked from the same audit: heap `specFine[]` only in spec (504 B, needs null guards in five
+readers), `buf1` `/21` → `/30` (~1.6 kB, flicker risk), `Deauth.slotPad` (§9 territory - leave).
 
 ---
 

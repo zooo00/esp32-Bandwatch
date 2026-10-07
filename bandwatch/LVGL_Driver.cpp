@@ -31,13 +31,6 @@ void Lvgl_Display_LCD( lv_display_t *disp, const lv_area_t *area, uint8_t *px_ma
   if (g_mirror) mirrorOnFlush(area->x1, area->y1, area->x2, area->y2, px_map);   // live mirror over serial
   lv_display_flush_ready( disp );
 }
-/*Read the touchpad*/
-void Lvgl_Touchpad_Read( lv_indev_t * indev, lv_indev_data_t * data )
-{
-  (void)indev;
-  (void)data;
-  // No touch input
-}
 void example_increase_lvgl_tick(void *arg)
 {
     /* Tell LVGL how many milliseconds has elapsed */
@@ -51,9 +44,8 @@ void Lvgl_Init(void)
   lv_display_set_flush_cb(disp, Lvgl_Display_LCD);
   lv_display_set_buffers(disp, buf1, nullptr, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
 
-  lv_indev_t * indev = lv_indev_create();
-  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-  lv_indev_set_read_cb(indev, Lvgl_Touchpad_Read);
+  // No LVGL input device: this board has no touch panel, and the BOOT button is a GPIO polled in
+  // pollButton() (lcd_ui.cpp). The upstream C6 project's empty pointer indev only cost heap + a read timer.
 
   Bandwatch_Init();
 

@@ -112,8 +112,15 @@ bool applyChannelIdx(int idx) {
 bool advanceChannel() {
     if (!hopActive()) return false;
     if (modeSpec()) {   // fine spectrum: step off the channel grid in specStepMhz increments across 2.4 GHz
-        currentIdx += 1;
-        if (currentIdx < 0 || currentIdx >= specBinCount()) currentIdx = 0;
+        if (parkedIdx >= 0 && chanEnabled(parkedIdx)) {
+            // Parked (spec only enables the 15.4 set): hold the bin nearest that channel's centre. The sweep
+            // never wraps while parked, so sweepCount and the full-sweep "fs" line pause; "fd" keeps coming.
+            currentIdx = (ch154Freq(kChannels[parkedIdx]) - kSpecLoMhz + specStepMhz / 2) / specStepMhz;
+            if (currentIdx >= specBinCount()) currentIdx = specBinCount() - 1;
+        } else {
+            currentIdx += 1;
+            if (currentIdx < 0 || currentIdx >= specBinCount()) currentIdx = 0;
+        }
         currentSpecMhz = specBinMhz(currentIdx);
         edSetFreqMhz(currentSpecMhz);
         edReset();

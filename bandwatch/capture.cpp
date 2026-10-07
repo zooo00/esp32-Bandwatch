@@ -34,6 +34,10 @@ bool ensureCapRing() {
     const uint32_t freeHeap = ESP.getMaxAllocHeap();
     int slots = (freeHeap > kCapHeapReserve) ? static_cast<int>((freeHeap - kCapHeapReserve) / sizeof(CapFrame)) : 0;
     if (slots > kCapSlotsMax) slots = kCapSlotsMax;
+    // Also leave the floor below standing: a smaller ring beats refusing outright when heap is tight.
+    const uint32_t totalFree = ESP.getFreeHeap();
+    const int floorSlots = (totalFree > kMinFreeHeapB) ? static_cast<int>((totalFree - kMinFreeHeapB) / sizeof(CapFrame)) : 0;
+    if (slots > floorSlots) slots = floorSlots;
     if (slots >= kCapSlotsMin) {
         capRing = static_cast<CapFrame*>(malloc(sizeof(CapFrame) * slots));
         capSlots = capRing ? slots : 0;
@@ -60,10 +64,10 @@ bool ensureCapRing() {
 
 // Stop capturing and give the ring back to the heap. Safe from the loop task only: the radio callbacks
 // re-read capRing/captureEnabled on every frame and run to completion, so they never hold a stale pointer.
-void releaseCapture() {
-    captureEnabled = false;
-    sdCloseCapture();
-    capActive = false;
+namespace {
+// Free only the buffer; the sink flags are the caller's business. Clear capActive first so no producer
+// reserves a slot in it.
+void freeCapRing() {
     if (!capRing) return;
     CapFrame* r = capRing;
     capRing = nullptr;
@@ -71,6 +75,31 @@ void releaseCapture() {
     capHead = 0;      // separate stores: chaining them reads back a volatile, which C++20 deprecates
     capTail = 0;
     free(r);
+}
+} // namespace
+
+void releaseCapture() {
+    captureEnabled = false;
+    sdCloseCapture();
+    capActive = false;
+    freeCapRing();
+}
+
+// ensureCapRing() for a caller that just took heap away (sdcap mounting FATFS): a ring that already exists
+// was sized and floor-checked against the heap *before* that, so re-size it against what is left now rather
+// than sit below kMinFreeHeapB. Both sinks stay enabled; the frames still in the old ring are lost. On
+// failure the whole capture is released (USB sink included) and false returned.
+bool refitCapRing() {
+    if (!capRing || ESP.getFreeHeap() >= kMinFreeHeapB) return ensureCapRing();
+    const uint32_t before = ESP.getFreeHeap();
+    capActive = false;
+    freeCapRing();
+    if (!ensureCapRing()) { releaseCapture(); return false; }
+    capActive = captureEnabled || sd.capEnabled;
+    if (serialRoom(120))
+        Serial.printf("{\"t\":\"log\",\"msg\":\"capture ring re-sized to %d slots (heap was %u)\"}\n", capSlots,
+                      static_cast<unsigned>(before));
+    return true;
 }
 
 // Recompute what the RX paths should do, and hand the ring back once no sink wants frames.

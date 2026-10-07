@@ -25,7 +25,6 @@ void Lvgl_print(const char * buf);
 // Targeting LVGL v9 (Arduino LVGL library). Only the v9 driver APIs are declared to avoid
 // compilation failures due to removed v8 types (lv_disp_drv_t, lv_indev_drv_t, etc.).
 void Lvgl_Display_LCD( lv_display_t *disp, const lv_area_t *area, uint8_t *px_map );          // Displays LVGL content on the LCD
-void Lvgl_Touchpad_Read( lv_indev_t * indev, lv_indev_data_t * data );                        // Read the touchpad
 void example_increase_lvgl_tick(void *arg);
 
 void Lvgl_Init(void);

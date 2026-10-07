@@ -35,7 +35,16 @@ def setUpModule():
         raise unittest.SkipTest("set BANDWATCH_PORT to the board's serial port to run the hardware tier")
     board = Board(PORT)
     time.sleep(0.5)
-    ORIG = board.hello(timeout=8)
+    # Right after a flash or reboot the board needs several seconds (boot photo, mode card, radio start, the event
+    # log loading its card baseline) before it answers "info": retry for up to ~30 s instead of failing the module.
+    for attempt in range(4):
+        try:
+            ORIG = board.hello(timeout=8)
+            break
+        except AssertionError:
+            if attempt == 3:
+                raise
+            time.sleep(1)
 
 
 def tearDownModule():

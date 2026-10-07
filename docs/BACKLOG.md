@@ -113,6 +113,18 @@ tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this r
 - **Done when:** the minimum free heap is recorded in DEVELOPER §16/§20 and stays at or above 24 kB. If not,
   shrink `kBaseCap` or make `ensureCapRing()` account for the armed log.
 
+### V5 · `/seen.csv` rotation time on hardware — P3, verify
+- Put a `/seen.csv` with ~5000 distinct globally-unique MAC lines on the card, `events 1` (or re-insert while armed):
+  expect `seen.csv rotated: 5000 -> 2048`, `ev.file` 2048. Time the attach (the loop task is busy for it - LCD and
+  hopping pause). Pull both files and check the content.
+- **Done when:** the time is in DEVELOPER §20; if it is more than ~1 s, consider rotating in chunks across loops.
+
+### V6 · LED alerts on real hits — P3, verify
+- `ledtest` covers the patterns. Still unseen: a real surveillance OUI in range (or a test OUI in `/surveil.csv`) and
+  a Zigbee coordinator opening joins (`band 154`). Also: with events armed in a busy place, `new` blinks stay <= 1 per 2 s.
+- **Open choice from D4:** deleting `/seen.csv` while armed also drops MACs still waiting to be appended, so those
+  devices count as new once more. Fine, or keep them?
+
 ### V4 · Hot-pulling the card reset the board once (`rst: usb`) — P3, verify
 - One of three pulls coincided with a USB-peripheral reset. Not a panic, and not the probe (DEVELOPER §12). A
   likely cause is a supply dip briefly dropping the USB link.
@@ -125,9 +137,8 @@ tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this r
 
 ## Decisions needed (no code until decided)
 
-### D1 · LED feedback for events — decided **yes** (2026-10-07), in progress for v1.19
-Blips for surveillance hits (1.6.1), new devices (C4) and permit-join (C10); never over an active deauth; an
-`alerts 1|0` setting. Being built.
+### D1 · LED feedback for events — decided **yes**, done in v1.19
+Blips for surveillance hits (1.6.1), new devices (C4) and permit-join (C10); DEVELOPER §21. Real-hit check: V6.
 
 ### D2 · Retire the classic dashboard — decided **yes**, done in v1.19
 `host/dashboard.html` and `run-v2.sh` removed; `/classic` redirects to `/`; `--ui` is accepted and ignored. Last copy:
@@ -141,9 +152,8 @@ tag `v1.18.2`.
   - (c) a mirror frame-rate cap.
 - (b) changes the device's own UI behaviour while mirroring; decide whether that is acceptable.
 
-### D4 · `/seen.csv` growth — decided (2026-10-07): rotate, and make card files downloadable + deletable from the dashboard
-In progress for v1.19: `/seen.csv` rotates to `/seen.old.csv` keeping the newest baseline, a firmware `sdrm` command,
-and Download/Delete for every card file in the v2 SD card.
+### D4 · `/seen.csv` growth — decided: rotate + download/delete from the dashboard, done in v1.19
+Rotation at > 4096 entries, `sdrm`, Download/Delete for every card file (DEVELOPER §12, §20). Timing check: V5.
 
 ---
 

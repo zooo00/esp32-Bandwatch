@@ -101,11 +101,6 @@ button is no longer "…".
 
 ## Verify on hardware (built, not yet proven)
 
-### V2 · The SD faces showed on the LCD during a real pull — P3, verify (needs your eyes)
-- Both faces were checked through the mirror (`sdface 0|1`), and the removal/insertion log lines were checked
-  during a real pull. Nobody has yet confirmed seeing the faces on the panel itself during a pull.
-- **Done when:** someone watches the LCD through a pull and a re-insert.
-
 ### V5 · `/seen.csv` rotation time on hardware — P3, verify
 - Put a `/seen.csv` with ~5000 distinct globally-unique MAC lines on the card, `events 1` (or re-insert while armed):
   expect `seen.csv rotated: 5000 -> 2048`, `ev.file` 2048. Time the attach (the loop task is busy for it - LCD and
@@ -213,6 +208,7 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 | --- | --- | --- |
 | **I3** tier-3 baseline recorded | v1.19.1 | `tests/device/RESULTS.md` (19/19 at v1.18.2, 26/26 at v1.19) |
 | **V3** event-log heap at peak load | v1.19 | `events 1` + `cap 1` + `sdcap 1`, `both` band, walking every LCD page: minimum **25,172 B** free (Overview), floor 24,576 B. Holds by design - the capture ring shrinks to keep the floor - but the margin is thin (~0.6 kB); DEVELOPER §16/§20 |
+| **V2** SD faces on the LCD during a real pull | v1.18 | Watched on the panel 2026-10-07 through a real pull and re-insert: user reported the LCD behaviour "good" (no defects noted). Log showed `sd card removed` at 14:58:37; the monitor's 3-minute window did not capture the `inserted` line, so that half rests on the observation alone |
 | **V1** no duplicate `new` rows after a card swap | v1.18 fix | `/events.csv` read off the card 2026-10-07 (v1.19.1): 183 `new` rows, 175 distinct. The 8 duplicates are the same pre-fix ones from the first pull test (12:54-12:58); this session's 8 rows (after a power-cycle and a pull + re-insert: `pending` 4 held with `written` 0, then `base` 171 -> 176, `written` 8) are all distinct. Caveat: the board power-cycled before the pull, so the monitor missed it live and the pull's duration is unknown - a long pull within one session is still unproven |
 | **D4** `/seen.csv` rotation + card files downloadable/deletable | v1.19 / v1.19.1 | `T11SdRm` on the board (deleted a real pcap; refused the file being recorded); grouped "SD card files" card in v1.19.1. Rotation timing still open (V5) |
 | **D2** classic dashboard retired | v1.19 | `/classic` 301 -> `/`; last copy at tag v1.18.2 |

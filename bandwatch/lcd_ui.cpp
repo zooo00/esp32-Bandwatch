@@ -62,13 +62,13 @@ lv_obj_t* sweepLabel = nullptr;
 lv_obj_t* topRows[3] = {nullptr};
 lv_obj_t* topRates[3] = {nullptr};
 lv_obj_t* topBars[3] = {nullptr};
-// Per-channel strip: one custom-drawn object (ovStripDraw), not kChannelCount bar widgets. refreshOverview()
-// lays the visible bars out (x, height, colour) into ovBars[] and invalidates only the columns that changed.
-struct OvBar { uint8_t x; uint8_t h; uint16_t col565; };
-lv_obj_t* ovStrip = nullptr;
-OvBar ovBars[kChannelCount];
-int ovBarCount = 0;
-int ovBarW = 0;
+// Bar strips (Overview per-channel, Spectrum per-bin): one custom-drawn object each (barStripDraw), not a
+// widget per bar. The refresh lays the bars out (x, width, height, colour) and barStripSet() invalidates only
+// the columns that changed; a layout change repaints the whole strip.
+struct StripBar { uint8_t x; uint8_t w; uint8_t h; uint16_t col565; };
+struct BarStrip { lv_obj_t* obj; StripBar* bars; int count; };
+StripBar ovBarsBuf[kChannelCount];
+BarStrip ovStrip{nullptr, ovBarsBuf, 0};
 lv_obj_t* specLabel = nullptr;
 lv_obj_t* statsLine1 = nullptr;
 lv_obj_t* statsLine2 = nullptr;
@@ -111,7 +111,8 @@ lv_obj_t* spChanLabel = nullptr;   // header right: current bin
 lv_obj_t* spPeakLabel = nullptr;
 lv_obj_t* spStatsLabel = nullptr;
 constexpr int kLcdSpecBars = 42;   // fixed LCD bar slots; the fine bins (up to 84) map onto these (max-per-group)
-lv_obj_t* spBars[kLcdSpecBars] = {nullptr};
+StripBar spBarsBuf[kLcdSpecBars];
+BarStrip spStrip{nullptr, spBarsBuf, 0};
 lv_obj_t* spFoot = nullptr;
 // mode splash: a full-screen name card flashed over whatever page is up when the band changes; while BOOT is held
 // it steps through the modes' splashes and release commits the one on screen (pollButton + showBandSplash)
@@ -295,22 +296,49 @@ void drawClippedText(lv_layer_t* layer, lv_draw_label_dsc_t& l, const lv_area_t&
     layer->_clip_area = saved;
 }
 
-// Overview strip: bars bottom-aligned in a 36 px box, positions precomputed by refreshOverview().
-void ovStripDraw(lv_event_t* e) {
+// Bars bottom-aligned in the strip's box, positions precomputed by the page's refresh.
+void barStripDraw(lv_event_t* e) {
+    const BarStrip* st = static_cast<const BarStrip*>(lv_event_get_user_data(e));
     lv_layer_t* layer = lv_event_get_layer(e);
     lv_area_t a;
-    lv_obj_get_coords(ovStrip, &a);
+    lv_obj_get_coords(st->obj, &a);
     lv_draw_rect_dsc_t r;
     lv_draw_rect_dsc_init(&r);
     r.radius = 1;
-    for (int i = 0; i < ovBarCount; i++) {
-        const OvBar& b = ovBars[i];
-        const lv_area_t bar{a.x1 + b.x, a.y2 - b.h + 1, a.x1 + b.x + ovBarW - 1, a.y2};
+    for (int i = 0; i < st->count; i++) {
+        const StripBar& b = st->bars[i];
+        const lv_area_t bar{a.x1 + b.x, a.y2 - b.h + 1, a.x1 + b.x + b.w - 1, a.y2};
         lv_area_t tmp;
         if (!areaIntersect(tmp, bar, layer->_clip_area)) continue;
         r.bg_color = c565(b.col565);
         lv_draw_rect(layer, &r, &bar);
     }
+}
+
+lv_obj_t* makeBarStrip(lv_obj_t* parent, BarStrip& st, int height) {
+    st.obj = lv_obj_create(parent);
+    lv_obj_set_size(st.obj, LV_PCT(100), height);
+    lv_obj_align(st.obj, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(st.obj, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(st.obj, 0, 0);
+    lv_obj_set_style_pad_all(st.obj, 0, 0);
+    lv_obj_remove_flag(st.obj, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(st.obj, barStripDraw, LV_EVENT_DRAW_MAIN_END, &st);
+    st.count = 0;   // a fresh page is wholly dirty
+    return st.obj;
+}
+
+// Store bar k; when the layout is unchanged, repaint just the columns it occupied before and after.
+void barStripSet(BarStrip& st, int k, const StripBar& b, bool relayout) {
+    StripBar& o = st.bars[k];
+    if (!relayout && (o.x != b.x || o.w != b.w || o.h != b.h || o.col565 != b.col565)) {
+        lv_area_t sa;
+        lv_obj_get_coords(st.obj, &sa);
+        const int x1 = LV_MIN(o.x, b.x), x2 = LV_MAX(o.x + o.w, b.x + b.w) - 1;
+        const lv_area_t col{sa.x1 + x1, sa.y1, sa.x1 + x2, sa.y2};
+        lv_obj_invalidate_area(st.obj, &col);
+    }
+    o = b;
 }
 
 // What row i of the Devices list shows: its text (prefix + surveillance name / label / MAC tail) and name colour.
@@ -419,16 +447,7 @@ void buildOverviewPage(lv_obj_t* page) {
     }
 
     lv_obj_t* spec = make_panel(page, 58, PANEL_565, 4);
-    ovStrip = lv_obj_create(spec);
-    lv_obj_set_size(ovStrip, LV_PCT(100), 36);
-    lv_obj_align(ovStrip, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_opa(ovStrip, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(ovStrip, 0, 0);
-    lv_obj_set_style_pad_all(ovStrip, 0, 0);
-    lv_obj_remove_flag(ovStrip, LV_OBJ_FLAG_SCROLLABLE);
-    lv_obj_add_event_cb(ovStrip, ovStripDraw, LV_EVENT_DRAW_MAIN_END, nullptr);
-    ovBarCount = 0;
-    ovBarW = 0;
+    makeBarStrip(spec, ovStrip, 36);
     specLabel = make_label(spec, "", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(specLabel, LV_PCT(100));
     lv_obj_set_style_text_align(specLabel, LV_TEXT_ALIGN_CENTER, 0);
@@ -573,26 +592,7 @@ void buildSpectrumPage(lv_obj_t* page) {
     lv_obj_align(spStatsLabel, LV_ALIGN_BOTTOM_LEFT, 0, 0);
 
     lv_obj_t* spec = make_panel(page, 150, PANEL_565, 4);
-    lv_obj_t* barsRow = lv_obj_create(spec);
-    lv_obj_set_size(barsRow, LV_PCT(100), 124);
-    lv_obj_align(barsRow, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_opa(barsRow, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(barsRow, 0, 0);
-    lv_obj_set_style_pad_all(barsRow, 0, 0);
-    lv_obj_set_style_pad_column(barsRow, 2, 0);
-    lv_obj_set_flex_flow(barsRow, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(barsRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
-    lv_obj_remove_flag(barsRow, LV_OBJ_FLAG_SCROLLABLE);
-    for (int i = 0; i < kLcdSpecBars; i++) {
-        lv_obj_t* b = lv_obj_create(barsRow);
-        lv_obj_set_size(b, 3, 2);
-        lv_obj_set_style_bg_color(b, c565(DIM_565), 0);
-        lv_obj_set_style_border_width(b, 0, 0);
-        lv_obj_set_style_radius(b, 1, 0);
-        lv_obj_set_style_pad_all(b, 0, 0);
-        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-        spBars[i] = b;
-    }
+    makeBarStrip(spec, spStrip, 124);
     spFoot = make_label(spec, "2400    2440    2483 MHz", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(spFoot, LV_PCT(100));
     lv_obj_set_style_text_align(spFoot, LV_TEXT_ALIGN_CENTER, 0);
@@ -801,8 +801,8 @@ void refreshOverview(float global) {
     int barW = (150 / (nEnabled > 0 ? nEnabled : 1)) - 1;
     if (barW < 2) barW = 2;
     if (barW > 10) barW = 10;
-    lv_obj_update_layout(ovStrip);   // a just-built page has no width yet
-    const int stripW = lv_obj_get_width(ovStrip);
+    lv_obj_update_layout(ovStrip.obj);   // a just-built page has no width yet
+    const int stripW = lv_obj_get_width(ovStrip.obj);
     int used = 0, n = 0;
     for (int i = 0; i < kChannelCount; i++) {
         if (!chanEnabled(i)) continue;
@@ -812,15 +812,13 @@ void refreshOverview(float global) {
     }
     int gap = n > 1 ? (stripW - used) / (n - 1) : 0;
     if (gap < 1) gap = 1;
-    const bool relayout = (n != ovBarCount) || (barW != ovBarW);
-    lv_area_t sa;
-    lv_obj_get_coords(ovStrip, &sa);
+    const bool relayout = (n != ovStrip.count) || (ovStrip.count && ovStrip.bars[0].w != barW);
     int x = 0, k = 0;
     for (int i = 0; i < kChannelCount; i++) {
         if (!chanEnabled(i)) continue;
         for (int g = 1; g < 5; g++) if (i == kGroupStart[g]) x += 3;
         const ChannelState& ch = channels[i];
-        OvBar b{static_cast<uint8_t>(x), 2, DIM_565};
+        StripBar b{static_cast<uint8_t>(x), static_cast<uint8_t>(barW), 2, DIM_565};
         if (ch.unavailable) {
             b.col565 = BLACK_565;
         } else if (ch.hasData) {
@@ -828,18 +826,12 @@ void refreshOverview(float global) {
             b.col565 = (ch.busyEma < 3.0f) ? GREY_565 : score565(ch.busyEma);
         }
         if (i == currentIdx && monitorReady) b.col565 = CYAN_565;
-        OvBar& o = ovBars[k];
-        if (!relayout && (o.x != b.x || o.h != b.h || o.col565 != b.col565)) {
-            const lv_area_t col{sa.x1 + b.x, sa.y1, sa.x1 + b.x + barW - 1, sa.y2};
-            lv_obj_invalidate_area(ovStrip, &col);
-        }
-        o = b;
+        barStripSet(ovStrip, k, b, relayout);
         x += barW + gap;
         k++;
     }
-    ovBarCount = n;
-    ovBarW = barW;
-    if (relayout) lv_obj_invalidate(ovStrip);
+    ovStrip.count = n;
+    if (relayout) lv_obj_invalidate(ovStrip.obj);
     lv_label_set_text(specLabel, bandMode == BAND_5G ? "36-64   100-144   149-165"
                                  : bandMode == BAND_24G ? "2.4 GHz channels 1-13"
                                  : bandMode == BAND_154 ? "802.15.4 channels 11-26"
@@ -994,7 +986,17 @@ void refreshDevices() {
     devListShown = n;
     if (mode154()) snprintf(buf, sizeof(buf), "* = beacons (router)  seen < 20 s");
     else if (wifiMode()) snprintf(buf, sizeof(buf), "* = AP (beacons)  seen < 20 s");
-    else snprintf(buf, sizeof(buf), "BLE scan cycle %lu  seen < 20 s", static_cast<unsigned long>(bleScan.cycles));
+    else {
+        // Discovery runs continuously (BLE_HS_FOREVER), so the old "scan cycle" counter never moved; show the advert
+        // rate instead, measured over at least a second so it does not flicker at the UI tick.
+        static uint32_t advMark = 0, advMarkMs = 0, advRate = 0;
+        const uint32_t nowMs = millis(), adv = bleScan.advSeen;
+        if (nowMs - advMarkMs >= 1000) {
+            advRate = advMarkMs ? (adv - advMark) * 1000 / (nowMs - advMarkMs) : 0;
+            advMark = adv; advMarkMs = nowMs;
+        }
+        snprintf(buf, sizeof(buf), "%lu adv/s  seen < 20 s", static_cast<unsigned long>(advRate));
+    }
     lv_label_set_text(devFoot, buf);
 }
 
@@ -1086,7 +1088,7 @@ void refreshSystem(float global) {
     if (deauth.active) {
         char d[26];
         fmtMac(d, sizeof(d), deauth.targeted ? deauth.targetMac : deauth.bssid);   // the MAC actually being kicked
-        snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " · kick %s", d);   // buf is 64: both MACs fit
+        snprintf(buf + strlen(buf), sizeof(buf) - strlen(buf), " - kick %s", d);   // buf is 64: both MACs fit
     }
     lv_label_set_text(sysLines[n++], buf);
     snprintf(buf, sizeof(buf), "radio %s/%s/%s", errBand == ESP_OK ? "band ok" : "band ERR",
@@ -1112,7 +1114,7 @@ void refreshSpectrum() {
     if (peakMhz) {
         snprintf(buf, sizeof(buf), "%d dBm", peakDbm);
         lv_label_set_text(spPeakLabel, buf);
-        snprintf(buf, sizeof(buf), "peak %d MHz · %d MHz step", peakMhz, specStepMhz);
+        snprintf(buf, sizeof(buf), "at %d MHz, step %d", peakMhz, specStepMhz);   // ASCII: Montserrat 12 has no U+00B7
         lv_label_set_text(spStatsLabel, buf);
     } else {
         lv_label_set_text(spPeakLabel, "-- dBm");
@@ -1125,24 +1127,29 @@ void refreshSpectrum() {
 
     // Map the nb fine bins onto the fixed LCD bar slots (max-per-group so 1-bin peaks survive downsampling).
     const int curBar = (nb > 0 && currentSpecMhz) ? (currentIdx * kLcdSpecBars / nb) : -1;
+    // Each bar owns an exact 1/42 slice of the strip, less a 1 px gap. The old flex row used fixed 3 px bars on a
+    // 2 px gap (208 px) in a ~156 px panel, so the top three bars (~2477-2483 MHz) were clipped off the edge.
+    lv_obj_update_layout(spStrip.obj);
+    const int stripW = lv_obj_get_width(spStrip.obj);
+    const bool relayout = spStrip.count != kLcdSpecBars;
     for (int j = 0; j < kLcdSpecBars; j++) {
-        if (!spBars[j]) continue;
         int lo = j * nb / kLcdSpecBars, hi = (j + 1) * nb / kLcdSpecBars;
         if (hi <= lo) hi = lo + 1;
         if (lo >= nb) lo = nb - 1, hi = nb;
         int mx = -128; bool any = false;
         for (int i = lo; i < hi && i < nb; i++) if (specFine[i].edSamples > 0) { any = true; if (specFine[i].edMax > mx) mx = specFine[i].edMax; }
-        int h = 2;
-        lv_color_t col = c565(DIM_565);
+        const int x0 = j * stripW / kLcdSpecBars, x1 = (j + 1) * stripW / kLcdSpecBars;
+        StripBar b{static_cast<uint8_t>(x0), static_cast<uint8_t>(LV_MAX(1, x1 - x0 - 1)), 2, DIM_565};
         if (any) {
             const float sc = edDbmToScore(mx);
-            h = 2 + static_cast<int>(sc * 120.0f / 100.0f);
-            col = (sc < 3.0f) ? c565(GREY_565) : scoreColor(sc);
+            b.h = static_cast<uint8_t>(2 + static_cast<int>(sc * 120.0f / 100.0f));
+            b.col565 = (sc < 3.0f) ? GREY_565 : score565(sc);
         }
-        if (j == curBar && monitorReady) col = c565(CYAN_565);
-        lv_obj_set_height(spBars[j], h);
-        lv_obj_set_style_bg_color(spBars[j], col, 0);
+        if (j == curBar && monitorReady) b.col565 = CYAN_565;
+        barStripSet(spStrip, j, b, relayout);
     }
+    spStrip.count = kLcdSpecBars;
+    if (relayout) lv_obj_invalidate(spStrip.obj);
 }
 
 void driveLed(float global) {

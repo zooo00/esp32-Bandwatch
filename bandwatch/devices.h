@@ -40,23 +40,26 @@ struct WifiDev {
 };
 static_assert(sizeof(WifiDev) == 64, "WifiDev must stay 64 bytes: see the packing note above");
 
+// Field order is load-bearing, like WifiDev's: the 4-byte field leads, then the 2-byte ones, then bytes, so it
+// packs to exactly 48 B with no padding (the 1.4 order was 56 B with 8 B of padding). 48 x kBleDevSlots = 2,304 B.
 struct BleDev {
+    uint32_t lastMs;     // 0 = empty slot
     uint8_t mac[6];
     int8_t rssi;
     int8_t maxRssi;
     uint16_t adv;
-    uint32_t lastMs;     // 0 = empty slot
-    uint8_t addrType;    // 0 public, 1 random
     uint16_t company;    // Bluetooth SIG company id from manufacturer data, 0 if none
-    char name[21];
     uint16_t appearance; // GAP appearance, 0 if none
-    int8_t txPower;      // advertised TX power, 127 if none
     uint16_t svc;        // first 16-bit service UUID advertised, 0 if none
     uint16_t svcData;    // first 16-bit service-data UUID, 0 if none
+    uint8_t addrType;    // 0 public, 1 random
+    int8_t txPower;      // advertised TX power, 127 if none
     uint8_t appleType;   // Apple manufacturer-data type byte (0x12 FindMy, 0x07 AirPods, 0x0c handoff, ...), 0 if n/a
     uint8_t flags;       // bit0 connectable, bit1 legacy advertisement, bit2 scannable
     uint8_t surv;        // SurvCat: known surveillance hardware by OUI, 0 = none
+    char name[21];
 };
+static_assert(sizeof(BleDev) == 48, "BleDev must stay 48 bytes: repack before growing it (see the order note above)");
 
 // IEEE 802.15.4 (Zigbee / Thread) node, keyed by extended (64-bit) address when the frame carried one,
 // otherwise by PAN id + short address (key bytes 0..1 = 0xFF 0xFE marker, 2..3 pan, 4..5 short).
@@ -74,6 +77,7 @@ struct Dev154 {
     uint8_t proto;       // 0 unknown, 1 Zigbee, 2 Zigbee Green Power, 3 Thread / 6LoWPAN, 4 MAC-secured (likely Thread)
     uint8_t flags;       // bit0 extended address known, bit1 sends beacons (coordinator/router), bit2 permit-join, bit3 MAC security, bit4 data seen, bit5 ack seen
 };
+static_assert(sizeof(Dev154) == 24, "Dev154 must stay 24 bytes: repack before growing it");
 
 inline bool key8Eq(const uint8_t* a, const uint8_t* b) {
     for (int i = 0; i < 8; i++) if (a[i] != b[i]) return false;

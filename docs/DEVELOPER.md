@@ -688,8 +688,10 @@ FNV fingerprint per row in `devRowHash[]` so only changed rows repaint) the same
 Overview ≈98.9 kB (+11.3), Devices ≈106.4 (+15.2), Channels ≈106.4, System ≈102.3 - a ~7.5 kB spread, with
 Overview still the heaviest (its remaining cost is the header, global bar and Top-3 widgets). USB + SD capture
 now keeps a full 20-slot ring and bottoms out at ~27.8 kB on Overview. Drawn text that must stay on one line
-sets `LV_TEXT_FLAG_EXPAND` - `lv_draw_label` word-wraps inside its box, unlike `LV_LABEL_LONG_CLIP`. The Spectrum
-page's 42 bar widgets are the last per-item widget set (spec mode only, where capture is refused).
+sets `LV_TEXT_FLAG_EXPAND` - `lv_draw_label` word-wraps inside its box, unlike `LV_LABEL_LONG_CLIP`. v1.16.1 moved
+the Spectrum page's 42 bars onto the same `BarStrip` drawing (each bar an exact 1/42 slice of the width, less a
+1 px gap) - the old flex row overflowed its panel and clipped the top ~6 MHz. No page builds per-item widgets now.
+Montserrat 12/14/20 are built without U+00B7 and the dashes: LCD strings must stay ASCII or they render as boxes.
 
 ### The floor, as built (see [ROADMAP.md](ROADMAP.md))
 

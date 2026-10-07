@@ -132,7 +132,8 @@ controls into a left rail — band and park, capture start/stop, hunt/deauth sha
 mirror with page buttons — next to one scrolling column: stat tiles, a busy‑score bar chart per channel (grouped by
 band segment, current channel marked), the channel‑load trend, the spectrum views, only the active radio's device
 table open (the other two fold away as "last seen" caches), and the device log. Every file on the SD card gets a
-*pull to Mac* button that streams it back over serial and offers a download.
+*pull to Mac* button that streams it back over serial and offers a download. Each device table and the probe table
+have a *CSV* button that downloads exactly the rows shown (filter, checkboxes and sort), with RSSI min/avg/max columns.
 
 The classic tabbed layout (`dashboard.html`) was removed in v1.19; git tag `v1.18.2` has the last copy. `/classic`
 now redirects to `/`, and `--ui` is still accepted but ignored, so old bookmarks and scripts keep working.

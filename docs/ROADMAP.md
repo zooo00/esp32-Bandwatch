@@ -4,7 +4,7 @@ Planned work, open questions and known gaps. Release history is in [`CHANGELOG.m
 v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
 removal hardening, v1.18.x mirror frames + regression suite, v1.19 LED alerts / classic retired / card-file
 management, v1.19.1 grouped card-file view + exclusive serial port, v1.19.3 review fixes). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
-C10 + 1.6.1 LED alert blips (v1.19, D1); C2/C5/C7/C9/C11 still candidates, C12 the exit ramp.
+C10 + 1.6.1 LED alert blips (v1.19, D1), C11 host CSV export (v1.20); C2/C5/C7/C9 still candidates, C12 the exit ramp.
 
 **Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
 
@@ -81,7 +81,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 | C8 | Least-busy readout | quietest channel on Overview / dashboard | 0 — computable from today's `s` rows | no | S (UI only) |
 | C9 | Deauth refinements | rate control + auto-stop when the handshake is caught | a few bytes | fields in `d`, new command | S–M |
 | C10 ✅ v1.19 | Permit-join LED blip | a Zigbee door opening = brief double-flash | 0 (or +48 B, see entry) | no | S |
-| C11 | Host CSV export | one-click device-table download | n/a (host side) | no | S (UI only) |
+| C11 ✅ v1.20 | Host CSV export | one-click device-table download | n/a (host side) | no | S (UI only) |
 | C12 | ESP-IDF port | unlocks BLE 5 extended adv + re-tunable driver config | re-derive §9 offsets and the §16 budget | wire format unchanged | L (a migration, not a feature) |
 
 ### C1 — Probe-request mapping ("seeking" SSIDs)  ✅ SHIPPED v1.16
@@ -374,9 +374,17 @@ ago still blips forever. A per-node "last beacon-with-bit" timestamp (~1 B × 48
 **Verify.** A mains-powered Zigbee coordinator with permit-join toggled (its own LED usually blinks too): our blip follows
 at roughly beacon rate, suppressed by the limit.
 
-### C11 — Host CSV export
+### C11 — Host CSV export  ✅ SHIPPED v1.20
 
-**What.** One button per device table → `bandwatch-wifi-devs.csv` download. Pure host: build rows from the state dicts
+**Status: shipped v1.20.** Decisions on the open questions: columns mirror the rendered tables with raw values, plus
+`peak_rssi`, `rssi_samples`/`rssi_min`/`rssi_avg`/`rssi_max` over `hist`, `age_s` and an ISO-8601 `last_seen`; a
+button per device card and one on the "Networks being sought" card, exporting the rows currently shown (filter,
+checkboxes, sort). Pure dashboard, no host change after all. File names are
+`bandwatch-<wifi|ble|zigbee|probes>-<YYYYMMDD-HHMMSS>.csv`; RFC 4180 + UTF-8 BOM, with off-air strings defused against
+formula injection. Details in DEVELOPER §5 (dashboard). Verified by a Node harness over the builder only; not yet
+opened in Excel/Numbers from a live session.
+
+**What (as proposed).** One button per device table → `bandwatch-wifi-devs.csv` download. Pure host: build rows from the state dicts
 already in `/api/state`, Blob + download. Zero protocol change; feeds the "log this to a sheet" surveillance workflow and
 makes cross-session diffs easy (which C4's events become, CSV vs CSV).
 

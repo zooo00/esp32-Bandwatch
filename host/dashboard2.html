@@ -338,7 +338,7 @@
         <div style="overflow-x:auto"><table id="probeTbl"><thead><tr>
           <th class="l">Network (SSID)</th><th>Clients asking</th><th class="l">Of which</th><th>Strongest</th><th>Last asked</th>
         </tr></thead><tbody></tbody></table></div>
-        <p class="note" id="probeNote" style="margin:9px 0 0"></p>
+        <div class="toolbar" style="margin:9px 0 0"><span class="note" id="probeNote"></span><button class="small push" data-csv="probes" title="Download this table as CSV (every network listed, in this order)">CSV</button></div>
       </section>
 
       <section class="card" id="zoneBle" hidden>
@@ -404,6 +404,7 @@
             <label class="note"><input type="checkbox" id="wifiApOnly"> access points only</label>
             <label class="note"><input type="checkbox" id="wifiActive" checked> seen in last 60 s</label>
             <span class="note dim push" id="wifiNote"></span>
+            <button class="small" data-csv="wifi" title="Download the rows shown now as CSV (respects the filter, the checkboxes and the sort)">CSV</button>
           </div>
           <div style="overflow-x:auto"><table id="wifiTbl"><thead><tr>
             <th class="l" data-k="ssid">SSID / role</th><th class="l" data-k="mac">MAC</th><th class="l" data-k="vendor">Vendor</th>
@@ -427,6 +428,7 @@
             <input type="search" id="bleFilter" placeholder="filter name / MAC / vendor / company / kind">
             <label class="note"><input type="checkbox" id="bleActive" checked> seen in last 60 s</label>
             <span class="note dim push" id="bleNote"></span>
+            <button class="small" data-csv="ble" title="Download the rows shown now as CSV (respects the filter, the checkboxes and the sort)">CSV</button>
           </div>
           <div style="overflow-x:auto"><table id="bleTbl"><thead><tr>
             <th class="l" data-k="name">Name</th><th class="l" data-k="mac">Address</th><th class="l" data-k="vendor">Vendor</th>
@@ -449,6 +451,7 @@
             <input type="search" id="zigFilter" placeholder="filter address / PAN / protocol / vendor">
             <label class="note"><input type="checkbox" id="zigActive" checked> seen in last 60 s</label>
             <span class="note dim push" id="zigNote"></span>
+            <button class="small" data-csv="zig" title="Download the rows shown now as CSV (respects the filter, the checkboxes and the sort)">CSV</button>
           </div>
           <div style="overflow-x:auto"><table id="zigTbl"><thead><tr>
             <th class="l" data-k="key">Address</th><th class="l" data-k="vendor">Vendor</th><th class="l" data-k="proto">Protocol</th>
@@ -499,6 +502,7 @@
   let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
   let specOpen = false;                                        // cached spectrum expanded outside spec mode
   let unfreeze = null;                                         // table kind a sort/filter click is re-rendering right now
+  const shown = {};                                            // C11: {rows, s, now} each table last rendered, for its CSV button
   const prev = {};
   const fileGroupOpen = {};                                     // per-group "show all" expanders (file card)
   const FILE_GROUP_SHOW = 5;                                    // rows per group before "show all"
@@ -608,6 +612,68 @@
   // dest_only Wi-Fi rows carry no RSSI of their own: the host sends null (older hosts sent 0).
   const noRssi = (r, d) => r == null || (r === 0 && !!(d && d.dest_only));
 
+  // ---- C11: CSV export (pure functions, no DOM - tests slice this block out between the two markers) ----
+  // Columns mirror the rendered tables with raw values, plus an RSSI summary over each row's hist. RFC 4180
+  // (quote on , " CR LF; double inner quotes; CRLF rows) with a UTF-8 BOM so Excel reads non-ASCII SSIDs.
+  // SSIDs and names come off the air, so any *string* field starting with = + - @ TAB or CR gets a leading
+  // ' (OWASP CSV injection); numbers are never prefixed, so -67 stays a number.
+  const CSV_INJECT = /^[=+\-@\t\r]/;
+  function csvField(v) {
+    if (v == null || (typeof v === 'number' && !isFinite(v))) return '';
+    let t = String(v);
+    if (typeof v === 'string' && CSV_INJECT.test(t)) t = "'" + t;
+    return /[",\r\n]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t;
+  }
+  function rssiStats(d) {   // over hist [[t, rssi], ...]; dest_only rows have no samples of their own
+    const v = (d.hist || []).map(p => p[1]).filter(r => typeof r === 'number' && !noRssi(r, d));
+    if (!v.length) return { n: 0, min: null, avg: null, max: null };
+    return { n: v.length, min: Math.min(...v), max: Math.max(...v), avg: Math.round(v.reduce((a, b) => a + b, 0) / v.length * 10) / 10 };
+  }
+  const csvIso = (now, age) => age == null || now == null ? null : new Date((now - age) * 1000).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const csvStamp = (dt) => { const p = (n) => String(n).padStart(2, '0');   // local time, for the file name
+    return `${dt.getFullYear()}${p(dt.getMonth() + 1)}${p(dt.getDate())}-${p(dt.getHours())}${p(dt.getMinutes())}${p(dt.getSeconds())}`; };
+  const CSV_RSSI = [
+    ['rssi', d => noRssi(d.rssi, d) ? null : d.rssi], ['peak_rssi', d => noRssi(d.max, d) ? null : d.max],
+    ['rssi_samples', d => rssiStats(d).n], ['rssi_min', d => rssiStats(d).min], ['rssi_avg', d => rssiStats(d).avg], ['rssi_max', d => rssiStats(d).max],
+  ];
+  const CSV_SEEN = [['age_s', d => d.age], ['last_seen', (d, c) => csvIso(c.now, d.age)]];
+  const CSV_COLS = {
+    wifi: [
+      ['role', d => d.ap ? 'AP' : d.dest_only ? 'destination only' : 'client'], ['ssid', d => d.ssid],
+      ['surveillance', d => d.surv], ['surv_kind', d => d.surv_kind], ['surv_tier', d => d.surv ? d.tier : null],
+      ['associated_bssid', d => d.parent], ['associated_ssid', (d, c) => { const ap = d.parent && (c.s.wifi_devs || []).find(x => x.mac === d.parent); return ap ? ap.ssid : null; }],
+      ['probing_for', d => (d.seeking || []).join('; ')],
+      ['mac', d => d.mac], ['vendor', d => d.vendor], ['country', d => d.cc], ['security', d => d.sec], ['phy', d => d.phy],
+      ['width_mhz', d => d.bw], ['channel', d => d.ch || null], ['ap_load_pct', d => d.util], ['clients', d => d.ap ? d.stations : null],
+      ...CSV_RSSI, ['frames', d => d.frames], ...CSV_SEEN,
+    ],
+    ble: [
+      ['name', d => d.name], ['surveillance', d => d.surv], ['surv_kind', d => d.surv_kind],
+      ['mac', d => d.mac], ['address_type', d => d.random ? 'random' : 'public'], ['vendor', d => d.vendor],
+      ['company_id', d => d.company], ['company_name', d => d.company_name], ['kind', d => d.kind], ['connectable', d => !!d.connectable],
+      ['tx_dbm', d => d.tx], ...CSV_RSSI, ['adverts', d => d.adv], ...CSV_SEEN,
+    ],
+    zig: [
+      ['address', d => d.key], ['address_type', d => d.ext ? 'extended (EUI-64)' : 'pan / short'], ['vendor', d => d.vendor],
+      ['protocol', d => d.proto], ['role', d => d.role], ['permit_join', d => !!d.permit_join], ['pan', d => d.pan], ['short', d => d.short],
+      ['channel', d => d.ch], ['lqi', d => d.lqi], ...CSV_RSSI, ['frames', d => d.frames], ...CSV_SEEN,
+    ],
+    probes: [
+      ['ssid', g => g.ssid], ['clients_asking', g => g.macs], ['randomized_macs', g => g.random], ['ap_nearby', g => !!g.nearby_ap],
+      ['sample_macs', g => (g.sample || []).map(x => x.vendor ? `${x.mac} (${x.vendor})` : x.mac).join('; ')],
+      ['strongest_rssi', g => g.rssi == null || g.rssi <= -127 ? null : g.rssi], ['age_s', g => g.age], ['last_asked', (g, c) => csvIso(c.now, g.age)],
+    ],
+  };
+  const CSV_FILE = { wifi: 'wifi', ble: 'ble', zig: 'zigbee', probes: 'probes' };
+  // ctx = { s: the state snapshot the rows came from, now: host clock (s) at that snapshot }
+  function csvBuild(kind, rows, ctx) {
+    const cols = CSV_COLS[kind];
+    const lines = [cols.map(c => csvField(c[0])).join(',')];
+    for (const r of rows) lines.push(cols.map(c => csvField(c[1](r, ctx))).join(','));
+    return '﻿' + lines.join('\r\n') + '\r\n';
+  }
+  // ---- end C11 CSV export ----
+
   $('#bandSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) post({ cmd: 'band', value: b.dataset.band }); });
   $('#park').addEventListener('change', (e) => post({ cmd: 'park', value: +e.target.value }));
   function toast(title, body, kind) {
@@ -686,6 +752,18 @@
     head.addEventListener('click', toggle);
     head.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggle(); } });
   }
+  // C11: CSV of exactly the rows the table last rendered (filter, checkboxes, sort; while paused, the paused view).
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-csv]'); if (!b) return;
+    const k = b.dataset.csv, sh = shown[k];
+    if (!sh) { toast('Nothing to export', 'this table has not been drawn yet', 'warn'); return; }
+    const name = `bandwatch-${CSV_FILE[k]}-${csvStamp(new Date())}.csv`;
+    const url = URL.createObjectURL(new Blob([csvBuild(k, sh.rows, sh)], { type: 'text/csv;charset=utf-8' }));
+    const a = document.createElement('a'); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    toast('CSV exported', `${name} · ${sh.rows.length} row${sh.rows.length === 1 ? '' : 's'}`);
+  });
   for (const [id, t] of [['wifiApOnly', 'wifi'], ['survOnly', 'wifi'], ['wifiActive', 'wifi'], ['bleActive', 'ble'], ['zigActive', 'zig']]) $('#' + id).addEventListener('change', () => renderTableNow(t));
 
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
@@ -1413,6 +1491,7 @@
   // "nearby" means an AP beaconing that SSID is in the device table right now.
   function renderProbes(s, live) {
     const groups = s.probes || [];
+    shown.probes = { rows: groups, s, now: hostNow() };
     const newest = groups.length ? Math.min(...groups.map(g => g.age == null ? Infinity : g.age)) : null;
     const st = $('#probeStale');
     st.hidden = live;
@@ -1432,6 +1511,7 @@
     const all = s.wifi_devs || [];
     let rows = all.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy, ...(d.seeking || [])].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'wifi');
+    shown.wifi = { rows, s, now: hostNow() };
     $('#nWifi').textContent = `${all.filter(d => d.age < 60).length} now`;
     $('#wifiNote').textContent = `${rows.length} shown · ${all.length} known · vendors: ${s.oui_source}`;
     const survBadge = (d) => d.surv
@@ -1448,6 +1528,7 @@
     const f = $('#bleFilter').value.trim().toLowerCase(), active = $('#bleActive').checked;
     let rows = (s.ble_devs || []).filter(d => (!active || d.age < 60) && (!f || [d.name, d.mac, d.vendor, d.kind, d.company_name].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'ble');
+    shown.ble = { rows, s, now: hostNow() };
     $('#nBle').textContent = `${(s.ble_devs || []).filter(d => d.age < 60).length} now`;
     $('#bleNote').textContent = s.band === 'ble' ? `${rows.length} shown · ${(s.ble_devs || []).length} known · scan cycle ${fmt((s.ble || {}).cycles)}` : `${(s.ble_devs || []).length} known (stale cache — switch Mode to Bluetooth LE to refresh)`;
     const bSurv = (d) => d.surv ? `<span class="surv" title="${esc(d.surv_kind)} — OUI match">${esc(d.surv)}</span>` : '';
@@ -1464,6 +1545,7 @@
     const roleOf = (d) => [d.beacons ? 'coordinator / router' : (d.data ? 'end device / router' : ''), d.mac_secured ? 'MAC-secured' : ''].filter(Boolean).join(' · ');
     let rows = (s.z_devs || []).map(d => ({ ...d, role: roleOf(d) })).filter(d => (!active || d.age < 60) && (!f || [d.key, d.pan, d.proto, d.vendor, d.role].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'zig');
+    shown.zig = { rows, s, now: hostNow() };
     $('#nZig').textContent = `${(s.z_devs || []).filter(d => d.age < 60).length} now`;
     $('#zigNote').textContent = s.band === '154' ? `${rows.length} shown · ${(s.z_devs || []).length} known` : `${(s.z_devs || []).length} known (stale cache — switch Mode to 802.15.4 to refresh)`;
     renderRows($('#zigTbl tbody'), rows, d => d.key, d => `<td class="l mono">${esc(d.key)}<br><span class="sub">${d.ext ? 'extended (EUI-64)' : 'pan / short'}</span></td>

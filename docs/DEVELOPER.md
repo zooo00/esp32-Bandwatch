@@ -254,6 +254,20 @@ rendered keyed by device id so rows keep identity; while the mouse is over a tab
 the button / space bar) rows neither move nor re-render, so buttons stay put. Colours follow a light/dark token
 set; charts are inline SVG.
 
+**CSV export (C11, v1.20).** Each device card's filter row (Wi-Fi, BLE, Zigbee) and the "Networks being sought" card
+have a small *CSV* button. Pure dashboard - no host or protocol change: every `render{Wifi,Ble,Zig,Probes}()` stores the
+rows it just rendered (after filter, checkboxes and sort) with its state snapshot and `hostNow()` in `shown[kind]`,
+and the button turns that into a Blob download `bandwatch-<wifi|ble|zigbee|probes>-<YYYYMMDD-HHMMSS>.csv` (local
+time). While the page is paused it therefore exports the paused view. The builder is the pure block between the
+`// ---- C11: CSV export` markers (`csvField`, `rssiStats`, `CSV_COLS`, `csvBuild`), so it can be sliced out and
+tested in Node without a DOM. Columns mirror the tables with raw values (unformatted numbers, full MAC/vendor/SSID),
+plus `peak_rssi` (the table's *Max*), `rssi_samples` / `rssi_min` / `rssi_avg` / `rssi_max` over the row's `hist`
+(blank with no samples; a `dest_only` row's null RSSI stays blank, as does an unknown channel), `age_s`, and
+`last_seen` (ISO-8601 UTC, `hostNow()` minus age at render). Output is RFC 4180 (fields with `,` `"` CR or LF are
+quoted, inner quotes doubled, CRLF rows) with a UTF-8 BOM for Excel. SSIDs and names are attacker-controlled, so
+any *string* field starting with `=` `+` `-` `@` TAB or CR gets a leading `'` (OWASP CSV injection); numbers are
+never prefixed, so RSSI stays numeric. A column added to a table should be added to `CSV_COLS` too.
+
 ## 6. Adding things
 
 - **New mode**: extend `BandMode`, `kBandName`, `chanEnabled()`, `setBandMode()` (start/stop functions), the

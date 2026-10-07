@@ -261,6 +261,7 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.19.2** — Docs and housekeeping only: `CHANGELOG.md` added, version string corrected. No behaviour change.
 - **1.19.1** — Dashboard: the SD card file list is a full-width, grouped card (names, capture time, size, Download,
   two-click Delete). The host opens the serial port exclusively, so a second host is refused instead of splitting the
   bytes. Full detail in [`CHANGELOG.md`](CHANGELOG.md).

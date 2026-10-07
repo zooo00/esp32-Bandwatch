@@ -3,6 +3,10 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.19.2
+
+Docs and housekeeping: `CHANGELOG.md` created (history moved out of `CLAUDE.md`), `kVersion` brought in line with the release (it still said 1.19 at v1.19.1), stale notes fixed (RAM-check wording, static-RAM figure, classic-dashboard wording, backlog I1). No behaviour change.
+
 ## v1.19.1
 
 host/dashboard: the SD card file list moved out of the narrow rail into a full-width "SD card files" card, grouped (Wi-Fi / BLE / 802.15.4 captures, event log, device baseline, surveillance list, other) with full file names, capture time parsed from the name (UTC), size, per-group "show all", Download and two-click Delete; the rail links to it. The host opens the serial port **exclusively** - two hosts on one port used to split the bytes ("readiness to read but returned no data", reconnects every few seconds, lost lines - it looked like a hung board, likely BACKLOG B4); a second one is now refused with a clear message. A reconnect's hello no longer blanks the card's file list while the card stays mounted.

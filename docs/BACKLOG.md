@@ -10,7 +10,7 @@ Every item has a **Done when** line, and wherever possible a test to add, so wor
 Priority: **P1** wrong or misleading behaviour today · **P2** gap a user will notice · **P3** improvement / decision.
 Type: bug · verify (built, not proven on hardware) · decision (needs a call before code) · feature.
 
-State as of **v1.19.3** (2026-10-07). Finished items move to **Done** at the end, with the evidence.
+State as of **v1.19.4** (2026-10-07). Finished items move to **Done** at the end, with the evidence.
 
 ---
 

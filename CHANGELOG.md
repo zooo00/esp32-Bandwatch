@@ -3,17 +3,22 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
-## Unreleased
+## v1.19.4
 
-dashboard: in BLE and Spectrum mode the last-known channel views (busy score by channel, channel load over time,
+Dashboard layout, no protocol or firmware behaviour change (`kVersion` only).
+
+- In BLE and Spectrum mode the last-known channel views (busy score by channel, channel load over time,
 networks being sought, the Channels table) move into one collapsed "Channel views" group below the live content,
 with the staleness in its summary line; the hopping modes keep them in place, unchanged. Previously they sat above the
 live BLE chart and pushed it below the fold.
+- Wi-Fi table: a device seen only as a frame destination shows "–" for its channel instead of "0".
+- The deauth station picker's ⚙ is now a normal small button (it was a borderless 11.5 px glyph) and stays on the
+same line as Deauth.
 
 ## v1.19.3
 
 Combined review pass: fixes from four independent code reviews, merged into one plan. Compiled and offline-tested
-(host 111, firmware 3). **Not yet run on hardware.**
+(host 111, firmware 3), and the device tier passed 26/26 on the board (`tests/device/RESULTS.md`).
 
 - **Security (host + dashboard).**
   - Dashboard XSS closed: a crafted SSID, security string or vendor in the deauth bar ran script on the dashboard

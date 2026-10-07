@@ -126,6 +126,7 @@
   .surv.t1 { color: #9a7b16; background: color-mix(in srgb, var(--warning) 20%, transparent); }
 
   .deauth-menu { position: relative; display: inline-block; margin-left: 4px; }
+  .deauthgrp { display: inline-block; white-space: nowrap; }   /* Deauth + its station picker stay on one line */
   .dca-list { display: none; position: fixed; z-index: 60; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.18); padding: 9px; width: max-content; max-width: 270px; text-align: left; }
   .deauth-menu.open .dca-list { display: block; }
   .dca-list .hdr { font-size: 11px; color: var(--muted); margin-bottom: 6px; white-space: nowrap; }
@@ -1402,8 +1403,8 @@
       const items = clients.slice(0, 12).map(c =>
         `<button class="tiny" data-dca="${esc(c.mac)} ${esc(d.mac)}" title="Disconnect just this station">${esc(c.mac)}` +
         `${c.vendor ? ` <span class="sub">${esc(c.vendor)}</span>` : ''}</button>`).join('');
-      btn += `<span class="deauth-menu"><button class="tiny ghost deauth-dropdown" title="Kick one specific station">⚙</button>` +
-             `<span class="dca-list"><div class="hdr">${clients.length} station${clients.length > 1 ? 's' : ''} on this BSS</div>${items}</span></span>`;
+      btn = `<span class="deauthgrp">${btn}<span class="deauth-menu"><button class="small deauth-dropdown" title="Kick one specific station" aria-label="Pick one station to deauth">⚙</button>` +
+             `<span class="dca-list"><div class="hdr">${clients.length} station${clients.length > 1 ? 's' : ''} on this BSS</div>${items}</span></span></span>`;
     }
     return btn;
   }
@@ -1437,7 +1438,7 @@
       ? `<span class="surv${d.tier === 1 ? ' t1' : ''}" title="${esc(d.surv_kind)} — OUI match${d.tier === 1 ? ', seen only as a frame destination (weaker evidence)' : ''}">${esc(d.surv)}${d.tier === 1 ? ' ?' : ''}</span>` : '';
     renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}${d.seeking && d.seeking.length ? `<br><span class="sub">probing for ${d.seeking.map(x => `<b>${esc(x)}</b>`).join(', ')}</span>` : ''}</td>
       <td class="l mono">${esc(d.mac)}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
-      <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? esc(d.bw) + ' MHz' : ''}</td><td>${esc(d.ch)}</td>
+      <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? esc(d.bw) + ' MHz' : ''}</td><td>${d.ch ? esc(d.ch) : '<span class="dim" title="channel unknown: seen only as a frame destination">–</span>'}</td>
       <td>${d.util != null ? esc(d.util) + ' %' : ''}</td><td>${d.stations != null && d.ap ? esc(d.stations) : ''}</td>
       <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, d.ch, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, freezeOf('wifi'));
     for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.deauth && (s.deauth.mac === d.mac || s.deauth.ap_bssid === d.mac) ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }

@@ -992,7 +992,7 @@
   // Combined "wide" view: 2.4 GHz is real RF energy (dBm, auto-ranged); 5 GHz is traffic activity (0–100).
   // The single radio scans one band at a time, so each chart draws from the host's last-seen cache (s.wide).
   function fineBins(s) {
-    return ((s.fine && s.fine.bins) || []).map(b => ({ mhz: b.mhz, min: b.min, mean: b.mean, max: b.max, n: b.n, cls: b.cls }));
+    return ((s.fine && s.fine.bins) || []).map(b => ({ mhz: b.mhz, min: b.min, mean: b.mean, max: b.max, n: b.n, cls: b.cls, expl: b.expl, age: b.age }));
   }
 
   function renderSpecStatus(s) {

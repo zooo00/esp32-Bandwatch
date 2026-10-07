@@ -968,7 +968,8 @@
   function renderEnergy24(s) {
     const svg = $('#spec'), W = window.innerWidth < 760 ? 560 : 1000, H = 300, padL = 46, padR = 12, padT = 18, padB = 42;
     svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    const bins = ((s.fine && s.fine.bins) || []).map(b => ({ mhz: b.mhz, min: b.min, mean: b.mean, max: b.max, n: b.n }));
+    // Keep cls/expl/age: they colour the classification caps, fade cached ones and name the source in tooltips.
+    const bins = ((s.fine && s.fine.bins) || []).map(b => ({ mhz: b.mhz, min: b.min, mean: b.mean, max: b.max, n: b.n, cls: b.cls, expl: b.expl, age: b.age }));
     const plotW = W - padL - padR, plotH = H - padT - padB;
     if (!bins.length) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">Switch Mode to “Spectrum” to sweep the 2.4 GHz energy.</text>'; $('#specWarn').hidden = true; return; }
     const withData = bins.filter(b => b.n > 0);

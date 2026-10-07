@@ -747,7 +747,16 @@ class Bandwatch:
             st["sd"] = sd
         elif t in ("log", "err"):
             st["log"].append(f"{t}: {msg.get('msg')}")
-            if str(msg.get("msg", "")).startswith("sdread"):
+            text = str(msg.get("msg", ""))
+            if t == "log" and text.startswith("sd card "):
+                # The device's presence tracking (mounts, I/O failures, an idle CMD0 probe every 2 s): keep the
+                # dashboard's idea of the card in step instead of waiting for the next hello/sdinfo.
+                sd = st.get("sd") or {}
+                sd["mounted"] = 1 if text.startswith("sd card inserted") else 0
+                if not sd["mounted"]:
+                    sd.pop("files", None)   # the listing belonged to the card that just left
+                st["sd"] = sd
+            if text.startswith("sdread"):
                 self._sd_read_finish(False)   # the file will not be coming; close out the half-built buffer
             elif t == "err" and str(msg.get("msg", "")).startswith("sdcap:") and "recording stopped" in str(msg.get("msg")):
                 # A card write failed (pulled mid-recording): the device has already stopped. Clear cap now

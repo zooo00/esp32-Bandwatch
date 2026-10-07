@@ -504,6 +504,7 @@ void Bandwatch_Loop(void) {
     serviceSdFace();
     serviceEvents();     // C4: classify new/surveillance sightings, flush /events.csv (no-op unless events on)
     sendEventStatus();
+    serviceLedAlerts();  // D1: surveillance / permit-join / new-device LED blips (yields to deauth)
     serviceBle();
     serviceSpectrum();   // re-arm energy detection (spec mode only; no-op otherwise)
     const uint32_t now = millis();

@@ -470,6 +470,17 @@ void eventsFileRemoved(const char* path); // sdrm deleted a card file: /seen.csv
 extern bool g_eventsWanted;   // settings.cpp: restored "events" flag, applied in Bandwatch_Init
 void loadSurvExtra();   // /surveil.csv extra surveillance OUIs, read at boot while the card is mounted
 
+// LED alert blips (led_alert.cpp, D1 / 1.6.1 / C10, DEVELOPER §21): a short pattern that wins the LED briefly and
+// yields back to driveLed(). Radio paths only note (IRAM, no heap/Serial); serviceLedAlerts() (loop) decides.
+enum LedAlertKind : uint8_t { LED_ALERT_NONE = 0, LED_ALERT_NEW = 1, LED_ALERT_JOIN = 2, LED_ALERT_SURV = 3 };
+extern bool g_ledAlerts;               // "alerts 1|0", persisted (settings.cpp); default on
+extern volatile bool g_ledJoinFlag;    // set by the 802.15.4 ISR when a node first advertises permit-join
+void ledNoteSurv(const uint8_t* mac);   // IRAM; caller holds g_devMux; a surveillance device got a slot
+void ledAlertNote(LedAlertKind k);     // loop task only (C4 "new" row)
+void ledAlertTest(LedAlertKind k);     // loop task: "ledtest", bypasses the rate limit and the alerts switch
+bool ledBlipActive();                  // driveLed() yields while a blip is drawing
+void serviceLedAlerts();               // loop task: drain notes, coalesce, rate-limit, draw the pattern
+
 // Hunt (bandwatch.cpp). Callers hold g_devMux and have already evaluated the match for their radio kind.
 void IRAM_ATTR noteHuntHit(bool isTarget, int8_t rssi, uint32_t now);
 void huntIdText(char* out, size_t n);   // "aa:bb:.." (MAC) or extended 15.4 key / pan-short form

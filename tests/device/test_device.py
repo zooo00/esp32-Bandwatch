@@ -47,7 +47,7 @@ def tearDownModule():
 
 
 def restore():
-    """Put band / park / capture / SD capture / mirror / event log back to what ORIG reported."""
+    """Put band / park / capture / SD capture / mirror / event log / LED alerts back to what ORIG reported."""
     h = board.hello(timeout=8)
     if h.get("mir") != ORIG.get("mir"):
         board.command("mirror %d" % (ORIG.get("mir") or 0))
@@ -64,6 +64,8 @@ def restore():
     ev0, ev1 = ORIG.get("ev"), h.get("ev")
     if ev0 is not None and ev1 is not None and ev0.get("on") != ev1.get("on"):
         board.command("events %d" % ev0.get("on"))
+    if "alerts" in ORIG and h.get("alerts") != ORIG["alerts"]:
+        board.command("alerts %d" % ORIG["alerts"])
     board.clear()
 
 
@@ -85,7 +87,7 @@ class T01Hello(BoardTest):
         self.assertEqual(h["fw"], "bandwatch")
         self.assertRegex(h["ver"], r"^\d+\.\d+(\.\d+)?$")
         for k in ("dwell_ms", "spec_step", "band", "country", "bandmode", "proto", "promisc", "chs", "park", "cap",
-                  "snap", "heap", "up", "rst", "hunt", "h", "deauth", "sd", "mir", "ev"):
+                  "snap", "heap", "up", "rst", "hunt", "h", "deauth", "sd", "mir", "ev", "alerts"):
             self.assertIn(k, h)
         self.assertIn(h["band"], BAND_NAMES)
         self.assertEqual(h["chs"], EXPECTED_CHS[h["band"]])
@@ -94,6 +96,7 @@ class T01Hello(BoardTest):
         self.assertGreater(h["heap"], MIN_FREE_HEAP)
         self.assertIn(h["cap"], (0, 1))
         self.assertIn(h["mir"], (0, 1))
+        self.assertIn(h["alerts"], (0, 1))
         self.assertTrue(32 <= h["snap"] <= 1600)
         self.assertIsInstance(h["rst"], str)
         self.assertEqual(set(h["sd"]), {"mounted", "mb", "cap", "file", "frames", "bytes", "err", "clock"})
@@ -457,6 +460,43 @@ class T11SdRm(BoardTest):
             board.command("sdcap 0", timeout=10)
         r = board.command_or_err("sdrm " + path, timeout=10)   # stopped: now it may go (and leaves no litter)
         self.assertEqual((r.get("t"), r.get("ok")), ("ack", 1), r)
+
+
+class T12Alerts(BoardTest):
+    """LED alert blips (v1.19). The LED itself cannot be observed from here: these check the protocol and that a
+    blip was started; watch the board for the colours (orange double / purple double / white single)."""
+
+    def test_alerts_round_trip_and_persisted_in_hello(self):
+        orig = board.hello()["alerts"]
+        for want in (1 - orig, orig):
+            r = board.command("alerts %d" % want)
+            self.assertEqual(r["alerts"], want)
+            self.assertEqual(board.hello()["alerts"], want)
+
+    def test_ledtest_acks_each_kind(self):
+        deauthing = bool(board.hello().get("deauth"))
+        for kind in ("surv", "join", "new"):
+            with self.subTest(kind=kind):
+                r = board.command("ledtest %s" % kind)
+                self.assertEqual(r["kind"], kind)
+                self.assertIn(r["shown"], (0, 1))
+                if not deauthing:   # a running deauth keeps the LED, so the blip is refused (shown 0)
+                    self.assertEqual(r["shown"], 1)
+                time.sleep(0.7)     # let the 300-500 ms pattern finish before the next
+
+    def test_ledtest_works_with_alerts_off(self):
+        orig = board.hello()["alerts"]
+        board.command("alerts 0")
+        try:
+            r = board.command("ledtest surv")
+            self.assertEqual(r["kind"], "surv")
+        finally:
+            board.command("alerts %d" % orig)
+
+    def test_ledtest_bad_kind_is_an_error(self):
+        idx = board.mark()
+        board.send("ledtest purple")
+        board.wait_json(lambda o: o.get("t") == "err" and str(o.get("msg", "")).startswith("ledtest"), 3, idx)
 
 
 class T99NoReboot(BoardTest):

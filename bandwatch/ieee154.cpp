@@ -55,6 +55,7 @@ void IRAM_ATTR track154(const uint8_t* key, bool hasExt, uint16_t pan, uint16_t 
     if (shortAddr != 0xFFFF) d.shortAddr = shortAddr;
     if (pan != 0xFFFF) d.pan = pan;
     if (proto) d.proto = proto;
+    if ((flagBits & 4) && !(d.flags & 4)) g_ledJoinFlag = true;   // C10: permit-join first seen on this node (ISR: flag only)
     d.flags |= flagBits;
     noteHuntHit(hunt.kind == 1 && key8Eq(hunt.key, key), rssi, now);
     portEXIT_CRITICAL_ISR(&g_devMux);

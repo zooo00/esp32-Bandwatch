@@ -3,7 +3,8 @@
 // through serial every time. Transient RAM only: the Preferences handle opens for the load/save and is
 // closed immediately, so nothing stays resident (the §16 budget is tight - see docs/DEVELOPER.md).
 //
-// Persisted: band mode + the scalar policies (addr1, blescan, specstep, snap) + whether the C4 event log is armed.
+// Persisted: band mode + the scalar policies (addr1, blescan, specstep, snap) + whether the C4 event log is armed
+// + LED alert blips on/off ("alerts", absent key = on, so the schema stays 1).
 // NOT persisted, on purpose:
 //   - park: a device that boots silently parked on one channel is a "why is it stuck" footgun; let it hop.
 //   - hunt / deauth: a reboot must STOP transmitting (the same safety argument as the dead-man's switch),
@@ -34,6 +35,7 @@ void loadSettings() {
     const uint8_t  ss   = prefs.getUChar("specstep", specStepMhz);
     const uint16_t sn   = prefs.getUShort("snap", capSnapLen);
     const uint8_t  evw  = prefs.getUChar("events", 0);
+    const uint8_t  al   = prefs.getUChar("alerts", 1);   // absent on pre-1.19 NVS: default on
     prefs.end();
 
     // Validate every value: NVS is off-device state and a corrupt byte must not reach the radio paths.
@@ -43,6 +45,7 @@ void loadSettings() {
     if (ss == 1 || ss == 2 || ss == 5)             specStepMhz  = ss;
     if (sn >= 32 && sn <= kCapMaxLen)              capSnapLen   = sn;
     g_eventsWanted = (evw == 1);
+    g_ledAlerts = (al != 0);
     g_settingsRestored = true;
 }
 
@@ -57,5 +60,6 @@ void saveSettings() {
     prefs.putUChar("specstep", specStepMhz);
     prefs.putUShort("snap", capSnapLen);
     prefs.putUChar("events", g_eventsOn ? 1 : 0);
+    prefs.putUChar("alerts", g_ledAlerts ? 1 : 0);
     prefs.end();
 }

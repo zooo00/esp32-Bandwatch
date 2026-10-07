@@ -135,7 +135,7 @@ void sendHello() {
     // 900, not 780: "both" mode (38 channels) + an active hunt + a targeted deauth + an SD path summed to
     // ~790, and a line that passes the check and then overruns is truncated mid-JSON, which is exactly what
     // the drop-whole-lines rule exists to prevent.
-    if (!serialRoom(900)) return;
+    if (!serialRoom(920)) return;   // +20 for "alerts" (v1.19)
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"spec_step\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(dwellMs()), static_cast<unsigned>(specStepMhz), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
@@ -164,7 +164,7 @@ void sendHello() {
                   sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
                   static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
                   static_cast<unsigned long>(sd.errors), epochValid ? 1 : 0);
-    Serial.printf(",\"mir\":%d,", g_mirror ? 1 : 0);
+    Serial.printf(",\"mir\":%d,\"alerts\":%d,", g_mirror ? 1 : 0, g_ledAlerts ? 1 : 0);
     printEvents();
     Serial.print("}\n");
 }
@@ -421,6 +421,21 @@ void handleCommand(char* line) {
         else eventsDisable();
         saveSettings();
         if (serialRoom(220)) { Serial.print("{\"t\":\"ack\",\"cmd\":\"events\","); printEvents(); Serial.print("}\n"); }
+    } else if (!strcmp(line, "alerts")) {
+        // D1: LED alert blips (surveillance / permit-join / new device), persisted. Never affects the deauth blink.
+        g_ledAlerts = atoi(arg) != 0;
+        saveSettings();
+        Serial.printf("{\"t\":\"ack\",\"cmd\":\"alerts\",\"alerts\":%d}\n", g_ledAlerts ? 1 : 0);
+    } else if (!strcmp(line, "ledtest")) {
+        // Diagnostic: draw one blip now (bypasses the rate limit and the alerts switch; not over an active deauth).
+        const LedAlertKind k = !strcmp(arg, "surv") ? LED_ALERT_SURV : !strcmp(arg, "join") ? LED_ALERT_JOIN
+                             : !strcmp(arg, "new") ? LED_ALERT_NEW : LED_ALERT_NONE;
+        if (k == LED_ALERT_NONE) {
+            Serial.print("{\"t\":\"err\",\"msg\":\"ledtest: surv|new|join\"}\n");
+        } else {
+            ledAlertTest(k);
+            Serial.printf("{\"t\":\"ack\",\"cmd\":\"ledtest\",\"kind\":\"%s\",\"shown\":%d}\n", arg, ledBlipActive() ? 1 : 0);
+        }
     } else if (!strcmp(line, "addr1")) {
         trackAddr1 = atoi(arg) != 0;
         saveSettings();

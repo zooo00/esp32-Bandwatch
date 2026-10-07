@@ -38,7 +38,8 @@ Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "
 "sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "sdrm <path>" (delete one
 card-root file; the pulled local copy stays), "time <epoch>", "info",
 "events 0|1" (C4: arm/disarm the SD event log - /events.csv rows for surveillance hits and MACs new to this card's
-/seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s).
+/seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s),
+"alerts 0|1" (LED alert blips for surveillance hits / permit-join / new devices; persists), "ledtest surv|new|join".
 
 pcap link types written: 127 radiotap (Wi-Fi), 283 IEEE 802.15.4-TAP, 256 BLE LL with pseudo-header. BLE
 records are advertising packets reconstructed from HCI reports - see docs/DEVELOPER.md section 13.
@@ -395,6 +396,7 @@ class Bandwatch:
             "sd_read": None,         # a card file being pulled off: {name,total,received,done,path}
             "sd_rm": None,           # last card-file delete: {name,pending,ok,msg,t} (the dashboard's confirm/toast)
             "events": None,          # C4 SD event log status, the device's "ev" object (None = old firmware)
+            "alerts": None,          # LED alert blips on/off (hello + "alerts" ack; None = firmware without it)
             # completed captures this session, per sink, for the dashboard counters
             "saved": {"usb": {"count": 0, "last": None, "frames": 0, "bytes": 0},
                       "sd":  {"count": 0, "last": None, "frames": 0, "bytes": 0}},
@@ -634,6 +636,8 @@ class Bandwatch:
                 st["sd"] = msg["sd"]
                 self._sd_track(st["sd"])
             self._set_events(msg.get("ev"))
+            if "alerts" in msg:
+                st["alerts"] = 1 if msg.get("alerts") else 0
         elif t == "ev":
             self._set_events(msg.get("ev"))
         elif t == "d":
@@ -779,6 +783,8 @@ class Bandwatch:
                 self._sd_track(sd)
             if msg.get("cmd") == "events":
                 self._set_events(msg.get("ev"))
+            if msg.get("cmd") == "alerts" and "alerts" in msg:
+                st["alerts"] = 1 if msg.get("alerts") else 0
             if msg.get("cmd") == "sdread":
                 self._sd_read_start(msg.get("file"), msg.get("bytes"))   # the ack precedes the S chunks
             elif msg.get("cmd") == "sdread_done":
@@ -1417,7 +1423,7 @@ class Bandwatch:
                               for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
-             "sd_read": st["sd_read"], "sd_rm": st["sd_rm"], "saved": st["saved"], "events": st["events"],
+             "sd_read": st["sd_read"], "sd_rm": st["sd_rm"], "saved": st["saved"], "events": st["events"], "alerts": st["alerts"],
             "oui_source": self.oui.source,
         }
 
@@ -1548,6 +1554,10 @@ def make_handler(bw, page_path):
                     if cmd == "sdrm":
                         bw.sd_rm_request(name)
                     bw.send(f"{cmd} /{name}")
+                elif cmd == "alerts":   # LED alert blips; persists on the device
+                    bw.send(f"alerts {1 if req.get('value') else 0}")
+                elif cmd == "ledtest" and req.get("value") in ("surv", "new", "join"):
+                    bw.send(f"ledtest {req['value']}")
                 elif cmd == "mirror":
                     bw.send(f"mirror {1 if req.get('value') else 0}")
                 elif cmd == "page" and req.get("value") in ("next", "prev"):

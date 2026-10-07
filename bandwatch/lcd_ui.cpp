@@ -1268,6 +1268,7 @@ void refreshSpectrum() {
 
 void driveLed(float global) {
     if (deauth.active) { setLedColor(LED_RED, static_cast<uint8_t>((millis() / kUiIntervalMs & 1u) ? 12 : 70)); return; }   // blink while kicking
+    if (ledBlipActive()) return;   // an alert blip owns the LED for ~0.5 s (led_alert.cpp); never over deauth
     if (hunt.active) {
         const uint32_t last = hunt.lastMs;
         if (!last || millis() - last > 5000) { setLedColor(LED_BLUE, 15); return; }

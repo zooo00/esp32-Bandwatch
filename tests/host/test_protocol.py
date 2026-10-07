@@ -452,5 +452,23 @@ class AckTest(unittest.TestCase):
         self.assertEqual(snap["band"], "ble")
 
 
+class AlertsTest(unittest.TestCase):
+    """LED alert blips (v1.19): "alerts" on hello and on the alerts ack; absent on older firmware."""
+
+    def test_alerts_from_hello_and_ack(self):
+        bw = make_bw()
+        feed(bw, dict(copy.deepcopy(HELLO_24), alerts=1))
+        self.assertEqual(bw.snapshot()["alerts"], 1)
+        feed(bw, {"t": "ack", "cmd": "alerts", "alerts": 0})
+        self.assertEqual(bw.snapshot()["alerts"], 0)
+        feed(bw, {"t": "ack", "cmd": "ledtest", "kind": "surv", "shown": 1})   # a test blip changes nothing
+        self.assertEqual(bw.snapshot()["alerts"], 0)
+
+    def test_old_firmware_without_alerts_keeps_none(self):
+        bw = make_bw()
+        feed(bw, HELLO_24)
+        self.assertIsNone(bw.snapshot()["alerts"])
+
+
 if __name__ == "__main__":
     unittest.main()

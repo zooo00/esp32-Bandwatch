@@ -116,13 +116,15 @@ file-local helpers live in an anonymous namespace.
 - `events.cpp` — the C4 event log (1.18, §20): `eventFlag()` (radio side, under `g_devMux`), `serviceEvents()`
   (loop: classify, buffer, flush to `/events.csv`), the `/seen.csv` novelty baseline, and `loadSurvExtra()`
   (`/surveil.csv` extra OUIs, read at boot).
-- `settings.cpp` — NVS persistence (C3, 1.11; the `events` flag joined in 1.18).
+- `settings.cpp` — NVS persistence (C3, 1.11; the `events` flag joined in 1.18, `alerts` in 1.19).
+- `led_alert.cpp` — LED alert blips (1.19, §21): `ledNoteSurv()` (radio side, under `g_devMux`), `g_ledJoinFlag`
+  (802.15.4 ISR), `serviceLedAlerts()` (loop: dedup, coalesce, rate-limit, draw the pattern).
 - `host_proto.cpp` — the serial JSON protocol: `sendHello/sendDwell/sendSweep/sendBleStatus/sendDevices`,
   `handleCommand()` / `pollSerial()`. All output goes through `serialRoom()` so a line is either written whole
   or skipped.
 - `lcd_ui.cpp` — LVGL 9, 172×320 portrait: `showPage()` deletes the current page's widgets and builds the new
   one (`buildOverviewPage`, `buildChannelsPage`, `buildDevicesPage`, `buildHuntPage`, `buildSystemPage`);
-  `refreshUi()` updates only the visible page and drives the LED. `pollButton()` = tap → next page, hold 0.7 s →
+  `refreshUi()` updates only the visible page and drives the LED (`driveLed()`, which yields to an alert blip, §21). `pollButton()` = tap → next page, hold 0.7 s →
   next mode (or stop hunt on the Hunt page).
 - `devices.h` — device-table structs + open-addressing hash; `surv_ouis.h` — the surveillance-OUI table
   (matched in firmware so the LCD can flag without a host); `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h`
@@ -141,7 +143,7 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row) |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes, **in chunks of ≤24 rows** (v1.17; loudest first, each chunk a complete line; the host merges by MAC, so a chunk dropped for TX room just waits a cycle) | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv, apSuffix]`; `apSuffix` = last 3 bytes of the BSSID this device was heard associated with, lower-case hex, `""` if never seen on a BSS (§17); flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
@@ -171,6 +173,11 @@ reply of the presence probe; `r1` is -1 when the card is mounted or busy and the
 `sdrm <name>` deletes one file in the card root (§12 "Deleting card files"): `<name>` is `/x` or `x`, 1-39 chars of
 `[A-Za-z0-9._-]`, no `..`; ack `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` (or `"ok":0,"msg":...`), refusals as
 `sdrm: ...` err lines (table above). The host re-sends `sdls` after a delete.
+
+1.19: `alerts 1|0` (LED alert blips, §21; default on, persisted in NVS; ack `{"t":"ack","cmd":"alerts","alerts":N}`),
+`ledtest surv|new|join` (diagnostic: draw one blip now, bypassing the rate limit and the `alerts` switch but never
+over an active deauth; ack `{"t":"ack","cmd":"ledtest","kind":"surv","shown":0|1}` - `shown` 0 means a deauth owns
+the LED; any other kind gives `{"t":"err","msg":"ledtest: surv|new|join"}`).
 
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
@@ -1111,9 +1118,61 @@ mid-`sdcap` and re-inserted: no rows lost (§12). The re-insert of pending new M
 added *after* that test, because `base` read 32 instead of about 52 — it has not been re-run since.
 
 ### Open
-- **LED blip on a new/surveillance event: undecided**, deliberately coupled with C10 (permit-join blip) and
-  1.6.1's transient-alert proposal so `driveLed()` gets one decision, not three.
+- LED blip on a new/surveillance event: decided and shipped in 1.19 together with C10 and 1.6.1 (§21). A `new`
+  row blips white; a surveillance device blips orange whether or not this log is armed.
 - The presence probe has no open items (card out reads `0xFF`, card in `0x01`, removal detected within ~4 s;
   §12). Hot-pulling the card can intermittently reset the board over USB (`rst: usb`, a hardware effect, §12).
 - Not yet measured: free heap at peak load with the log armed; the time a `/seen.csv` rotation takes on hardware
   (a > 4096-entry file; written, compiled, not yet run on the board).
+
+## 21. LED alert blips (D1: 1.6.1 alerting, C4 novelty, C10 permit-join; 1.19)
+
+The single WS2812 carries one *permanent* state chosen by `driveLed()` (`lcd_ui.cpp`): deauth blink > hunt distance >
+record pulse > busy score. An alert is not a fifth permanent state: it **wins the LED for 300-500 ms with a distinct
+pattern, then yields back** - `driveLed()` repaints on its next 120 ms UI tick. `led_alert.cpp` owns it.
+
+### Patterns (50 ms slots)
+
+| Kind | Trigger | Pattern | Colour | Priority |
+| --- | --- | --- | --- | --- |
+| `surv` | first time this session a device with `surv != 0` gets a slot (Wi-Fi or BLE) | double flash, 100 on / 100 off / 100 on / 200 off (500 ms) | orange `{255,120,0}`, 100 % | 3 |
+| `join` | an 802.15.4 node's permit-join bit (`Dev154.flags` bit2) first becomes set | same double flash | purple `{150,0,255}`, 100 % | 2 |
+| `new` | the event log classifies a `new` row (`serviceEvents()`; needs `events 1` and a card baseline) | single blink, 150 on / 150 off (300 ms) | white `{210,210,210}`, 60 % | 1 |
+
+The trailing dark slots make the end of a blip readable even when the permanent state is the same colour (orange
+busy score, orange hunt distance).
+
+### Priority and rate limit
+- **An active deauth always keeps the LED.** `driveLed()` checks `deauth.active` before `ledBlipActive()`, and
+  `serviceLedAlerts()` drops a running blip and every pending kind while a deauth is active. Alerts during a deauth
+  are **dropped, not queued**: a blip minutes later would point at nothing. A blip may override hunt, record and
+  busy.
+- **At most one blip per 2 s** (`kGapMs`, measured start to start). Kinds noted in the meantime collect as a bitmask
+  and the highest one wins when the gap ends. A note of the same or lower priority than the blip whose gap it falls
+  in is absorbed by that blip, so a burst gives one blip (two at most, when a higher-priority hit follows a
+  lower-priority blip) - never a strobe.
+
+### Plumbing (and why it is safe)
+- **Surveillance is independent of the C4 event log** (`g_eventsOn` is not consulted). `trackWifiDevice()` /
+  `trackBleDevice()` call `ledNoteSurv(mac)` (IRAM, already under `g_devMux`, no heap/Serial) on slot creation when
+  `d.surv != 0`; it pushes a 32-bit FNV hash into a 4-entry ring (overflow sets a flag that still blips). The loop
+  drains the ring under `g_devMux` and dedups against a 16-entry seen ring, so a device blips once per session (a
+  17th distinct surveillance device can evict an old one, which may then blip again - harmless).
+- **Permit-join**: the 802.15.4 RX path is a true ISR, so `track154()` only sets `g_ledJoinFlag` when
+  `(flagBits & 4) && !(d.flags & 4)`. The bit is sticky per slot (ROADMAP C10's open question), so a node blips
+  once when first seen permitting, not at beacon rate; it blips again only if its slot is evicted and recreated.
+- **New**: `serviceEvents()` (loop) calls `ledAlertNote(LED_ALERT_NEW)` beside `g_evStats.fresh++`.
+- `serviceLedAlerts()` runs every loop pass (finer than the 120 ms UI tick) and writes the LED only on on/off edges.
+- `alerts 0` clears pending kinds and stops new ones; the seen ring keeps filling so turning alerts back on does not
+  replay old hits. `ledtest` bypasses the rate limit and the switch, not the deauth rule.
+
+### Settings and cost
+`alerts` is an NVS key (`settings.cpp`); an absent key reads as 1, so the schema stays 1 and older NVS keeps
+working. Static RAM +104 B (77,288 -> 77,392 B): the two rings, pattern state and the flag. No heap. Hello's serial
+budget went 900 -> 920 for the new field.
+
+### Verify on hardware
+`ledtest surv|join|new` shows each pattern on demand. A real surveillance hit: a device from `kSurvOuis` (or a test
+OUI added to `/surveil.csv`) in range, `band 2.4g` - one orange double flash when it first appears. Permit-join: a
+Zigbee coordinator with joining opened, `band 154`. With `deauth <bssid>` running, `ledtest surv` acks `"shown":0`
+and the red attack blink never breaks.

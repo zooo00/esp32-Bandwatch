@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.15.5";
+constexpr const char* kVersion = "1.16";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -427,6 +427,15 @@ void startDeauth(const uint8_t* mac);
 void startDeauthTargeted(const uint8_t* clientMac, const uint8_t* apBssid);
 void stopDeauth();
 void serviceDeauth();
+
+// C1 probe-request mapping: the Wi-Fi task queues each *directed* probe request (a client naming the network it
+// wants); serviceProbes() (host_proto.cpp, loop task) dedups (MAC, SSID) pairs and emits {"t":"pr"} lines.
+struct ProbeEvt { uint8_t mac[6]; int8_t rssi; uint8_t ch; char ssid[33]; };
+constexpr int kProbeQ = 8;
+extern ProbeEvt g_probeQ[kProbeQ];
+extern volatile uint8_t probeHead, probeTail;   // single producer (Wi-Fi task) / single consumer (loop)
+extern volatile uint32_t probeDropped;
+void serviceProbes();
 
 // Hunt (bandwatch.cpp). Callers hold g_devMux and have already evaluated the match for their radio kind.
 void IRAM_ATTR noteHuntHit(bool isTarget, int8_t rssi, uint32_t now);

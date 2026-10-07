@@ -7,6 +7,10 @@
 #include <esp_wifi.h>
 #include "surv_ouis.h"   // surveillance-OUI table (matched in firmware so the LCD can flag without a host)
 
+ProbeEvt g_probeQ[kProbeQ];
+volatile uint8_t probeHead = 0, probeTail = 0;
+volatile uint32_t probeDropped = 0;
+
 namespace {
 
 // Allow every 5 GHz channel the driver knows about (bits 1..28, see wifi_5g_channel_bit_t).
@@ -172,6 +176,26 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
     portEXIT_CRITICAL_ISR(&g_devMux);
 }
 
+// Directed probe request -> g_probeQ. Body starts at 24 (no fixed fields, unlike a beacon's 36); the first IE
+// is the SSID, and a zero-length one is a wildcard probe that names nothing, so it is skipped. Frame check
+// sequence is the last 4 bytes of sig_len. Runs on the Wi-Fi task: copy and go, no Serial, no heap.
+void IRAM_ATTR queueProbe(const uint8_t* p, uint16_t sigLen, int8_t rssi) {
+    if (sigLen < 24 + 2 + 4) return;
+    const uint8_t tag = p[24], len = p[25];
+    if (tag != 0 || len == 0 || len > 32 || 26 + len > sigLen - 4) return;
+    const uint8_t head = probeHead;
+    const uint8_t next = static_cast<uint8_t>((head + 1) % kProbeQ);
+    if (next == probeTail) { probeDropped = probeDropped + 1; return; }
+    ProbeEvt& e = g_probeQ[head];
+    memcpy(e.mac, p + 10, 6);   // addr2: the probing client
+    e.rssi = rssi;
+    e.ch = static_cast<uint8_t>(currentChannelNum);
+    memcpy(e.ssid, p + 26, len);
+    e.ssid[len] = 0;
+    sanitizeText(e.ssid, sizeof(e.ssid));   // rule 9: strings off the air are hostile
+    probeHead = next;
+}
+
 void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA && type != WIFI_PKT_CTRL) return;
     const wifi_promiscuous_pkt_t* pkt = reinterpret_cast<const wifi_promiscuous_pkt_t*>(buf);
@@ -223,6 +247,8 @@ void IRAM_ATTR promiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
         if (trackAddr1 && !(ipkt->hdr.addr1[0] & 0x01) && !macEq(ipkt->hdr.addr1, ipkt->hdr.addr2))
             trackWifiDevice(ipkt->hdr.addr1, pkt->rx_ctrl.rssi, 0, pkt->payload, sigLen, true, rxBssid);
     }
+
+    if (type == WIFI_PKT_MGMT && pkt->payload[0] == 0x40) queueProbe(pkt->payload, sigLen, pkt->rx_ctrl.rssi);   // C1
 
     uint8_t nh;
     CapFrame* slot = capReserve(nh);

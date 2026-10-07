@@ -288,7 +288,14 @@
         <th data-k="util">AP load</th><th data-k="stations">Clients</th><th data-k="rssi" class="sorted">RSSI</th><th data-k="max">Max</th>
         <th>Trend</th><th data-k="frames">Frames</th><th data-k="age">Seen</th><th></th>
       </tr></thead><tbody></tbody></table></div>
-      <p class="note">Rows keep their order while the mouse is over a table, so the Hunt and Deauth buttons stay put. Roles: <b>AP</b> sent beacons or probe responses; everything else is a client or a non-beaconing radio. Security, PHY, width, AP load (the AP's own BSS-load channel utilisation) and client count come from beacon information elements. Randomized MACs (locally administered bit) have no vendor.</p>
+      <p class="note">Rows keep their order while the mouse is over a table, so the Hunt and Deauth buttons stay put. A client line reading <i>probing for</i> names networks it asked for (see below). Roles: <b>AP</b> sent beacons or probe responses; everything else is a client or a non-beaconing radio. Security, PHY, width, AP load (the AP's own BSS-load channel utilisation) and client count come from beacon information elements. Randomized MACs (locally administered bit) have no vendor.</p>
+    </section>
+    <section class="card" style="margin-top:14px">
+      <h2>Networks being sought <small>directed probe requests: clients naming a network they want to join · last 15 min</small></h2>
+      <div style="overflow-x:auto"><table id="probeTbl"><thead><tr>
+        <th class="l">Network (SSID)</th><th>Clients asking</th><th class="l">Of which</th><th>Strongest</th><th>Last asked</th>
+      </tr></thead><tbody></tbody></table></div>
+      <p class="note" id="probeNote"></p>
     </section>
   </div>
 
@@ -846,18 +853,30 @@
     else $('#wifiBars').innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:13px">Switch Mode to a Wi‑Fi band to see channel activity.</text>';
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
     const survOnly = $('#survOnly') && $('#survOnly').checked;
-    let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy].join(' ').toLowerCase().includes(f)));
+    let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy, ...(d.seeking || [])].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'wifi');
     $('#nWifi').textContent = s.wifi_devs.filter(d => d.age < 60).length;
     $('#wifiNote').textContent = `${rows.length} shown · ${s.wifi_devs.length} known · vendors: ${s.oui_source}`;
     const survBadge = (d) => d.surv
       ? `<span class="surv${d.tier === 1 ? ' t1' : ''}" title="${esc(d.surv_kind)} — OUI match${d.tier === 1 ? ', seen only as a frame destination (weaker evidence)' : ''}">${esc(d.surv)}${d.tier === 1 ? ' ?' : ''}</span>` : '';
-    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}</td>
+    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}${d.seeking && d.seeking.length ? `<br><span class="sub">probing for ${d.seeking.map(x => `<b>${esc(x)}</b>`).join(', ')}</span>` : ''}</td>
       <td class="l mono">${d.mac}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? d.bw + ' MHz' : ''}</td><td>${d.ch}</td>
       <td>${d.util != null ? d.util + ' %' : ''}</td><td>${d.stations != null && d.ap ? d.stations : ''}</td>
       <td>${rssiCell(d.rssi)}</td><td>${fmt(d.max)}</td><td>${spark(d.hist)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td>${huntBtn(d.mac, d.ch, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, frozen.wifi || paused);
     for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.deauth && s.deauth.mac === d.mac ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
+    renderProbes(s);
+  }
+
+  // C1: networks clients are asking for. Grouped by SSID because most phones randomize the MAC per probe burst;
+  // "AP nearby" means an AP beaconing that SSID is in the device table right now.
+  function renderProbes(s) {
+    const groups = s.probes || [];
+    $('#probeTbl tbody').innerHTML = groups.length ? groups.map(g => `<tr><td class="l"><b>${esc(g.ssid)}</b>${g.nearby_ap ? ' <span class="sub">· AP nearby</span>' : ''}</td>
+      <td>${g.macs}</td><td class="l"><span class="sub">${g.random === g.macs ? 'all randomized MACs' : `${g.random} randomized`}${g.sample.length ? ' · ' + g.sample.map(x => `<span class="mono">${x.mac}</span>${x.vendor ? ' ' + esc(x.vendor) : ''}`).join(', ') : ''}</span></td>
+      <td>${fmt(g.rssi)}</td><td>${ago(g.age)}</td></tr>`).join('')
+      : '<tr><td class="l" colspan="5"><span class="sub">No directed probe requests heard yet (Wi-Fi bands only). Most phones probe with a wildcard (no SSID) and are not listed.</span></td></tr>';
+    $('#probeNote').textContent = groups.length ? `${groups.length} network${groups.length > 1 ? 's' : ''} · a randomized MAC per probe burst is normal for phones, so one device can count as several clients` : '';
   }
 
   function rssiBarColor(r) { return r >= -55 ? 'var(--critical)' : r >= -70 ? 'var(--warning)' : r >= -82 ? '#caa23a' : 'var(--series)'; }

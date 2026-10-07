@@ -267,6 +267,14 @@
         <div class="chart-wrap"><svg id="trend" viewBox="0 0 700 180"></svg><div class="tip" id="trendTip"></div></div>
       </section>
 
+      <section class="card" id="zoneProbe" hidden>
+        <h2>Networks being sought <small>directed probe requests: clients naming a network they want to join · last 15 min</small></h2>
+        <div style="overflow-x:auto"><table id="probeTbl"><thead><tr>
+          <th class="l">Network (SSID)</th><th>Clients asking</th><th class="l">Of which</th><th>Strongest</th><th>Last asked</th>
+        </tr></thead><tbody></tbody></table></div>
+        <p class="note" id="probeNote" style="margin:9px 0 0"></p>
+      </section>
+
       <section class="card" id="zoneBle" hidden>
         <h2>What's advertising <small>live BLE devices grouped by what they look like</small></h2>
         <div class="chart-wrap"><svg id="bleBars" viewBox="0 0 1000 300"></svg><div class="tip" id="bleBarTip"></div></div>
@@ -1029,16 +1037,28 @@
     return btn;
   }
 
+  // C1: networks clients are asking for. Grouped by SSID because most phones randomize the MAC per probe burst;
+  // "nearby" means an AP beaconing that SSID is in the device table right now.
+  function renderProbes(s) {
+    const groups = s.probes || [];
+    const tb = $('#probeTbl tbody');
+    tb.innerHTML = groups.length ? groups.map(g => `<tr><td class="l"><b>${esc(g.ssid)}</b>${g.nearby_ap ? ' <span class="sub">· AP nearby</span>' : ''}</td>
+      <td>${g.macs}</td><td class="l"><span class="sub">${g.random === g.macs ? 'all randomized MACs' : `${g.random} randomized`}${g.sample.length ? ' · ' + g.sample.map(x => `<span class="mono">${x.mac}</span>${x.vendor ? ' ' + esc(x.vendor) : ''}`).join(', ') : ''}</span></td>
+      <td>${fmt(g.rssi)}</td><td>${ago(g.age)}</td></tr>`).join('')
+      : '<tr><td class="l" colspan="5"><span class="sub">No directed probe requests heard yet. Most phones probe with a wildcard (no SSID) and are not listed.</span></td></tr>';
+    $('#probeNote').textContent = groups.length ? `${groups.length} network${groups.length > 1 ? 's' : ''} · a randomized MAC per probe burst is normal for phones, so one device can count as several clients` : '';
+  }
+
   function renderWifi(s) {
     const f = $('#wifiFilter').value.trim().toLowerCase(), apOnly = $('#wifiApOnly').checked, active = $('#wifiActive').checked;
     const survOnly = $('#survOnly').checked;
-    let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy].join(' ').toLowerCase().includes(f)));
+    let rows = s.wifi_devs.filter(d => (!survOnly || d.surv) && (!apOnly || d.ap) && (!active || d.age < 60) && (!f || [d.ssid, d.mac, d.vendor, d.sec, d.phy, ...(d.seeking || [])].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'wifi');
     $('#nWifi').textContent = `${s.wifi_devs.filter(d => d.age < 60).length} now`;
     $('#wifiNote').textContent = `${rows.length} shown · ${s.wifi_devs.length} known · vendors: ${s.oui_source}`;
     const survBadge = (d) => d.surv
       ? `<span class="surv${d.tier === 1 ? ' t1' : ''}" title="${esc(d.surv_kind)} — OUI match${d.tier === 1 ? ', seen only as a frame destination (weaker evidence)' : ''}">${esc(d.surv)}${d.tier === 1 ? ' ?' : ''}</span>` : '';
-    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}</td>
+    renderRows($('#wifiTbl tbody'), rows, d => d.mac, d => `<td class="l">${survBadge(d)}${d.ap ? `<b>${esc(d.ssid) || '<i>hidden SSID</i>'}</b><br><span class="sub">AP</span>` : `<span class="sub">${d.dest_only ? 'seen as destination only' : 'client / station'}${apOf(d, s)}</span>`}${d.seeking && d.seeking.length ? `<br><span class="sub">probing for ${d.seeking.map(x => `<b>${esc(x)}</b>`).join(', ')}</span>` : ''}</td>
       <td class="l mono">${d.mac}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? d.bw + ' MHz' : ''}</td><td>${d.ch}</td>
       <td>${d.util != null ? d.util + ' %' : ''}</td><td>${d.stations != null && d.ap ? d.stations : ''}</td>
@@ -1114,6 +1134,9 @@
     if (paused) return;   // controls, hero and the action bar keep moving; charts/tables freeze
     const hop = ['5g', '2.4g', 'both', '154'].includes(s.band);
     $('#zoneHopBars').hidden = !hop;  $('#zoneTrend').hidden = !hop;
+    const wifiBand = ['5g', '2.4g', 'both'].includes(s.band);
+    $('#zoneProbe').hidden = !wifiBand;
+    if (wifiBand) renderProbes(s);
     $('#zoneBle').hidden = s.band !== 'ble';
     $('#zoneSpec').hidden = s.band !== 'spec';
     $('#chCard').hidden = !hop;

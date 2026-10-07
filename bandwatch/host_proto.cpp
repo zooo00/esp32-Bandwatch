@@ -532,3 +532,43 @@ void pollSerial() {
         }
     }
 }
+
+// C1: drain the probe queue. A (MAC, SSID) pair is re-announced at most once per kProbeQuietMs: a probing client
+// repeats the same request every few seconds on every channel, and the host keeps the history anyway. A line
+// that does not fit is left *unrecorded* in the dedup table, so it goes out on the next sighting instead.
+namespace {
+constexpr int kProbeSeen = 32;
+constexpr uint32_t kProbeQuietMs = 60000;
+struct ProbeSeen { uint8_t mac[6]; uint16_t ssidHash; uint32_t lastMs; };
+ProbeSeen probeSeen[kProbeSeen];
+uint16_t ssidHash(const char* s) {
+    uint16_t h = 0x811C;
+    for (; *s; s++) h = static_cast<uint16_t>((h ^ static_cast<uint8_t>(*s)) * 0x0101 + 0x3B);
+    return h;
+}
+} // namespace
+
+void serviceProbes() {
+    const uint32_t now = millis();
+    while (probeTail != probeHead) {
+        const ProbeEvt e = g_probeQ[probeTail];   // copy, then release the slot to the producer
+        probeTail = static_cast<uint8_t>((probeTail + 1) % kProbeQ);
+        const uint16_t h = ssidHash(e.ssid);
+        int hit = -1, oldest = 0;
+        for (int i = 0; i < kProbeSeen; i++) {
+            if (probeSeen[i].lastMs && probeSeen[i].ssidHash == h && macEq(probeSeen[i].mac, e.mac)) { hit = i; break; }
+            if (probeSeen[i].lastMs < probeSeen[oldest].lastMs) oldest = i;   // empty slots (0) win
+        }
+        if (hit >= 0 && now - probeSeen[hit].lastMs < kProbeQuietMs) continue;
+        if (!serialRoom(140)) continue;   // 32-char SSID escaped is <= 66 B; the rest is ~60 B
+        char mac[18];
+        fmtMac(mac, sizeof(mac), e.mac);
+        Serial.printf("{\"t\":\"pr\",\"mac\":\"%s\",\"rssi\":%d,\"ch\":%u,\"ssid\":", mac, e.rssi, e.ch);
+        printJsonStr(e.ssid);
+        Serial.print("}\n");
+        ProbeSeen& slot = probeSeen[hit >= 0 ? hit : oldest];
+        memcpy(slot.mac, e.mac, 6);
+        slot.ssidHash = h;
+        slot.lastMs = now ? now : 1;
+    }
+}

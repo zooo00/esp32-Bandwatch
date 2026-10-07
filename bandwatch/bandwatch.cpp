@@ -498,6 +498,7 @@ void Bandwatch_Loop(void) {
     serviceMirror();     // paces the live LCD-mirror full refresh (no-op unless mirror is on)
     serviceSdRead();
     drainCapture();
+    serviceProbes();     // C1: directed probe requests -> "pr" lines (Wi-Fi modes)
     serviceBle();
     serviceSpectrum();   // re-arm energy detection (spec mode only; no-op otherwise)
     const uint32_t now = millis();

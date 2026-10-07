@@ -73,7 +73,14 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 | C11 | Host CSV export | one-click device-table download | n/a (host side) | no | S (UI only) |
 | C12 | ESP-IDF port | unlocks BLE 5 extended adv + re-tunable driver config | re-derive §9 offsets and the §16 budget | wire format unchanged | L (a migration, not a feature) |
 
-### C1 — Probe-request mapping ("seeking" SSIDs)
+### C1 — Probe-request mapping ("seeking" SSIDs)  ✅ SHIPPED v1.16
+
+
+**Status: shipped v1.16.** Decisions taken on the open questions: (1) 32 pairs × 60 s suppress (+712 B static with the
+8-slot Wi-Fi-task queue); (2) host-expire after 15 min, no stop lines; (3) one line per SSID - in practice a probe
+request carries a single SSID IE, so only the first is parsed; (4) host-only for v1, no LCD. First on-air run: 5
+directed probes in 90 s, every one from a **randomized MAC** (new per burst), so the host groups by SSID ("Networks
+being sought" card, both dashboards) and also hangs `seeking` on any device row with a matching MAC.
 
 **What.** A probe request is a client announcing which network(s) it wants: source MAC plus up to ~3
 SSID IEs. Bandwatch already *counts* them in `promiscuousCb()` but never parses them (only beacons get

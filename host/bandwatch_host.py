@@ -15,6 +15,8 @@ Serial protocol (one line each):
     {"t":"w", "dev":[...]}        Wi-Fi transmitter table (every 2 s; last field = association suffix)
     {"t":"b", "dev":[...]}        BLE advertiser table (every 2 s, BLE mode)
     {"t":"z", "dev":[...]}        802.15.4 (Zigbee / Thread) node table (every 2 s, 802.15.4 mode)
+    {"t":"pr", "mac":.., "ssid":..}  a directed probe request: a client asking for that network (C1;
+                                  each (MAC, SSID) pair at most once a minute; Wi-Fi modes)
     {"t":"ble", ...}              BLE-mode heartbeat (every 1 s)
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
@@ -73,6 +75,8 @@ EXPLAIN_DUR_PARK      = 3.5   # a single parked Wi-Fi/15.4 channel (targeted "cu
 EXPLAIN_SETTLE_S      = 0.3   # let the radio come up before the dwell timing starts to matter
 DEV_HIST_LEN = 120      # per-device RSSI samples (one per device report, ~2 s)
 DEV_EXPIRE_S = 600      # forget devices not seen for this long
+PROBE_TTL_S = 900       # C1: forget a (MAC, SSID) probe pairing not re-announced for this long (device repeats <= 1/min)
+PROBE_MAX = 512         # cap on probing MACs kept (randomized MACs make one per probe burst)
 OUI_URL = "https://standards-oui.ieee.org/oui/oui.csv"
 OUI_CACHE = os.path.join(os.path.expanduser("~"), ".cache", "bandwatch", "oui.csv")
 
@@ -360,6 +364,7 @@ class Bandwatch:
         self.wifi_devs = {}
         self.ble_devs = {}
         self.z_devs = {}
+        self.probes = {}         # C1: probing MAC -> {"ssids": {ssid: last_ts}, "rssi", "ch", "last"}
         # Live LCD mirror: the device streams "M x y w h <base64 RGB565-LE>" regions while `mirror` is on; we
         # blit them into this framebuffer and serve it at /screen.bin for the dashboard canvas.
         self.screen_w, self.screen_h = 172, 320
@@ -654,6 +659,8 @@ class Bandwatch:
             self.merge_wifi(msg.get("dev", []))
         elif t == "z":
             self.merge_154(msg.get("dev", []))
+        elif t == "pr":
+            self.merge_probe(msg)
         elif t == "b":
             self.merge_ble(msg.get("dev", []))
         elif t == "ble":
@@ -750,6 +757,56 @@ class Bandwatch:
                     d["hist"].append((round(now, 1), rssi))
             self._expire(self.wifi_devs, now)
             self._resolve_parents()
+
+    def merge_probe(self, msg):
+        """C1: one directed probe request - a client naming a network it wants. The device dedups each (MAC, SSID)
+        pair for 60 s, so this sees at most ~1/min per pair; history and expiry live here."""
+        mac, ssid = msg.get("mac"), msg.get("ssid")
+        if not mac or not ssid:
+            return
+        now = time.time()
+        with self.dlock:
+            p = self.probes.get(mac)
+            if p is None:
+                if len(self.probes) >= PROBE_MAX:   # drop the stalest probing MAC
+                    del self.probes[min(self.probes, key=lambda m: self.probes[m]["last"])]
+                p = self.probes[mac] = {"ssids": {}}
+            p["ssids"][ssid] = now
+            p.update({"rssi": msg.get("rssi"), "ch": msg.get("ch"), "last": now})
+
+    @staticmethod
+    def _random_mac(mac):
+        """Locally administered (bit 1 of the first octet): almost always a privacy-randomized client MAC."""
+        try:
+            return bool(int(mac[:2], 16) & 0x02)
+        except ValueError:
+            return False
+
+    def _probe_view(self, now):
+        """Expire stale pairings, then group by SSID: a randomizing phone shows up as many MACs asking for one
+        network, so the SSID is the stable key. Caller holds self.dlock."""
+        for mac in list(self.probes):
+            p = self.probes[mac]
+            p["ssids"] = {s: t for s, t in p["ssids"].items() if now - t <= PROBE_TTL_S}
+            if not p["ssids"]:
+                del self.probes[mac]
+        ap_ssids = {d.get("ssid") for d in self.wifi_devs.values() if d.get("ap") and d.get("ssid")}
+        groups = {}
+        for mac, p in self.probes.items():
+            for ssid, t in p["ssids"].items():
+                g = groups.setdefault(ssid, {"ssid": ssid, "macs": 0, "random": 0, "last": 0, "rssi": -127,
+                                             "nearby_ap": ssid in ap_ssids, "sample": []})
+                g["macs"] += 1
+                g["random"] += self._random_mac(mac)
+                g["last"] = max(g["last"], t)
+                g["rssi"] = max(g["rssi"], p.get("rssi") if p.get("rssi") is not None else -127)
+                if len(g["sample"]) < 4 and not self._random_mac(mac):
+                    g["sample"].append({"mac": mac, "vendor": self.oui.lookup(mac)})
+        out = sorted(groups.values(), key=lambda g: -g["last"])
+        for g in out:
+            g["age"] = round(now - g["last"], 1)
+            del g["last"]
+        return out
 
     def _resolve_parents(self):
         """Turn each station's 3-byte association suffix into the full BSSID of an AP we actually know.
@@ -1133,7 +1190,10 @@ class Bandwatch:
         spec_cls, spec_expl, spec_age = spec_analysis["cls"], spec_analysis["expl"], spec_analysis["age"]
         chans = [dict(ch=c, **st["channels"].get(c, {})) for c in st["chs"]]
         with self.dlock:
-            wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.wifi_devs.values()]
+            probe_groups = self._probe_view(now)
+            wifi = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1),
+                         seeking=sorted(self.probes.get(d["mac"], {}).get("ssids", {})))
+                    for d in self.wifi_devs.values()]
             ble = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.ble_devs.values()]
             zig = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.z_devs.values()]
             src = None
@@ -1165,7 +1225,7 @@ class Bandwatch:
                                "age": spec_age.get(self.fine["lo"] + i * self.fine["step"])}
                               for i, r in enumerate(self.fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
-            "wifi_devs": wifi, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
+            "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt, "deauth": st["deauth"], "ble": st["ble"], "sd": st["sd"],
              "sd_read": st["sd_read"], "saved": st["saved"],
             "oui_source": self.oui.source,
         }

@@ -110,7 +110,13 @@ file-local helpers live in an anonymous namespace.
 - `capture.cpp` — the capture ring: `ensureCapRing()` (sized against free heap, with a post-allocation floor —
   §16), `releaseCapture()`, single-producer reserve/commit (`capReserve/capCommit`), base64 streaming and the
   per-loop bounded drain.
-- `sd_sink.cpp` — microSD pcap sink: on-demand FATFS mount (§12), byte-compatible writer, `sdls` / `sdread`.
+- `sd_sink.cpp` — microSD pcap sink: on-demand FATFS mount (§12), byte-compatible writer, `sdls` / `sdread`;
+  since 1.18 also card presence (`sdSetPresent()`, the one place it changes; the idle CMD0 probe
+  `sdServicePresence()`) and the one I/O-failure path for a card pulled mid-capture (§12).
+- `events.cpp` — the C4 event log (1.18, §20): `eventFlag()` (radio side, under `g_devMux`), `serviceEvents()`
+  (loop: classify, buffer, flush to `/events.csv`), the `/seen.csv` novelty baseline, and `loadSurvExtra()`
+  (`/surveil.csv` extra OUIs, read at boot).
+- `settings.cpp` — NVS persistence (C3, 1.11; the `events` flag joined in 1.18).
 - `host_proto.cpp` — the serial JSON protocol: `sendHello/sendDwell/sendSweep/sendBleStatus/sendDevices`,
   `handleCommand()` / `pollSerial()`. All output goes through `serialRoom()` so a line is either written whole
   or skipped.
@@ -135,7 +141,7 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}`) |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes, **in chunks of ≤24 rows** (v1.17; loudest first, each chunk a complete line; the host merges by MAC, so a chunk dropped for TX room just waits a cycle) | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv, apSuffix]`; `apSuffix` = last 3 bytes of the BSSID this device was heard associated with, lower-case hex, `""` if never seen on a BSS (§17); flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
@@ -143,7 +149,8 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"z","dev":[...]}` | every 2 s in 802.15.4 mode | rows `[id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]`; `id` = extended address `aa:bb:cc:dd:ee:ff:00:11` or `pan/short` hex; `proto` 0 unknown, 1 Zigbee, 2 Zigbee GP, 3 Thread/6LoWPAN, 4 MAC‑secured; flags bit0 ext addr, bit1 beacons, bit2 permit join, bit3 MAC security, bit4 data seen |
 | `{"t":"pr",...}` | a directed probe request (Wi‑Fi modes, C1) | `mac` (the probing client; often a randomized, locally administered MAC), `rssi`, `ch`, `ssid` (the network it asked for, control-stripped). Wildcard probes (empty SSID) are not sent. The device suppresses a repeat of the same (MAC, SSID) pair for 60 s (32-entry table in `host_proto.cpp`); the host keeps history and expires pairs after 15 min (`PROBE_TTL_S`), grouping by SSID because phones randomize per burst |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
-| `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | |
+| `{"t":"ev","ev":{...}}` | every 5 s while the event log is armed, in every mode (`sendEventStatus()`, 1.18) | `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}`: armed; card usable (last attach worked); baseline hashes in RAM; entries in `/seen.csv` (counted at load, plus this session's appends); rows written to `/events.csv`; rows buffered; surveillance rows; new-device rows; rows dropped (2 KB buffer full, rows discarded by `events 0` on a busy card, or the 16-entry radio queue full); card errors (failed mount/write); novelty checks skipped for want of a baseline. The same object rides on `hello` and the `events` ack. §20 |
+| `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
 | `{"t":"sdls","files":[[name, bytes], ...],"total":N,"sent":M}` | after `sdls` | files in the card root; `sent < total` = the serial buffer filled mid-list (host slow or absent) and whole entries were dropped |
 | `P <ch> <rssi> <ts_us> <len> <base64>` | while `cap 1` | one captured frame; `len` = original length, payload may be truncated to the snap length. Wi‑Fi frames include the FCS; 802.15.4 frames exclude it |
@@ -154,7 +161,12 @@ Host → device commands: `band 5g|2.4g|both|ble|154`, `park <ch>` / `park 0`, `
 5 min) / `deauth 0`, 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one specific station — both MACs colon-separated, the
 device rejects anything else) / `dca 0`, 
-`sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
+`sdcap 0|1`, `sdinfo` (mounts, replies, and since 1.18 unmounts again), `sdls`, `sdread <path>`, `time <epoch>`, `info`, `reboot`.
+1.18: `events 1|0` (arm/disarm the SD event log, §20; persisted in NVS; arming works with no card; ack
+`{"t":"ack","cmd":"events","ev":{...}}`, or `{"t":"err","msg":"events: not enough free heap"}` when its ~12.6 KB
+will not allocate), `sdprobe` (diagnostic: `{"t":"ack","cmd":"sdprobe","r1":N,"present":0|1}` — the raw CMD0
+reply of the presence probe; `r1` is -1 when the card is mounted or busy and the probe was not sent),
+`sdface 0|1` (diagnostic: show the card-out / card-in LCD face for 3 s without touching the card).
 
 The device drops a whole line rather than truncating it, so the host must tolerate missing lines — but it must
 also tolerate *malformed* ones: `handle_line()` wraps the dispatch so a short or unexpected line is logged
@@ -210,8 +222,10 @@ set; charts are inline SVG.
   protocol table above current.
 - **New LCD page**: add to `Page`, write `buildXPage()` / `refreshX()`, wire into `showPage()` / `refreshUi()`
   / `pageAvailable()`.
-- **SD card logging**: unused so far; SPI bus is shared with the LCD (CS GPIO4), upstream `SD_Card.cpp` shows
-  the Arduino SD usage.
+- **Something new on the SD card**: mount with `sdMount()` and release with `sdUnmount()` in the same loop pass
+  unless you own the card for longer (FATFS is ~30 KB, §12); never touch it from a radio context; respect
+  `sd.capEnabled` / `sd.readActive` (the card belongs to a capture / an `sdread`); treat a failed open or write
+  as "card gone", and change presence only through `sdSetPresent()`. `events.cpp` (§20) is the worked example.
 
 ## 7. Quirks and gotchas (read before debugging)
 
@@ -308,6 +322,10 @@ Only three contexts exist. Everything in `Bandwatch_Loop()` **and** the LVGL tim
   preempts the loop task, never the reverse, so the loop task cannot be scheduled while one is mid-`memcpy`.
   If either fact ever changes — a dual-core target, or the free moved to a task that can preempt — the ring
   needs real synchronisation.
+- The event-log queue (`g_evtQ`, 16 × `EvtPending`, 1.18) is filled by `eventFlag()` from the Wi‑Fi and NimBLE
+  paths while they already hold `g_devMux` (called when a device slot is created) and drained by
+  `serviceEvents()` on the loop task under the same lock. Everything else in the event log — classification,
+  baseline, CSV buffer, every SD access — is loop-task only. A full queue drops the event and counts it.
 - Strings captured off the air (SSID, BLE name, country code) are stripped of control characters at ingest
   (`sanitizeText`) so `printJsonStr` cannot expand them into `\u00xx` escapes that overshoot the `serialRoom()`
   budget for a line. The budgets (`40 + n*126` Wi‑Fi, `40 + n*102` BLE) are estimates, not exact lengths: a full
@@ -477,6 +495,59 @@ every `kSdFlushMs` (5 s), so a power cut costs at most a few seconds. Because ca
 tens of milliseconds and `hopIfNeeded()` shares this task, `drainCapture()` gives SD at most `kSdBudgetUs`
 (8 ms) per loop iteration. Park on one channel for long captures; while hopping, heavy SD load will skew
 dwell timing and therefore the busy score.
+
+### Removal, insertion and a missing card (1.18)
+
+Until 1.18 `cardPresent` was set once by the boot probe and nothing noticed a card being pulled: a capture's
+writes failed and the drain loop closed it silently, `sdread` sent `sdread_done` for a short file (which the
+host saved as complete), and `sdinfo` plus the failure paths of `sdOpenCapture()` / `sdls` left FATFS (~30 KB)
+mounted. Now:
+
+- **One place presence changes:** `sdSetPresent(present, why)` in `sd_sink.cpp`. `sdMount()` reports every
+  attempt through it, and so does every failure path. The boot probe's reading only sets the state; after that a
+  real transition shows the LCD face (below), emits `{"t":"log","msg":"sd card removed|inserted[: why]"}` (which
+  the host uses for `sd.mounted`) and, on insertion, calls `eventsNudge()` so the event log (§20) attaches now
+  instead of on its next 30 s retry.
+- **`sdMount()` calls `SD.end()` before `SD.begin()`**, so a re-inserted (or swapped) card gets a fresh init
+  rather than the stale handle the vanished card left behind.
+- **Capture write failure** sets `sd.ioFailed`, and `sdServiceFlush()` is the one path that handles it: the
+  `sdcap: write failed after N frames (card removed?) - recording stopped` error, `sdCloseCapture()`, `SD.end()`,
+  presence → removed (`recording stopped`), then `syncCapActive()` so the ring goes back to the heap unless the
+  USB sink still uses it.
+- **`sdread` short read** sends `sdread: read failed at X of Y bytes (card removed?)` instead of `sdread_done`
+  and marks the card removed (`file pull stopped`); the host discards the half-built buffer.
+- **`sdinfo`** unmounts after replying (`sdUnmount()` keeps the mount when a capture or `sdread` owns it).
+
+**Presence probe without a card-detect pin.** The board has none, so `sdServicePresence()` (loop, every 2 s)
+sends one SPI CMD0 at 400 kHz (`sdProbeR1()`: ≥ 74 clocks with CS high, CMD0 with CRC 0x95, read R1). A card
+answers `0x01` (idle); an empty slot leaves MISO high, `0xFF` (verified, below). Under 1 ms, no FATFS, no heap, inside
+`beginTransaction/endTransaction` like every other user of the bus. It runs **only while the card is idle and
+unmounted** — never while FATFS is mounted, a capture records or an `sdread` runs, because CMD0 resets a card
+mid-session; mounted users learn of a removal from their own I/O errors. Two agreeing consecutive readings are
+needed to change state (debounces a card mid-insert). `sdprobe` returns the raw R1 for testing.
+
+**LCD faces.** On a presence transition (not at boot) `showSdFace()` (`lcd_ui.cpp`) creates one custom-drawn,
+full-screen object on `lv_layer_top()`, so it sits above any page, mode card or photo and survives a page rebuild
+underneath; `serviceSdFace()` deletes it after `kSdFaceMs` (3 s). Card out: a pale-blue face with a frown,
+"SD card out" and the reason in grey (e.g. "recording stopped"). Card in: a yellow smiling face, "SD card in".
+A second change while one is up repaints it with the new mood. `sdface 0|1` shows either for testing.
+
+**Measured on hardware (1.18 session).** Card pulled during `sdcap` with the event log armed:
+`sdcap: write failed after 619 frames (card removed?) - recording stopped`, the capture closed cleanly (166 kB
+on the card), the event log went to `card: 0` and kept buffering (21 rows), and 2 novelty checks were skipped
+(`wait`). Re-inserted: re-attached, baseline reloaded, the 21 rows flushed (`written: 52`), nothing lost.
+
+**Probe verified on hardware.** With the slot empty CMD0 reads R1 = `0xFF` (255) because MISO rests high; with a
+card in it reads `0x01`. The two are cleanly distinguishable on this board. Detection timing, measured: a pulled
+card gave its first absent reading at 186.2 s uptime and `sd card removed` was logged at 187.3 s (the second
+agreeing reading); an inserted card logged `sd card inserted` at 204.2 s. Worst case is about 4 s (2 s probe
+interval × 2 readings). No open items remain for the probe.
+
+**Hot-pulling can reset the board (intermittent, hardware).** One of three hot-pulls coincided with a reboot whose
+reason was `rst: usb` — a USB-peripheral reset, not a panic. The other two (one during `sdcap`, one idle with the
+probe running) caused no reboot and no USB disconnect. The likely mechanism is a supply dip as the card's contacts
+break, briefly dropping the USB link; the host's reconnect then changes DTR/RTS, which resets the chip (CLAUDE.md
+rule 1). It is not caused by the probe. Pull the card gently and do not touch the USB cable while doing it.
 
 
 ## 13. BLE capture (1.4)
@@ -701,6 +772,16 @@ the Spectrum page's 42 bars onto the same `BarStrip` drawing (each bar an exact 
 1 px gap) - the old flex row overflowed its panel and clipped the top ~6 MHz. No page builds per-item widgets now.
 Montserrat 12/14/20 are built without U+00B7 and the dashes: LCD strings must stay ASCII or they render as boxes.
 
+**The event log (§20, 1.18) is heap while armed, nothing while off:** the baseline set (`kBaseCap` 2,560 ×
+4 B = 10,240 B), the CSV row buffer (2,048 B) and the pending `/seen.csv` appends (48 × 6 = 288 B) — about
+12.6 KB, malloc'ed by `events 1` (refused with an error if it will not fit) and freed by `events 0`. It mounts
+FATFS only for the length of a flush and never alongside a capture (flushes wait while `sdcap` records), so the
+FATFS cost does not stack on the SD-capture worst case above — but the 12.6 KB are gone from *every* state while
+armed, BLE and capture included, and arming is persisted. Free heap at peak load with the log armed has **not**
+been measured. Static cost of the 1.18 work (event log + presence probe + faces): 76,816 → **77,272 B** (the
+16-entry radio queue is 160 B of it). A `/surveil.csv` on the card adds up to 64 × 4 B = 256 B of heap, loaded
+once at boot.
+
 ### The floor, as built (see [ROADMAP.md](ROADMAP.md))
 
 The proposal landed in `ensureCapRing()` (`capture.cpp`): right after allocating the ring it checks total free
@@ -710,8 +791,8 @@ floor standing (it shrinks toward `kCapSlotsMin` instead of being refused), and 
 a ring that `cap 1` made before the FATFS mount was floor-checked against the pre-mount heap, so `cap 1` then
 `sdcap 1` used to land at **16.1 kB** free (measured). Refit re-sizes it against the post-mount heap without
 touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order gives 9 slots, 33.8 kB). It guards only the one biggest allocation (plus the page-switch
-headroom above), so rule 4 still keeps the rest honest: current static usage is 74,032 B (v1.15.4), about 6 kB
-under the line, and that headroom is the edge of an unverified budget rather than a wall.
+headroom above), so rule 4 still keeps the rest honest: current static usage is 77,272 B (v1.18; 74,032 B at v1.15.4), under 3 kB
+below the line, and that headroom is the edge of an unverified budget rather than a wall.
 
 ## 17. Station-to-BSS association (1.5.4, ported to the module layout in 1.5.5)
 
@@ -900,3 +981,81 @@ times a second, so more pixels change per second than fit through the TX buffer 
 continuously. Stepping to a mostly-static page (Devices, System, a parked channel) lets it settle to a clean
 frame. This is a bandwidth limit, not a bug — a full 172×320 frame is ~147 KB of base64 and USB-CDC is the
 cap.
+
+## 20. Event log to SD (C4, 1.18)
+
+The untethered "what happened on this walk" record (ROADMAP C4, delivering 1.6.2 and 1.6.4). `events 1` arms it,
+`events 0` disarms; the flag is persisted in NVS (`settings.cpp`, key `events`) and re-applied in
+`Bandwatch_Init()`, so a device switched on in a pocket logs without a host. *Armed* is independent of the card:
+it arms with no card in the slot and attaches when one appears.
+
+### What is logged
+`/events.csv`, header `epoch_ms,up_ms,kind,id,rssi,ch,radio,extra`, one row per event:
+
+- `kind = surv` — a surveillance-OUI match (built-in `kSurvOuis`, then `/surveil.csv`), the first time a device is
+  seen this session (a 32-entry seen set; past 32 surveillance devices a re-created slot can log again). `extra` =
+  category name, plus ` (dest only)` for a tier-1 (addr1-only, §15) sighting.
+- `kind = new` — a globally unique MAC not in the card's `/seen.csv` baseline. `extra` = `dest only` for tier 1.
+  **Randomized MACs never count as new** (Wi‑Fi locally-administered bit, BLE random address type): rotating
+  privacy addresses would be "new" every few minutes. They are still logged as `surv` when they match.
+- `epoch_ms` is empty until the host has sent `time` (no RTC); `up_ms` is always there. `radio` is `wifi` or `ble`;
+  `ch` is the Wi‑Fi channel (0 for BLE). 802.15.4 nodes are not logged.
+
+Events come from slot *creation*: the Wi‑Fi and NimBLE paths call `eventFlag()` under `g_devMux` when
+`trackWifiDevice()` / the BLE tracker create a device slot; it copies MAC/RSSI/channel/category/flags into a
+16-entry queue (`g_evtQ`) and returns, dropping and counting on overflow. Everything else runs on the loop task in
+`serviceEvents()`: dedup, classification, row formatting, flushing.
+
+### Novelty baseline
+On attach, `loadBaseline()` reads `/seen.csv` and keeps the **newest 2048 entries** (a ring over the file) as
+sorted 32-bit FNV-1a hashes for binary search; `kBaseCap` = 2560 leaves room for 512 new devices this session
+(past that a MAC is still logged as new but not remembered in RAM, so a re-created slot could log it again). New
+MACs are appended to `/seen.csv` on each flush, so the baseline grows with every walk and a device counts as new
+once per card. The file itself is never trimmed. A 32-bit hash can collide; a collision makes a new device look
+known (a missed row), never the reverse.
+
+### Buffering and flushing
+Rows go into a 2 KB heap buffer (~25-30 rows); overflow is counted in `drop`, not hidden. The card is **not**
+kept mounted (rule 11): it is mounted just long enough to append, when 16 rows are waiting, 48 new MACs are pending
+for `/seen.csv`, or 60 s have passed with anything pending. `/events.csv` rotates at 1 MB to `/events.old.csv`
+(one previous file kept). Flushes wait while `sdcap` records or an `sdread` runs — the card belongs to them —
+and rows keep buffering meanwhile.
+
+### Missing, pulled or swapped card
+- **No card:** novelty is suspended (each skipped check counted in `wait`), because with no baseline every device
+  would look new. Surveillance rows still buffer. A mount is retried every 30 s (`kRetryMs`; an `SD.begin()` with
+  no card blocks the loop briefly, so not every pass), and immediately when presence goes to inserted
+  (`eventsNudge()` from `sdSetPresent()`, §12).
+- **Failed mount or write:** the card is marked lost (`err` +1, `card: 0`), rows stay buffered, and `SD.end()` is
+  forced unless a capture/`sdread` owns the card. The baseline is invalidated: the next successful mount reloads
+  `/seen.csv` from *that* card, which may be a different one, and re-inserts the session's still-pending new MACs
+  so they are not counted as new a second time.
+- `events 0` makes one best-effort flush; rows that could not be written are freed and counted in `drop`.
+
+### Status line
+`ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}` (§4) rides on `hello`, the `events`
+ack, and a `{"t":"ev"}` line every 5 s while armed, in every mode. Both dashboards show it with an arm/disarm
+control and pull buttons for `events.csv` / `seen.csv`; the host's `sdread` guard accepts the card's text files
+(`CARD_TEXT_FILES`: `events.csv`, `events.old.csv`, `seen.csv`, `surveil.csv`) besides the pcap naming scheme.
+
+### `/surveil.csv` (1.6.4)
+Up to 64 extra OUIs, one `AA:BB:CC,<category 1-7>` per line (categories as `kSurvName` in `surv_ouis.h`),
+read once at boot by `sdProbeAtBoot()` → `loadSurvExtra()` into heap (absent file = nothing allocated).
+`survLookup()` checks the built-in table first. A changed file takes effect on the next boot. Same honesty rule as
+§15: a match is evidence, not identification.
+
+### Memory
+Nothing while off. Armed: ~12.6 KB heap (baseline 10,240 B + rows 2,048 B + pending appends 288 B), plus FATFS
+(~30 KB) only for the duration of a flush. Static: the queue and counters (§16).
+
+### Measured on hardware (1.18 session)
+First flush at 16 rows; correct CSV with epoch timestamps; `seen.csv` at 31 entries after about 80 s. Card pulled
+mid-`sdcap` and re-inserted: no rows lost (§12). The re-insert of pending new MACs into the reloaded baseline was
+added *after* that test, because `base` read 32 instead of about 52 — it has not been re-run since.
+
+### Open
+- **LED blip on a new/surveillance event: undecided**, deliberately coupled with C10 (permit-join blip) and
+  1.6.1's transient-alert proposal so `driveLed()` gets one decision, not three.
+- The presence probe has no open items (card out reads `0xFF`, card in `0x01`, removal detected within ~4 s;
+  §12). Hot-pulling the card can intermittently reset the board over USB (`rst: usb`, a hardware effect, §12).
+- Not yet measured: free heap at peak load with the log armed; behaviour with a large (> 2048-entry) `/seen.csv`.

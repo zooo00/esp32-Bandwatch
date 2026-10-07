@@ -1,8 +1,9 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.15.4** (v1.12 boot photos, v1.13-1.14 LCD mirror,
-v1.15.x review/dashboard passes and the 2026-10 RAM audit - none moved a candidate). Batch one shipped in v1.11 (C3 + C6 + C8); C1/C2/C4/C5/C7/C9/C10/C11 still candidates, C12 the exit
-ramp.
+Planned work, open questions and known gaps. Current release: **v1.18** (v1.12 boot photos, v1.13-1.14 LCD mirror,
+v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
+removal hardening). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
+C2/C5/C7/C9/C10/C11 still candidates, C12 the exit ramp.
 
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
@@ -18,7 +19,7 @@ of being assumed.
 
 **How to analyze.** Rank by value-for-effort against this project's identity (portable Wi‑Fi/BLE/15.4
 surveillance + interference tool; one time-shared radio). Check the RAM math in the preamble — static
-is ~6 kB under the line since v1.11, and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
+is under 3 kB below the line since v1.18 (77,272 B), and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
 `merge_*` in `bandwatch_host.py` ↔ the §4 table in DEVELOPER.md); UI-only candidates skip that cost.
 The quick hits (C6–C11) are cheap enough to batch; the big ones each justify their own release.
 
@@ -30,14 +31,16 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   LCD pages, `sendHello`'s `chs`, dashboard buttons (checklist in DEVELOPER §6).
 - **RAM is the constraint.** No PSRAM; statics and heap share ~320 kB DRAM. Static usage: v1.10 was
   **80,544 B** (over the round "well under ~80 kB" line, CLAUDE.md rule 4); the v1.11 reclaim pass (smaller
-  LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to 74,480 B, and
-  v1.15.4 to **74,032 B**. Free heap at runtime (`both`, v1.15.4) depends on the LCD page: Overview ≈87.6 kB
+  LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to 74,480 B,
+  v1.15.4 to 74,032 B; v1.17's 96-slot Wi-Fi table took it to 76,816 B and v1.18 (C4 event log + SD presence
+  probe + LCD card faces) to **77,272 B** (measured from the build). The C4 log also holds ~12.6 kB of *heap* while
+  armed (DEVELOPER §16/§20), not yet measured at peak load. Free heap at runtime (`both`, v1.15.4) depends on the LCD page: Overview ≈87.6 kB
   (now the heaviest), Devices ≈91, System ≈102, Channels ≈106; BLE ≈88 kB. USB + SD capture bottoms out at
   **~30.8 kB** on any page: `ensureCapRing()` sizes the ring to leave `kMinFreeHeapB` = 24 kB *plus*
   `lcdPageHeadroomB()` (the step to the heaviest page), and `sdcap` re-fits a ring `cap 1` made before the
   FATFS mount (`refitCapRing()`). `WifiDev` is packed to exactly 64 B behind a `static_assert` (`devices.h`) in
-  one 96-slot array (64 until v1.17), so +1 byte of *padding* costs 384 B static. For reference: `BleDev` = 48 B × 48 slots (repacked from 56 in v1.16.1)
-  (measured from the ELF; no static_assert yet), `Dev154` = 24 B × 48, `CapFrame` = 1,610 B × 4-20.
+  one 96-slot array (64 until v1.17), so +1 byte of *padding* costs 384 B static. For reference: `BleDev` = 48 B × 48 slots (repacked from 56 in v1.16.1,
+  `static_assert` since then, like `Dev154`), `Dev154` = 24 B × 48, `CapFrame` = 1,610 B × 4-20.
 - **Three contexts + one ISR.** Loop task (LVGL timer + `Bandwatch_Loop`, ~2 ms cadence), Wi‑Fi task
   (`promiscuousCb` in `wifi_sniff.cpp`), NimBLE host task (`bleGapEvent` in `ble_scan.cpp`), and the 802.15.4
   true ISR. Radio paths are `IRAM_ATTR`, spinlocked, no heap / no Serial. SD writes and capture draining run
@@ -63,7 +66,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 | C1 | Probe-request mapping ("seeking") | sleepy devices reveal which network they want | ~0.2–0.4 kB (dedup table) | yes: `pr` events | S–M |
 | C2 | Ghost AP mode (+ probe responder) | attract sleepers, catch their handshakes | <100 B + heap scratch while active | yes: `ghost` cmd/ack, counters in `d` | M |
 | C3 | NVS persistence | boot where you left off; settings survive reboot | transient ~0.5–1 kB, none resident | no (maybe a log line) | S |
-| C4 | Event log → SD CSV (+ novelty baseline) | persistent hits + "new device here" without a host | pending queue ≈200 B | no (an SD file) | M |
+| C4 ✅ v1.18 | Event log → SD CSV (+ novelty baseline) | persistent hits + "new device here" without a host | 16-entry queue 160 B + ~12.6 kB heap while armed (1.18 total incl. presence/faces: +456 B static) | yes in the end: `ev` status line + `events` cmd | M |
 | C5 | Patrol mode (auto round-robin) | keeps the spectrum's "known emitters" fresh; passive logging | timer state, few bytes | yes: `patrol` cmd/ack, leg in status lines | S–M |
 | C6 | Top talker per dwell | name the loudest voice on each channel | +≈8 B in `Accum` (one instance) | field added to `d` line | S |
 | C7 | Hunt by SSID | "where's my network" without knowing its MAC | 34 B while active, heap-allocated | reuses `hunt` ack shape; new command | S–M |
@@ -180,7 +183,29 @@ splash card could carry a small "restored" tag so it is visible that state came 
 **Verify.** Set band/park/settings → `reboot` → compare hello fields to pre-reboot. Corrupt NVS (erase the partition
 on a sacrificial board) → defaults return and it still boots.
 
-### C4 — Event log to SD CSV (+ novelty baseline)
+### C4 — Event log to SD CSV (+ novelty baseline)  ✅ SHIPPED v1.18
+
+**Status: shipped v1.18** (`events.cpp`, DEVELOPER §20; card removal/insertion hardening that came with it in §12).
+Decisions taken on the open questions: (1) **events wait during `sdcap`** (and during `sdread`): rows keep
+buffering in a 2 KB heap buffer and flush after the capture, overflow counted in `drop` - no second open file, no
+second 4 kB buffer; (2) rotation is the boring one: at 1 MB `/events.csv` becomes `/events.old.csv` (one previous
+file kept); (3) the baseline in RAM is the **newest 2048 entries** of `/seen.csv` (sorted 32-bit FNV hashes,
+`kBaseCap` 2560 leaves room for 512 new this session); the file itself is never trimmed; (4) **no LED yet** - still
+to be decided together with C10 and 1.6.1. Deviations from the sketch below: the queue is 16 entries, filled when a
+device *slot is created* (not per frame); the baseline set, row buffer and pending appends are heap while armed
+(~12.6 kB), not static; the card is mounted only per flush (every 60 s, at 16 rows, or at 48 pending new MACs),
+not held; randomized MACs (Wi-Fi locally-administered, BLE random) never count as new but still log as `surv`;
+with no card novelty is suspended (`wait`), surveillance rows still buffer, and a mount is retried every 30 s or
+as soon as the presence probe sees a card; a failed mount/write marks the card lost and the next mount reloads
+that card's baseline (re-inserting this session's pending new MACs). It did add a protocol line after all - the
+`{"t":"ev"}` status every 5 s while armed, plus `ev` on `hello` and the `events` ack. `/surveil.csv` (1.6.4) is read
+once at boot by `sdProbeAtBoot()`, not at every mount.
+**Measured:** first flush at 16 rows, epoch-stamped CSV correct, `seen.csv` 31 entries after ~80 s; card pulled
+mid-`sdcap` and re-inserted lost no rows (21 buffered, `written: 52` after). Presence probe verified: empty slot
+R1 = 0xFF, card in 0x01, removal logged within ~4 s worst case (measured 1.1 s after the first absent reading).
+One of three hot-pulls reset the board (`rst: usb` - a USB-peripheral reset from a likely supply dip, not a panic,
+not the probe); pull the card gently. **Not verified:** the re-insert of pending new MACs (added after the pull
+test, when `base` read 32 instead of ~52). **Open:** the LED blip. Original entry below.
 
 **What.** One append-only `/events.csv` on the card: `epoch_ms, kind, id, rssi, ch, extra`. v1 kinds: surveillance
 hits (category + tier) and **novelty** — a MAC not present in a `/seen.csv` baseline dropped on the same card. The
@@ -348,8 +373,8 @@ C1–C11 are done and BLE coverage is the wall left. Everything else ships insid
 
 **Suggested sequencing (to be argued with).** Batch one (**C3 + C6 + C8**) shipped in v1.11 — all small, no transmit duty, protocol cost
 limited to a dwell field; banks RAM-headroom knowledge for the rest. Batch two: **C1** alone — the identity feature
-(surveillance evidence), and its design questions deserve their own release. Then C2 (stage 1 before stage 2), C4 (with the
-shared LED decision from 1.6.1/C10), C5, then C7 and C9 as natural attachés of the hunt/deauth families. C11 rides any host
+(surveillance evidence), and its design questions deserve their own release. Then C2 (stage 1 before stage 2), C4 (shipped v1.18 ahead of C2;
+its LED blip still waits on the shared decision with 1.6.1/C10), C5, then C7 and C9 as natural attachés of the hunt/deauth families. C11 rides any host
 change; C12 when BLE coverage is the wall left.
 
 ---
@@ -443,7 +468,10 @@ around with the device in your hand.
 Proposed: a detection wins the LED briefly (distinct fast double-flash, a few seconds) then yields back to
 whatever was showing, rather than becoming a new permanent state. Not yet agreed.
 
-### 1.6.2 Hit logging to SD
+### 1.6.2 Hit logging to SD  ✅ delivered by C4 (v1.18)
+
+Delivered as `/events.csv` (C4, DEVELOPER §20): MAC, category, tier, RSSI, channel and epoch/uptime timestamps, plus
+novelty rows. Original entry:
 
 Untethered means nobody is watching the dashboard, so hits must persist: MAC, category, tier, RSSI, channel,
 timestamp, appended to a file on the card. This is the actual deliverable of a walk-around.
@@ -462,7 +490,11 @@ Hunt = stop hunt, then walk".
 Also unresolved untethered: the device has no RTC, so with no host to send `time <epoch>` the hit log and
 pcap filenames fall back to a counter and uptime-based timestamps.
 
-### 1.6.4 OUI list on the SD card
+### 1.6.4 OUI list on the SD card  ✅ delivered by C4 (v1.18)
+
+Delivered: `/surveil.csv`, up to 64 lines of `AA:BB:CC,<category 1-7>`, read once at boot into heap; the built-in
+table is checked first, so the file can add prefixes but not withdraw a built-in one (that still needs a reflash).
+Original entry:
 
 A 64-prefix table goes stale, upstream already withdrew two Flock prefixes as Ubiquiti false positives, and
 reflashing in the field is not an option. Reading `/surveil.csv` at mount and falling back to the built-in

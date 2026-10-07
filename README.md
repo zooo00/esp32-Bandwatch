@@ -63,6 +63,18 @@ a deauth attack is running — it never transmits.
 - **microSD pcap recording**: the device writes the pcap itself (`sdcap 1`), so a capture does not depend on
   USB throughput. The two sinks are independent — record to card and watch live in Wireshark at the same
   time. Files can be listed and pulled back over serial without ejecting the card.
+- **Event log on the card** (`events 1`, or the dashboard's *Event log* control; the setting survives a power
+  cycle): an untethered record of a walk. `events.csv` gets a row for every surveillance‑OUI match and for every
+  device **new to this card** — not in its `seen.csv` baseline, which grows as you walk, so early on almost
+  everything is new. Randomized (privacy) addresses never count as new. Rows are timestamped once a host has sent
+  the time, buffered in RAM, and written in short bursts, so the card is not held mounted. With no card in, the
+  log stays armed, keeps surveillance hits, and attaches when a card appears. Extra surveillance prefixes can be
+  added by putting a `surveil.csv` (`AA:BB:CC,<category>`) on the card. The dashboard pulls `events.csv` /
+  `seen.csv` back without ejecting.
+- **Card in / card out faces**: pulling or inserting the card shows a sad (pale blue, "SD card out", with what
+  stopped) or happy (yellow, "SD card in") face on the LCD for 3 s. A recording interrupted by a pulled card is
+  closed cleanly and reported, not silently cut off. There is no card‑detect pin; an idle card is probed every
+  2 s, so a change shows within about 4 s. Pull the card gently: one hot‑pull in three reset the board over USB.
 - **Host dashboard** (`host/bandwatch_host.py`): Overview tab (bar chart per channel, trend, table), **Wi‑Fi devices**
   **Bluetooth LE** and **Zigbee / Thread** tabs (sortable, filterable, vendor names from the IEEE OUI registry,
   RSSI sparklines, a *Hunt* button per row and a *Deauth* button per AP row), a hunt panel with live RSSI trend,
@@ -146,7 +158,7 @@ mounted only while it is in use and released again afterwards; while recording, 
 accordingly (fewer slots, so expect more `drop` on a very busy channel than with USB capture alone).
 
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154`, `park <ch>|0`,
-`cap 0|1`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>`,
+`cap 0|1`, `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `events 0|1`, `time <epoch>`,
 `snap <bytes>`, `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi
 modes only — broadcast deauth to all clients of that AP, auto‑stops after 5 min), 
 `dca <client_mac> <ap_bssid>` / `dca 0` (targeted deauth to one specific station), 
@@ -250,6 +262,18 @@ breakdown. The `bootlogo/` boot images are third‑party artwork and are likewis
 
 ## Versions
 
+- **1.18** — **Event log on the microSD card** (`events 1|0`, persisted): `events.csv` rows for surveillance‑OUI
+  matches and for devices new to the card's `seen.csv` baseline (randomized MACs excluded), buffered and flushed in
+  short mounts, rotated at 1 MB; extra surveillance OUIs from `surveil.csv`. **Card removal handled**: a pulled
+  card ends a recording cleanly with an error, a failed file pull reports an error instead of a truncated
+  "complete" file, an idle card is probed every 2 s (no card‑detect pin), and the LCD shows a sad/happy face on
+  removal/insertion. The v2 dashboard is now the default at `/`; both dashboards gained the event‑log control.
+  See [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §12 and §20.
+- **1.17** — Wi‑Fi device table 64 → 96 slots, sent in chunks of up to 24 rows per line.
+- **1.16.1** — Small fixes: BLE device record repacked (−384 B RAM), BLE footer shows adverts/s, Spectrum page
+  bars no longer clip the top of the band, non‑ASCII LCD strings removed.
+- **1.16** — **Probe‑request mapping**: directed probe requests show which networks nearby devices are looking
+  for ("Networks being sought" card, "probing for …" on device rows).
 - **1.15.2** — Dashboard trend now shows two lines: the **busiest channel** (solid, tends to sit high) and
   the **band average** across recently-sampled channels (dashed, moves), so the chart conveys overall load
   vs the single peak instead of a near-flat top line. The host records the average in the trend history; the

@@ -3,10 +3,9 @@
 
     python3 host/bandwatch_host.py                # auto-detects /dev/cu.usbmodem*, serves http://127.0.0.1:8080
     python3 host/bandwatch_host.py --port /dev/cu.usbmodem21101 --http 8080 --captures ./captures
-    python3 host/bandwatch_host.py --ui classic   # the classic dashboard at "/" instead of v2
 
-The v2 dashboard (dashboard2.html) is the default at "/". Both pages stay reachable at /v2 and /classic,
-whatever --ui puts at "/".
+The dashboard (dashboard2.html) is served at "/" (also at /v2 for old links). The classic dashboard was removed
+in v1.19 (the v1.18.2 tag has the last copy); /classic now redirects to "/" and --ui is accepted but ignored.
 
 Only needs Python 3 and pyserial (pip install pyserial). The port is opened with DTR/RTS held asserted
 (no edges), which is what keeps the ESP32-C5 from resetting when the host connects.
@@ -1366,7 +1365,7 @@ class Bandwatch:
         }
 
 
-def make_handler(bw, classic_path, v2_path=None, ui="v2"):
+def make_handler(bw, page_path):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *a):
             pass
@@ -1419,14 +1418,13 @@ def make_handler(bw, classic_path, v2_path=None, ui="v2"):
                 self.end_headers()
                 self.wfile.write(body)
                 return
-            # Both dashboards are always served; --ui only decides which one sits at "/".
-            page = None
-            if path in ("/", "/index.html"):
-                page = v2_path if ui == "v2" and v2_path else classic_path   # falls back to classic if v2 is missing
-            elif path in ("/classic", "/classic/"):
-                page = classic_path
-            elif path in ("/v2", "/v2/", "/v2.html") and v2_path:
-                page = v2_path
+            if path in ("/classic", "/classic/"):   # classic dashboard removed in v1.19: keep old bookmarks working
+                self.send_response(301)
+                self.send_header("Location", "/")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            page = page_path if path in ("/", "/index.html", "/v2", "/v2/", "/v2.html") else None
             if page and os.path.isfile(page):
                 with open(page, "rb") as f:
                     body = f.read()
@@ -1528,8 +1526,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--port", help="serial port (default: first /dev/cu.usbmodem*)")
     ap.add_argument("--http", type=int, default=8080, help="HTTP port (default 8080)")
-    ap.add_argument("--ui", choices=("classic", "v2"), default="v2",
-                    help="which dashboard sits at '/'; both stay reachable at /v2 and /classic (default: v2)")
+    ap.add_argument("--ui", metavar="IGNORED",
+                    help="deprecated, ignored: the classic dashboard was removed in v1.19 (kept so old scripts still run)")
     ap.add_argument("--bind", default="127.0.0.1", help="bind address (default 127.0.0.1)")
     ap.add_argument("--captures", default=os.path.join(os.getcwd(), "captures"), help="pcap output directory")
     ap.add_argument("--no-fcs", action="store_true", help="do not mark frames as carrying an FCS in radiotap")
@@ -1542,13 +1540,11 @@ def main():
 
     bw = Bandwatch(args.port, args.captures, oui, fcs_present=not args.no_fcs)
     threading.Thread(target=bw.reader, daemon=True).start()
-    html_classic = os.path.join(HERE, "dashboard.html")
-    v2_candidate = os.path.join(HERE, "dashboard2.html")
-    html_v2 = v2_candidate if os.path.isfile(v2_candidate) else None   # "/" falls back to classic if it is missing
-    srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, html_classic, html_v2, args.ui))
-    other = "/classic" if args.ui == "v2" else "/v2"
-    print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/ ({'new UI' if args.ui == 'v2' else 'classic UI'}, "
-          f"{other} has the other)  (serial: {args.port or 'auto'}, captures: {os.path.abspath(args.captures)}, vendors: {oui.source})")
+    if args.ui is not None:
+        print(f"Bandwatch host: --ui {args.ui} ignored (the classic dashboard was removed in v1.19)")
+    srv = ThreadingHTTPServer((args.bind, args.http), make_handler(bw, os.path.join(HERE, "dashboard2.html")))
+    print(f"Bandwatch host: dashboard at http://{args.bind}:{args.http}/  "
+          f"(serial: {args.port or 'auto'}, captures: {os.path.abspath(args.captures)}, vendors: {oui.source})")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

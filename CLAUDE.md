@@ -40,11 +40,11 @@ python3 host/bandwatch_host.py  # dashboard + pcap
 ```
 Serial console: 115200 baud, but open the port with **DTR and RTS asserted** (see below).
 
-Add as a new ## Hardware Debugging section near the top of CLAUDE.md.\n\n## New clone
+## New clone
 Install the push guard once per machine: `cp tools/pre-push .git/hooks/pre-push && chmod +x .git/hooks/pre-push`
 (see `AGENTS.md`).
 
-## Hardware Debugging Checklist
+Add as a new ## Hardware Debugging section near the top of CLAUDE.md.\n\n## Hardware Debugging Checklist
 Before blaming code or changing pins, clocks, or radio config, rule out the basics:
 1. Confirm power: is the board on a powered port or hub?
 2. Confirm the chip ID matches the bootloader (`esptool.py chip_id`).

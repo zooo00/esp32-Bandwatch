@@ -28,7 +28,8 @@ void Lvgl_print(const char * buf)
 void Lvgl_Display_LCD( lv_display_t *disp, const lv_area_t *area, uint8_t *px_map )
 {
   LCD_addWindow(area->x1, area->y1, area->x2, area->y2, (uint16_t *)px_map);
-  if (g_mirror) mirrorOnFlush(area->x1, area->y1, area->x2, area->y2, px_map);   // live mirror over serial
+  // Live mirror over serial; flush_is_last marks the final region of this refresh (the frame boundary).
+  if (g_mirror) mirrorOnFlush(area->x1, area->y1, area->x2, area->y2, px_map, lv_display_flush_is_last(disp));
   lv_display_flush_ready( disp );
 }
 void example_increase_lvgl_tick(void *arg)

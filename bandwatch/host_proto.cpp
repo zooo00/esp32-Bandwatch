@@ -16,18 +16,33 @@ void fmtMac(char* out, size_t n, const uint8_t* m) {
 // Live LCD mirror (see bandwatch_core.h / docs/DEVELOPER.md section 19). g_mirror is toggled by the "mirror"
 // command below; the LVGL flush callback calls mirrorOnFlush() for every flushed region while it is on.
 bool g_mirror = false;
+static uint16_t mirFrameSeq = 0;     // MF sequence number (wraps; the host only uses it to spot gaps)
+static bool mirFrameDrop = false;    // a region of the refresh in progress was dropped
 
-void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px) {
+void mirrorOnFlush(int x1, int y1, int x2, int y2, const uint8_t* px, bool last) {
     const int w = x2 - x1 + 1, h = y2 - y1 + 1;
-    if (w <= 0 || h <= 0) return;
-    const int nbytes = w * h * 2;   // RGB565, little-endian (LV_COLOR_16_SWAP is 0)
-    // base64 is 4/3 the raw size. Keep whole lines - a region is sent intact or not at all (the drop-whole-
-    // lines rule, section 6): if the TX buffer can't hold it, skip it and schedule a full re-send so the host
-    // still converges once the buffer drains.
-    if (!serialRoom(nbytes * 4 / 3 + 48)) { mirrorNoteDrop(); return; }   // re-sent on the next full pass
-    Serial.printf("M %d %d %d %d ", x1, y1, w, h);
-    writeBase64(px, static_cast<size_t>(nbytes));
-    Serial.write('\n');
+    if (w > 0 && h > 0) {
+        const int nbytes = w * h * 2;   // RGB565, little-endian (LV_COLOR_16_SWAP is 0)
+        // base64 is 4/3 the raw size. Keep whole lines - a region is sent intact or not at all (the drop-whole-
+        // lines rule, section 6): if the TX buffer can't hold it, fold it into the pending repair rectangle,
+        // which serviceMirror() re-sends in TX-sized strips once the buffer drains.
+        if (serialRoom(nbytes * 4 / 3 + 48)) {
+            Serial.printf("M %d %d %d %d ", x1, y1, w, h);
+            writeBase64(px, static_cast<size_t>(nbytes));
+            Serial.write('\n');
+        } else {
+            mirFrameDrop = true;
+            mirrorNoteDrop(x1, y1, x2, y2);
+        }
+    }
+    if (!last) return;
+    // End of one LVGL refresh = a frame boundary. complete=1 means every region of this refresh went out AND no
+    // repair is outstanding, i.e. the host's back buffer now equals the panel: a tear-free frame to publish.
+    const bool repairPending = mirrorFrameEnd();
+    if (serialRoom(24))
+        Serial.printf("MF %u %d\n", static_cast<unsigned>(mirFrameSeq), (mirFrameDrop || repairPending) ? 0 : 1);
+    mirFrameSeq++;
+    mirFrameDrop = false;
 }
 
 namespace {

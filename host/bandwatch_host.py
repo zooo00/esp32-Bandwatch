@@ -27,6 +27,11 @@ Serial protocol (one line each):
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
     S <n> <base64>                               chunk of a file being read back (after "sdread")
+    M <x> <y> <w> <h> <base64 RGB565-LE>         one repainted LCD region (while "mirror 1")
+    MF <seq> <complete>                          end of one LCD refresh (frame marker; complete=1: no region
+                                                 dropped and no repair pending, the frame is tear-free).
+                                                 Regions are published to /screen.bin only at markers;
+                                                 firmware without markers is published per region.
     {"t":"sdls","files":[[name,bytes],...],"total":N,"sent":M}   microSD listing ("sdls"); sent<total = truncated mid-list
 Commands to the device: "band 5g|2.4g|both|ble|154", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" / "hunt 0",
 "deauth <bssid>" / "deauth 0" (Wi-Fi modes; currently does not work, see docs), 
@@ -84,6 +89,9 @@ EXPLAIN_SETTLE_S      = 0.3   # let the radio come up before the dwell timing st
 DEV_HIST_LEN = 120      # per-device RSSI samples (one per device report, ~2 s)
 DEV_EXPIRE_S = 600      # forget devices not seen for this long
 PROBE_TTL_S = 900       # C1: forget a (MAC, SSID) probe pairing not re-announced for this long (device repeats <= 1/min)
+MIRROR_HOLD_S = 0.5     # LCD mirror: hold a torn (MF complete=0) frame back at most this long before showing it
+MIRROR_LEGACY_REGIONS = 256   # LCD mirror: this many M lines with no MF marker = firmware without markers
+MIRROR_STALE_S = 0.5    # LCD mirror: regions left unpublished this long after the last line are published anyway
 PROBE_MAX = 512         # cap on probing MACs kept (randomized MACs make one per probe burst)
 # C4 event-log text files on the card that "sdread" may pull besides the pcaps (they land in the captures dir under
 # the same name, overwritten on re-pull, and download through /file like a pcap).
@@ -377,12 +385,22 @@ class Bandwatch:
         self.ble_devs = {}
         self.z_devs = {}
         self.probes = {}         # C1: probing MAC -> {"ssids": {ssid: last_ts}, "rssi", "ch", "last"}
-        # Live LCD mirror: the device streams "M x y w h <base64 RGB565-LE>" regions while `mirror` is on; we
-        # blit them into this framebuffer and serve it at /screen.bin for the dashboard canvas.
+        # Live LCD mirror: the device streams "M x y w h <base64 RGB565-LE>" regions while `mirror` is on and
+        # ends every LVGL refresh with an "MF <seq> <complete>" marker. Regions are blitted into a back buffer;
+        # `screen` (served at /screen.bin) is only replaced at a marker, so a viewer never sees a half-drawn
+        # frame. Firmware older than the markers is detected and served region-by-region as before.
         self.screen_w, self.screen_h = 172, 320
-        self.screen = bytearray(self.screen_w * self.screen_h * 2)   # RGB565, little-endian, row-major
-        self.screen_seq = 0
-        self.screen_last = 0.0
+        self.screen = bytearray(self.screen_w * self.screen_h * 2)   # published frame: RGB565-LE, row-major
+        self.screen_back = bytearray(self.screen)                     # where regions land between markers
+        self.screen_back_dirty = False   # back buffer has regions the published frame lacks
+        self.screen_seq = 0              # bumps once per published frame (the dashboard repaints on change)
+        self.screen_last = 0.0           # last M/MF line (the mirror is "on" while this is fresh)
+        self.screen_pub_t = 0.0          # when `screen` was last published
+        self.screen_framed = False       # MF markers seen: publish at markers, not per region
+        self.screen_m_since_mf = 0       # regions since the last marker (a long run means no markers any more)
+        self.screen_complete = False     # the published frame is a clean, fully-repaired one
+        self.screen_stats = {"frames": 0, "complete": 0, "held": 0, "gaps": 0}
+        self.screen_mf_seq = None
         self.screen_lock = threading.Lock()
         self.cap_band = None
         self.history = deque(maxlen=HISTORY_LEN)
@@ -548,6 +566,9 @@ class Bandwatch:
             return
         if raw.startswith(b"M "):
             self.handle_mirror(raw)     # live LCD-mirror region; not JSON
+            return
+        if raw.startswith(b"MF "):
+            self.handle_mirror_frame(raw)   # live LCD-mirror frame marker
             return
         try:
             msg = json.loads(raw.decode("utf-8", "replace"))
@@ -1163,13 +1184,72 @@ class Bandwatch:
         if w <= 0 or h <= 0 or x < 0 or y < 0 or x + w > W or y + h > H or len(data) != w * h * 2:
             return
         row_bytes = w * 2
+        now = time.time()
         with self.screen_lock:
+            back = self.screen_back
             for row in range(h):
                 dst = ((y + row) * W + x) * 2
                 src = row * row_bytes
-                self.screen[dst:dst + row_bytes] = data[src:src + row_bytes]
+                back[dst:dst + row_bytes] = data[src:src + row_bytes]
+            self.screen_back_dirty = True
+            self.screen_last = now
+            self.screen_m_since_mf += 1
+            # Framed firmware ends every refresh with MF well within MIRROR_LEGACY_REGIONS regions; a longer run
+            # means markers stopped (older firmware flashed while we run), so fall back to per-region publishing.
+            if self.screen_framed and self.screen_m_since_mf > MIRROR_LEGACY_REGIONS:
+                self.screen_framed = False
+            if not self.screen_framed:      # legacy firmware (no MF): publish as each region arrives
+                self._publish_screen(now, complete=False)
+
+    def handle_mirror_frame(self, raw):
+        # "MF <seq> <complete>": the last region of one LVGL refresh has been sent. complete=1 means nothing in
+        # this refresh was dropped and no repair is pending on the device, so the back buffer equals the panel.
+        try:
+            parts = raw.split()
+            seq, complete = int(parts[1]), int(parts[2]) != 0
+        except Exception:
+            return
+        now = time.time()
+        with self.screen_lock:
+            self.screen_last = now
+            self.screen_framed = True
+            self.screen_m_since_mf = 0
+            st = self.screen_stats
+            if self.screen_mf_seq is not None and seq != (self.screen_mf_seq + 1) & 0xFFFF:
+                st["gaps"] += 1         # a marker was dropped (TX buffer full); harmless, the next one covers it
+            self.screen_mf_seq = seq
+            st["frames"] += 1
+            # Publish clean frames immediately. A torn one (device still repairing dropped regions) is held
+            # back, unless nothing has been published for MIRROR_HOLD_S - a page that changes faster than the
+            # link can carry would otherwise freeze; it then shows the best frame available, as before.
+            if complete:
+                st["complete"] += 1
+                self._publish_screen(now, complete=True)
+            elif now - self.screen_pub_t >= MIRROR_HOLD_S:
+                self._publish_screen(now, complete=False)
+            else:
+                st["held"] += 1
+
+    def _publish_screen(self, now, complete):
+        # Caller holds screen_lock. Copy the back buffer to the served frame; skip the copy (and the seq bump that
+        # makes the dashboard refetch) when no region arrived since the last publish.
+        if self.screen_back_dirty:
+            self.screen[:] = self.screen_back
+            self.screen_back_dirty = False
             self.screen_seq += 1
-            self.screen_last = time.time()
+        self.screen_complete = complete
+        self.screen_pub_t = now
+
+    def screen_status(self):
+        # /api/screen. Also the safety net for a lost final marker (an MF line can be dropped when the TX buffer is
+        # full): once the stream has gone quiet, whatever is in the back buffer is the latest the device sent.
+        now = time.time()
+        with self.screen_lock:
+            if self.screen_back_dirty and now - self.screen_last >= MIRROR_STALE_S:
+                self._publish_screen(now, complete=False)
+            return {"on": (now - self.screen_last) < 3.0, "seq": self.screen_seq,
+                    "w": self.screen_w, "h": self.screen_h, "framed": self.screen_framed,
+                    "complete": self.screen_complete, **self.screen_stats}
 
     # ---------------- control ----------------
     def start_capture(self, snaplen=None):
@@ -1282,9 +1362,8 @@ def make_handler(bw, classic_path, v2_path=None, ui="v2"):
             if path == "/api/state":
                 return self._json(bw.snapshot())
             if path == "/api/screen":   # live LCD mirror status (polled fast by the dashboard canvas)
-                on = (time.time() - bw.screen_last) < 3.0
-                return self._json({"on": on, "seq": bw.screen_seq, "w": bw.screen_w, "h": bw.screen_h})
-            if path == "/screen.bin":   # raw RGB565 (little-endian) framebuffer, 172x320
+                return self._json(bw.screen_status())
+            if path == "/screen.bin":   # raw RGB565 (little-endian) framebuffer, 172x320 - the last published frame
                 with bw.screen_lock:
                     body = bytes(bw.screen)
                     seq = bw.screen_seq

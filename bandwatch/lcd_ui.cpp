@@ -650,18 +650,6 @@ uint32_t lcdPageHeadroomB() {
     return worst > cur ? worst - cur : 0;
 }
 
-// --- Live LCD mirror pacing ---------------------------------------------------------------------
-// g_mirror (host_proto.cpp) gates emission in the LVGL flush callback. Within one lv_timer_handler every
-// dirty region flushes synchronously, so a bulk repaint (page switch, splash, the first frame) would push
-// far more than the 8 KB serial TX buffer at once and most regions would drop. serviceMirror() instead
-// re-sends the screen one ~10-row strip per loop, each well under the TX buffer, so the buffer drains
-// between strips and a full frame streams over ~32 loops (<1 s) without dropping. A dropped steady-state
-// region (mirrorOnFlush) schedules a fresh scan here. Only runs while a full refresh is pending.
-// mirrorScanY = next strip's top row during a full re-send, or -1 between passes. A strip dropped mid-pass
-// (TX buffer full when it collides with a data-refresh flush) sets mirrorDirty, so another full pass runs
-// after this one. Without that, a strip dropped during the single initial scan would leave a permanent
-// black/stale band - and we can't just restart the scan on every drop, or a busy screen would never finish
-// a pass. Passes repeat until one completes with no drop, then stop (steady-state only sends dirty regions).
 // Step the LCD page like a BOOT tap, driven from the host (dashboard interface-stepping buttons). Runs on the
 // loop task via handleCommand, same task as LVGL, so touching the UI here is safe. showPage() skips pages that
 // don't apply to the current mode; clearing splashDurMs stops a lingering mode card from shadowing the new page.
@@ -670,25 +658,67 @@ void stepPage(int dir) {
     splashDurMs = 0;
 }
 
-static int mirrorScanY = -1;
-static bool mirrorDirty = false;
-void mirrorRequestFull() { mirrorScanY = 0; mirrorDirty = false; }   // enable / explicit full frame
-void mirrorNoteDrop() { mirrorDirty = true; }                        // a region didn't fit; re-scan after this pass
+// --- Live LCD mirror: targeted repair -----------------------------------------------------------
+// g_mirror (host_proto.cpp) gates emission in the LVGL flush callback. Within one lv_timer_handler every
+// dirty region flushes synchronously, so a bulk repaint (page switch, splash, a BLE list redraw) pushes far
+// more than the 8 KB serial TX buffer at once and most regions drop. A dropped region is not lost: it is
+// unioned into ONE pending repair rectangle (mirX1..mirY2, a bounding box - a few bytes, no per-region list).
+// serviceMirror() re-sends that rectangle top-down in strips of ~kMirStripPx pixels by invalidating them, so
+// LVGL re-renders the CURRENT pixels there and mirrorOnFlush emits them. It queues as many strips per LVGL
+// refresh as the TX buffer has room for (mirInflightB tracks the bytes already invalidated but not yet
+// flushed; mirrorFrameEnd() clears it at the refresh's last flush). A strip that drops again just goes back
+// into the rectangle, so it converges as soon as the link keeps up. Because the host's copy equals the panel
+// exactly when the rectangle is empty and the refresh dropped nothing, that is what MF complete=1 reports.
+// `mirror 1` (mirrorRequestFull) sets the rectangle to the whole screen - the full pass is the same code.
+// The old design (1.13.1) re-scanned the WHOLE screen after any drop; on a busy page that kept the host
+// showing a mix of strips from different moments.
+static int16_t mirX1 = 0, mirY1 = 0, mirX2 = -1, mirY2 = -1;   // repair rectangle, inclusive; empty if x2 < x1
+static uint16_t mirInflightB = 0;      // base64 bytes of strips invalidated but not yet flushed
+static uint32_t mirInflightMs = 0;     // when they were invalidated (a refresh that never ends must not stall us)
+static inline bool mirRepairPending() { return mirX2 >= mirX1 && mirY2 >= mirY1; }
+static inline void mirRepairClear() { mirX1 = 0; mirY1 = 0; mirX2 = -1; mirY2 = -1; }
+
+void mirrorRequestFull() {             // enable / explicit full frame: the whole screen becomes the repair
+    mirX1 = 0; mirY1 = 0; mirX2 = LCD_WIDTH - 1; mirY2 = LCD_HEIGHT - 1;
+    mirInflightB = 0;
+}
+void mirrorNoteDrop(int x1, int y1, int x2, int y2) {   // union the dropped region into the repair rectangle
+    if (x1 < 0) x1 = 0;
+    if (y1 < 0) y1 = 0;
+    if (x2 > LCD_WIDTH - 1) x2 = LCD_WIDTH - 1;
+    if (y2 > LCD_HEIGHT - 1) y2 = LCD_HEIGHT - 1;
+    if (x2 < x1 || y2 < y1) return;
+    if (!mirRepairPending()) { mirX1 = x1; mirY1 = y1; mirX2 = x2; mirY2 = y2; return; }
+    if (x1 < mirX1) mirX1 = x1;
+    if (y1 < mirY1) mirY1 = y1;
+    if (x2 > mirX2) mirX2 = x2;
+    if (y2 > mirY2) mirY2 = y2;
+}
+bool mirrorFrameEnd() {                // last flush of a refresh: every strip invalidated before it has flushed
+    mirInflightB = 0;
+    return mirRepairPending();
+}
 void serviceMirror() {
     if (!g_mirror) return;
-    if (mirrorScanY < 0) {                 // between passes: start another only if a region was dropped
-        if (!mirrorDirty) return;
-        mirrorScanY = 0;
-        mirrorDirty = false;
+    constexpr uint32_t kMirStripPx = LCD_WIDTH * 10;   // ~3.4 KB raw / ~4.6 KB base64 per full-width strip
+    constexpr uint32_t kMirHeadroomB = 1024;           // left free for data lines / small UI flushes
+    const uint32_t now = millis();
+    if (mirInflightB && now - mirInflightMs > 250) mirInflightB = 0;   // no refresh ended them: stop waiting
+    while (mirRepairPending()) {
+        const int w = mirX2 - mirX1 + 1;
+        int rows = static_cast<int>(kMirStripPx) / w;
+        if (rows < 1) rows = 1;
+        if (rows > mirY2 - mirY1 + 1) rows = mirY2 - mirY1 + 1;
+        const uint32_t b = static_cast<uint32_t>(w) * rows * 2 * 4 / 3 + 64;
+        if (!serialRoom(mirInflightB + b + kMirHeadroomB)) break;   // wait for the TX buffer to drain
+        lv_area_t a;
+        a.x1 = mirX1; a.y1 = mirY1; a.x2 = mirX2; a.y2 = mirY1 + rows - 1;
+        lv_obj_invalidate_area(lv_scr_act(), &a);   // re-render this strip next refresh -> mirrorOnFlush emits it
+        mirInflightB = static_cast<uint16_t>(mirInflightB + b);
+        mirInflightMs = now;
+        mirY1 = static_cast<int16_t>(mirY1 + rows);
+        if (mirY1 > mirY2) mirRepairClear();
     }
-    constexpr int kStripH = 8;   // 172*8*2 = 2752 B raw (~3.7 KB base64): headroom for a concurrent data flush
-    if (!serialRoom(LCD_WIDTH * kStripH * 2 * 4 / 3 + 64)) return;   // wait for the TX buffer to drain
-    int y2 = mirrorScanY + kStripH - 1;
-    if (y2 > LCD_HEIGHT - 1) y2 = LCD_HEIGHT - 1;
-    lv_area_t a;
-    a.x1 = 0; a.y1 = mirrorScanY; a.x2 = LCD_WIDTH - 1; a.y2 = y2;
-    lv_obj_invalidate_area(lv_scr_act(), &a);   // forces this strip to re-render + flush -> mirrorOnFlush emits it
-    mirrorScanY = (y2 >= LCD_HEIGHT - 1) ? -1 : y2 + 1;
 }
 
 namespace {

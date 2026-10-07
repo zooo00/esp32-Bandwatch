@@ -240,12 +240,13 @@
         <div id="mirrorWrap" hidden style="margin-top:10px">
           <canvas id="mirrorCanvas" width="172" height="320"
                   style="width:100%; height:auto; aspect-ratio:172/320; image-rendering:pixelated; display:block; border-radius:8px; background:#000; border:1px solid var(--border)"></canvas>
+          <div id="mirrorSync" style="margin-top:4px; font-size:11px; color:var(--muted)"></div>
         </div>
         <div style="display:flex; gap:6px; margin-top:8px">
           <button id="pagePrev" style="flex:1" title="Step the LCD to the previous page (like a BOOT tap)">‹ Page</button>
           <button id="pageNext" style="flex:1" title="Step the LCD to the next page (like a BOOT tap)">Page ›</button>
         </div>
-        <div class="note" style="margin-top:6px; font-size:11px; color:var(--muted)">Off by default. Fast-updating screens (spectrum) tear over serial — step pages to view them cleanly.</div>
+        <div class="note" style="margin-top:6px; font-size:11px; color:var(--muted)">Off by default. Frames are shown whole; on fast-updating screens (spectrum) the link can lag, so a frame may show “repairing” — step pages to a calmer one.</div>
       </section>
     </aside>
 
@@ -1225,7 +1226,8 @@
     const r = await fetch('/screen.bin', { cache: 'no-store' });
     const buf = new Uint8Array(await r.arrayBuffer());
     const w = +r.headers.get('X-Screen-W') || 172, h = +r.headers.get('X-Screen-H') || 320;
-    if (buf.length < w * h * 2) return;
+    const seq = r.headers.get('X-Screen-Seq');
+    if (buf.length < w * h * 2) return null;
     if (cv.width !== w || cv.height !== h) { cv.width = w; cv.height = h; mirrorImg = null; }
     if (!mirrorImg) mirrorImg = mirrorCtx.createImageData(w, h);
     const px = mirrorImg.data;
@@ -1237,12 +1239,17 @@
       px[j + 3] = 255;
     }
     mirrorCtx.putImageData(mirrorImg, 0, 0);
+    return seq === null ? null : +seq;   // the frame actually drawn (may be newer than the polled seq)
   }
   async function mirrorTick() {
     try {
       if (mirrorOn) {
         const s = await (await fetch('/api/screen', { cache: 'no-store' })).json();
-        if (s.seq !== mirrorSeq && !mirrorBusy) { mirrorSeq = s.seq; mirrorBusy = true; await drawScreen(); mirrorBusy = false; }
+        // seq bumps only when the host publishes a whole frame (at an MF marker), so this repaints per frame.
+        if (s.seq !== mirrorSeq && !mirrorBusy) { mirrorBusy = true; const got = await drawScreen(); mirrorSeq = got ?? s.seq; mirrorBusy = false; }
+        $('#mirrorSync').textContent = !s.on ? 'waiting for the device…'
+          : !s.framed ? 'live (unframed: older firmware)'
+          : s.complete ? 'in sync' : 'repairing dropped regions…';
       }
     } catch (e) { mirrorBusy = false; }
     setTimeout(mirrorTick, mirrorOn ? 250 : 1000);

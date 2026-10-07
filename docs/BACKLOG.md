@@ -80,6 +80,20 @@ within one poll (1 s).
 **Test:** a tier-1 render test that sets `pending.deauth`, renders a snapshot with `deauth: null`, and asserts the row
 button is no longer "…".
 
+### B4 · USB serial went silent while the firmware kept running — P1, bug (reproduce first)
+- **Seen once, 2026-10-07, v1.19:** right after the full tier-3 suite finished (26/26, `T99NoReboot` passed), the next
+  session on the port got **zero bytes**: no idle traffic and no reply to `info`/`sdls`/`sdread`. The LCD kept updating
+  (the firmware was alive). `esptool --before no-reset` could not reach the ROM loader (not download mode). Only the
+  RESET button recovered it; afterwards everything worked (hello `up 60`, sdread fine).
+- **Suspects:** (1) the device suite's port handling - `tests/device/board.py` clears HUPCL so closing the port does
+  not drop DTR; the next open by another process may leave the USB-Serial-JTAG CDC in a state where the device thinks
+  no host is reading (Arduino HWCDC) and silently discards TX, or RX stops; (2) an HWCDC TX stall after a long burst
+  at a full buffer (`setTxTimeoutMs(0)`).
+- **Reproduce:** run the device suite, then open the port from a fresh process with DTR/RTS asserted and send `info`.
+  Repeat a few times; also try a fresh open after `power_profile.py`.
+- **Done when:** the cause is known and either fixed (firmware: e.g. detect "no host" via `HWCDC` connected state and
+  reset the TX side; or the suite restores HUPCL) or documented with a recovery that needs no RESET press.
+
 ### B3 · `page prev` skipped unavailable pages forward — fixed in v1.18.2
 Kept here for one release so the history is visible. `showPage(n, dir)` now skips in the step's direction. The
 tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this row in the next release.

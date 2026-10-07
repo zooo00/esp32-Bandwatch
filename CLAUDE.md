@@ -166,7 +166,9 @@ This firmware is RAM-constrained (rule 4, `docs/DEVELOPER.md` §16).
 ## Testing without the LCD
 Regression suite in `tests/` (`tests/README.md`): `tests/run_offline.sh` runs the host + firmware tiers (no board;
 the firmware tier compiles and gates static RAM); `BANDWATCH_PORT=<port> python3 -m unittest discover -s tests/device`
-runs the hardware tier against a live board (stop the host tool first).
+runs the hardware tier against a live board (stop the host tool first). `python3 tools/smoke.py [port]` is the
+~15 s read-only check for right after a flash (hello, version = `kVersion`, heap, radio reporting, card readable;
+sends only `info`/`sdinfo`/`sdls`).
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
 lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`,
@@ -198,7 +200,8 @@ A release means all of these steps, in order:
    dashboard show the device's `hello.ver`).
 2. Update the README (if anything user-visible changed) and add the `CHANGELOG.md` entry, so the tag points at
    current docs.
-3. Build and flash, then smoke-test on the device.
+3. Build and flash, then smoke-test on the device (`python3 tools/smoke.py`; the full device tier when firmware
+   behaviour changed).
 4. Commit.
 5. Create the tag `vX.Y.Z` and verify it points at the right commit (`git show vX.Y.Z --stat`).
 6. Push the branch AND the tags.

@@ -3,6 +3,13 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## Unreleased
+
+`smoke.py` moved to `tools/smoke.py` and made read-only: it sends only `info`, `sdinfo` and `sdls` (it used to start a
+real broadcast deauth, a capture, and switch and persist the band), opens the port like `tests/device` (DTR/RTS asserted,
+exclusive), auto-detects the port, and checks hello, version against `kVersion`, heap, radio status, the card and
+line integrity with a pass/fail exit status.
+
 ## v1.19.4
 
 Dashboard layout, no protocol or firmware behaviour change (`kVersion` only).

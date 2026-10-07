@@ -86,6 +86,14 @@ Every test restores what it changed (band, park, USB/SD capture, mirror, event l
 start. Side effects that remain: a band change also selects an LCD page, and the `sdcap` heap test leaves one small
 pcap on the card (the `sdrm` tests delete their own).
 
+## Quick check after a flash: `tools/smoke.py`
+
+Not a test tier, a ~15 s sanity pass: `python3 tools/smoke.py [port]` (host tool stopped; port defaults to the
+first `/dev/cu.usbmodem*`). Read-only - it sends only `info`, `sdinfo` and `sdls`, so nothing is transmitted or
+persisted. Checks the hello arrives (retried ~30 s after a flash), its version matches `kVersion` in
+`bandwatch_core.h` (`--any-version` skips that), free heap is above the 24 kB floor, a status line shows the radio
+running, `sdinfo`/`sdls` answer, and every JSON line parses. Exit 0 only if all pass.
+
 ## Host fixes made alongside these tests
 
 - `screen_status()` returned `"complete": <bool>` merged with `**screen_stats`, whose complete-frame counter

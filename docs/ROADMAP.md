@@ -36,7 +36,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   **~30.8 kB** on any page: `ensureCapRing()` sizes the ring to leave `kMinFreeHeapB` = 24 kB *plus*
   `lcdPageHeadroomB()` (the step to the heaviest page), and `sdcap` re-fits a ring `cap 1` made before the
   FATFS mount (`refitCapRing()`). `WifiDev` is packed to exactly 64 B behind a `static_assert` (`devices.h`) in
-  one 64-slot array, so +1 byte of *padding* costs 256 B static. For reference: `BleDev` = 56 B × 48 slots
+  one 96-slot array (64 until v1.17), so +1 byte of *padding* costs 384 B static. For reference: `BleDev` = 48 B × 48 slots (repacked from 56 in v1.16.1)
   (measured from the ELF; no static_assert yet), `Dev154` = 24 B × 48, `CapFrame` = 1,610 B × 4-20.
 - **Three contexts + one ISR.** Loop task (LVGL timer + `Bandwatch_Loop`, ~2 ms cadence), Wi‑Fi task
   (`promiscuousCb` in `wifi_sniff.cpp`), NimBLE host task (`bleGapEvent` in `ble_scan.cpp`), and the 802.15.4
@@ -46,7 +46,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 - **Serial never blocks.** 8 kB TX buffer, `setTxTimeoutMs(0)`, every line checks `serialRoom()` and is
   dropped whole *if its budget is honest* - a line that passes the check and then outgrows its budget is
   truncated mid-JSON. Current budgets: hello 900 (measured), dwell 420, sweep 1500, fine-spectrum `fs`
-  80 + 22/bin (~1.9 kB at 1 MHz), device rows Wi‑Fi `40 + n·126` (the 8 kB ceiling at 64 rows - do not raise),
+  80 + 22/bin (~1.9 kB at 1 MHz), device rows Wi‑Fi `40 + n·126` per line, sent in chunks of ≤24 rows since v1.17 (a 96-row table would not fit 8 kB as one line),
   BLE `40 + n·116`, 15.4 `40 + n·80`. New per-line fields grow these.
 - **No RTC.** Timestamps come from the host's `time <epoch>`; without it, uptime-based times and counter-named
   files. Anything persisting to SD inherits this.

@@ -248,28 +248,35 @@ void sendDevices() {
     }
     if (wifiMode()) {
         const int n = collectWifiRefs(refs, kWifiDevSlots, kDevFreshMs);
-        // +8: the association suffix field added in 1.5.5. Do not raise this: 64 slots x 126 + 40 = 8,104 B,
-        // just inside the 8 KB TX buffer - any more and a full table can never pass serialRoom() at all.
-        if (!serialRoom(40 + n * 126)) return;
-        Serial.print("{\"t\":\"w\",\"dev\":[");
-        int emitted = 0;
-        for (int i = 0; i < n; i++) {
-            WifiDev d;
-            if (!fetchWifiDev(refs[i], d, kDevFreshMs)) continue;
-            fmtMac(mac, sizeof(mac), d.mac);
-            Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
-                          static_cast<unsigned long>(now - d.lastMs), d.ch, d.flags);
-            printJsonStr(d.ssid);
-            Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
-            printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
-            // Association suffix as "aabbcc", or "" when this device was never seen on a BSS. The host joins
-            // it against the APs it already knows to recover the full BSSID (see docs/DEVELOPER.md §17).
-            if (d.apSuffix[0] || d.apSuffix[1] || d.apSuffix[2])
-                Serial.printf(",%u,\"%02x%02x%02x\"]", d.surv, d.apSuffix[0], d.apSuffix[1], d.apSuffix[2]);
-            else
-                Serial.printf(",%u,\"\"]", d.surv);
+        // Sent in chunks of kWifiRowsPerLine rows, loudest first: a full 96-slot table (~12 kB) cannot fit the 8 KB
+        // TX buffer as one line. Each chunk is budgeted on its own (+8 per row: the association suffix field added
+        // in 1.5.5), and the host merges rows by MAC, so a chunk that does not fit this cycle (the quietest
+        // devices, last in RSSI order) just waits for the next one. Every chunk is a complete "w" line.
+        constexpr int kWifiRowsPerLine = 24;
+        for (int base = 0; base < n || (base == 0 && n == 0); base += kWifiRowsPerLine) {
+            const int end = LV_MIN(n, base + kWifiRowsPerLine);
+            if (!serialRoom(40 + (end - base) * 126)) return;
+            Serial.print("{\"t\":\"w\",\"dev\":[");
+            int emitted = 0;
+            for (int i = base; i < end; i++) {
+                WifiDev d;
+                if (!fetchWifiDev(refs[i], d, kDevFreshMs)) continue;
+                fmtMac(mac, sizeof(mac), d.mac);
+                Serial.printf("%s[\"%s\",%d,%d,%u,%lu,%u,%u,", emitted++ ? "," : "", mac, d.rssi, d.maxRssi, d.frames,
+                              static_cast<unsigned long>(now - d.lastMs), d.ch, d.flags);
+                printJsonStr(d.ssid);
+                Serial.printf(",%u,%u,%u,%u,%u,%u,", d.sec, d.pmf, d.phy, d.bw, d.util, d.stations);
+                printJsonStr(d.cc[0] ? d.cc : "");   // country IE is 2 raw bytes off the air: escape it like every other string
+                // Association suffix as "aabbcc", or "" when this device was never seen on a BSS. The host joins
+                // it against the APs it already knows to recover the full BSSID (see docs/DEVELOPER.md §17).
+                if (d.apSuffix[0] || d.apSuffix[1] || d.apSuffix[2])
+                    Serial.printf(",%u,\"%02x%02x%02x\"]", d.surv, d.apSuffix[0], d.apSuffix[1], d.apSuffix[2]);
+                else
+                    Serial.printf(",%u,\"\"]", d.surv);
+            }
+            Serial.print("]}\n");
+            if (n == 0) break;
         }
-        Serial.print("]}\n");
     } else {
         const int n = collectBleRefs(refs, kBleDevSlots, kDevFreshMs);
         // A maxed row is ~110 B (int8 -128s, uint16 65535s, a 20-char name) plus escapes in the name; an

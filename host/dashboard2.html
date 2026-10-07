@@ -163,6 +163,11 @@
   .card.cached svg, .card.cached table, #zoneSpec.cached svg, #zoneSpec.cached table { opacity: .6; }
   [hidden] { display: none !important; }   /* .pill/.specstatus/.actbar set display, which would beat the attribute */
   .logcard summary { cursor: pointer; font-weight: 650; font-size: 14.5px; }
+  /* BLE / Spectrum: the channel views have no live data, so they collapse into one group below the live content. */
+  .cachedgroup > summary { cursor: pointer; font-weight: 650; font-size: 14.5px; }
+  .cachedgroup > summary small { font-weight: 400; color: var(--warning); margin-left: 6px; font-size: 12.5px; }
+  .cachedgroup[open] > summary { margin-bottom: 10px; }
+  .cachedgroup .card { box-shadow: none; }
   .log { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--page); border-radius: 8px; padding: 10px 13px; margin-top: 9px; max-height: min(320px, 40vh); overflow-y: auto; white-space: pre-wrap; word-break: break-word; }
 
   .pill { display: inline-flex; align-items: center; gap: 7px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px 12px; font-size: 12.5px; }
@@ -453,6 +458,11 @@
         </div>
       </section>
 
+      <details class="card cachedgroup" id="cachedGroup" hidden>
+        <summary>Channel views <small id="cachedSum"></small></summary>
+        <div id="cachedBody"></div>
+      </details>
+
       <section class="card" id="filesCard" hidden>
         <h2>SD card files <small id="filesSum"></small></h2>
         <div id="fileGroups"></div>
@@ -533,6 +543,22 @@
     if (!lastHop && s.band === 'spec' && (s.channels || []).some(c => c.state === 0))
       return { band: '154', channels: s.channels, current: 0, t: freshest(s.channels), live: false };
     return lastHop ? { ...lastHop, current: 0, live: false } : null;
+  }
+  // Outside the hopping modes (BLE, spec) the channel views are only a last-known picture, so they move out of
+  // the way: into the collapsed #cachedGroup below the live content, back to their own places in a hopping mode.
+  // The cards are moved, not copied, so their renderers and stale notes keep working either way.
+  const CACHED_CARDS = ['#zoneHopBars', '#zoneTrend', '#zoneProbe', '#chCard'];
+  const cachedHome = {};
+  function placeCached(collapse, sum) {
+    for (const id of CACHED_CARDS) {
+      const card = $(id);
+      if (!cachedHome[id]) { cachedHome[id] = document.createComment(id); card.before(cachedHome[id]); }
+      if (collapse && card.parentNode !== $('#cachedBody')) $('#cachedBody').append(card);
+      else if (!collapse && card.parentNode === $('#cachedBody')) cachedHome[id].after(card);
+    }
+    const any = collapse && CACHED_CARDS.some(id => !$(id).hidden);
+    $('#cachedGroup').hidden = !any;
+    if (any) $('#cachedSum').textContent = sum ? sum.replace(/^last known — /, '') : 'not live';
   }
   const ED_FLOOR = -95, ED_CEIL = -20;   // dBm range for the spectrum display (matches firmware kEdFloor/Ceil)
   function edColor(dbm) {
@@ -1523,6 +1549,8 @@
     if (!spec) renderSpecCache(s, hasBins);
     $('#wfCard').hidden = !spec;   // the waterfall is a live scroll; nothing to show from a cache
     $('#specGrid').style.gridTemplateColumns = spec ? '' : '1fr';
+
+    placeCached(!hop, staleTxt || (showTrend ? $('#trendStale').textContent : ''));
 
     if (showCh) renderBars(hv);
     if (showTrend) renderTrend(s);

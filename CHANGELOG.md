@@ -3,6 +3,13 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## Unreleased
+
+dashboard: in BLE and Spectrum mode the last-known channel views (busy score by channel, channel load over time,
+networks being sought, the Channels table) move into one collapsed "Channel views" group below the live content,
+with the staleness in its summary line; the hopping modes keep them in place, unchanged. Previously they sat above the
+live BLE chart and pushed it below the fold.
+
 ## v1.19.3
 
 Combined review pass: fixes from four independent code reviews, merged into one plan. Compiled and offline-tested

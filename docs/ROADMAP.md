@@ -5,6 +5,8 @@ v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 9
 removal hardening). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
 C2/C5/C7/C9/C10/C11 still candidates, C12 the exit ramp.
 
+**Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
+
 Entries say what is actually known, including what has *not* been verified. Anything measured is quoted
 with its numbers; anything assumed is labelled as such.
 

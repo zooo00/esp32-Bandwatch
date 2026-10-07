@@ -611,9 +611,13 @@ bool pageAvailable(int n) {
 
 // Only the visible page exists as LVGL objects (the others are rebuilt on demand): the C5 has no PSRAM and
 // the Wi-Fi/BLE stacks need most of the 320 KB, so ~300 permanent widgets are not affordable.
-void showPage(int n) {
+void showPage(int n, int dir) {
+    // dir is the direction to skip pages that do not apply in this mode: forward for a tap / "page next",
+    // backward for "page prev" - skipping forward from currentPage-1 landed back on the current page, so prev
+    // got stuck whenever the page before it was unavailable (found by tests/device T08Page).
+    const int step = dir < 0 ? PAGE_COUNT - 1 : 1;
     n = ((n % PAGE_COUNT) + PAGE_COUNT) % PAGE_COUNT;
-    for (int tries = 0; tries < PAGE_COUNT && !pageAvailable(n); tries++) n = (n + 1) % PAGE_COUNT;
+    for (int tries = 0; tries < PAGE_COUNT && !pageAvailable(n); tries++) n = (n + step) % PAGE_COUNT;
     if (pages[currentPage] && n == currentPage) return;
     for (int i = 0; i < PAGE_COUNT; i++) {
         if (pages[i]) { lv_obj_delete(pages[i]); pages[i] = nullptr; }
@@ -654,7 +658,7 @@ uint32_t lcdPageHeadroomB() {
 // loop task via handleCommand, same task as LVGL, so touching the UI here is safe. showPage() skips pages that
 // don't apply to the current mode; clearing splashDurMs stops a lingering mode card from shadowing the new page.
 void stepPage(int dir) {
-    showPage(currentPage + (dir < 0 ? -1 : 1));
+    showPage(currentPage + (dir < 0 ? -1 : 1), dir < 0 ? -1 : 1);
     splashDurMs = 0;
 }
 

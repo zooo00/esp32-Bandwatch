@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.18.1";
+constexpr const char* kVersion = "1.18.2";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -497,7 +497,7 @@ extern int currentPage;
 extern uint16_t lastApSeen;
 void buildUi();
 void refreshUi();
-void showPage(int n);
+void showPage(int n, int dir = 1);   // dir: which way to skip pages unavailable in this mode
 void showBandSplash(BandMode m, uint32_t durMs);   // flash the mode's name card before its scan page takes over
 void pollButton();
 void uiTimerCb(lv_timer_t* t);   // declared here so the core file can create the lv timer

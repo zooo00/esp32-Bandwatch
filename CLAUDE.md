@@ -18,7 +18,7 @@ serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
   hopping, dwell scoring, snapshots, hunt), `wifi_sniff.cpp` / `ble_scan.cpp` / `ieee154.cpp` = radio lifecycle
   + RX paths, `deauth_diag.cpp` = attack + diagnostics, `capture.cpp` = capture ring, `sd_sink.cpp` = microSD
   pcap + card presence, `events.cpp` = C4 event log to SD (`/events.csv`, `/seen.csv` baseline, `/surveil.csv`),
-  `settings.cpp` = NVS persistence, `host_proto.cpp` = serial JSON, `lcd_ui.cpp` = LVGL pages. `devices.h` = device table structs/hash,
+  `settings.cpp` = NVS persistence, `led_alert.cpp` = LED alert blips, `host_proto.cpp` = serial JSON, `lcd_ui.cpp` = LVGL pages. `devices.h` = device table structs/hash,
   `surv_ouis.h` = surveillance-OUI table. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h` = display glue (from
   the upstream C6 project, pins changed); `boot_logos.h` = generated boot-photo arrays (`tools/img2c.py` from
   `bootlogo/`).
@@ -145,6 +145,8 @@ microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>
 the host sends this on connect; it dates the pcap records and names the files, in UTC), `events 1|0` (C4 event log
 to `/events.csv`; persisted; arms with no card; status in `{"t":"ev"}` every 5 s, §20), `sdprobe` (raw CMD0 R1 of
 the presence probe; -1 while the card is mounted/busy), `sdface 0|1` (show the card-out/card-in LCD face).
+LED: `alerts 1|0` (alert blips on the LED - surveillance hit orange double, Zigbee permit-join purple double, new device
+white single; default on, persisted, §21), `ledtest surv|new|join` (draw one blip now; never over a running deauth).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with
 SSID `BANDWATCH-TXTEST`; 2 = also disable promiscuous RX), `txstat` (TX counters), `kickfc <hex>` (FC byte0 the internal kick path writes — `kickfc 80` sends a
 beacon down the deauth descriptor path), `kickpath 0|1` (0 = raw `esp_wifi_80211_tx`, the

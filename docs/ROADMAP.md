@@ -3,7 +3,7 @@
 Planned work, open questions and known gaps. Current release: **v1.18** (v1.12 boot photos, v1.13-1.14 LCD mirror,
 v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
 removal hardening). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
-C2/C5/C7/C9/C10/C11 still candidates, C12 the exit ramp.
+C10 + 1.6.1 LED alert blips (v1.19, D1); C2/C5/C7/C9/C11 still candidates, C12 the exit ramp.
 
 **Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
 
@@ -57,9 +57,10 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   files. Anything persisting to SD inherits this.
 - **Anything that transmits needs a dead-man's switch** (`kDeauthMaxMs` = 5 min auto-stop) — there is no other
   way for the board to stop itself. Attacks also raise TX power (82 → 160, i.e. 8.2 → 16 dBm).
-- **LED priority in `driveLed()`** (`lcd_ui.cpp`): deauth blink > hunt distance > record pulse > busy score.
-  A new *permanent* state needs a slot; the 1.6.1 alerting item is still undecided — candidates adding LED
-  behaviour should say which slot they take or use a transient blip that yields back.
+- **LED priority in `driveLed()`** (`lcd_ui.cpp`): deauth blink > *alert blip* > hunt distance > record pulse >
+  busy score. Since v1.19 (D1) alerts are transient blips (`led_alert.cpp`, DEVELOPER §21) that win the LED for
+  300-500 ms and yield back, rate-limited to one per 2 s; they never override a deauth. A new *permanent* state still
+  needs a slot; a new alert kind should ride the blip layer (`LedAlertKind`, one row in `kPatterns`).
 - **SD shares the LCD's SPI bus** (CS GPIO4, 20 MHz), loop-task only, budgeted at `kSdBudgetUs` = 8 ms per
   loop; mounting FATFS costs ~30 kB and is done on demand (`sdMount()`/`sdUnmount()`, §12).
 
@@ -74,7 +75,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 | C7 | Hunt by SSID | "where's my network" without knowing its MAC | 34 B while active, heap-allocated | reuses `hunt` ack shape; new command | S–M |
 | C8 | Least-busy readout | quietest channel on Overview / dashboard | 0 — computable from today's `s` rows | no | S (UI only) |
 | C9 | Deauth refinements | rate control + auto-stop when the handshake is caught | a few bytes | fields in `d`, new command | S–M |
-| C10 | Permit-join LED blip | a Zigbee door opening = brief double-flash | 0 (or +48 B, see entry) | no | S |
+| C10 ✅ v1.19 | Permit-join LED blip | a Zigbee door opening = brief double-flash | 0 (or +48 B, see entry) | no | S |
 | C11 | Host CSV export | one-click device-table download | n/a (host side) | no | S (UI only) |
 | C12 | ESP-IDF port | unlocks BLE 5 extended adv + re-tunable driver config | re-derive §9 offsets and the §16 budget | wire format unchanged | L (a migration, not a feature) |
 
@@ -192,8 +193,8 @@ Decisions taken on the open questions: (1) **events wait during `sdcap`** (and d
 buffering in a 2 KB heap buffer and flush after the capture, overflow counted in `drop` - no second open file, no
 second 4 kB buffer; (2) rotation is the boring one: at 1 MB `/events.csv` becomes `/events.old.csv` (one previous
 file kept); (3) the baseline in RAM is the **newest 2048 entries** of `/seen.csv` (sorted 32-bit FNV hashes,
-`kBaseCap` 2560 leaves room for 512 new this session); the file itself is never trimmed; (4) **no LED yet** - still
-to be decided together with C10 and 1.6.1. Deviations from the sketch below: the queue is 16 entries, filled when a
+`kBaseCap` 2560 leaves room for 512 new this session); the file itself is never trimmed; (4) LED: decided in v1.19
+(D1) with C10 and 1.6.1 - a `new` row gives a white single blink (DEVELOPER §21). Deviations from the sketch below: the queue is 16 entries, filled when a
 device *slot is created* (not per frame); the baseline set, row buffer and pending appends are heap while armed
 (~12.6 kB), not static; the card is mounted only per flush (every 60 s, at 16 rows, or at 48 pending new MACs),
 not held; randomized MACs (Wi-Fi locally-administered, BLE random) never count as new but still log as `surv`;
@@ -207,7 +208,7 @@ mid-`sdcap` and re-inserted lost no rows (21 buffered, `written: 52` after). Pre
 R1 = 0xFF, card in 0x01, removal logged within ~4 s worst case (measured 1.1 s after the first absent reading).
 One of three hot-pulls reset the board (`rst: usb` - a USB-peripheral reset from a likely supply dip, not a panic,
 not the probe); pull the card gently. **Not verified:** the re-insert of pending new MACs (added after the pull
-test, when `base` read 32 instead of ~52). **Open:** the LED blip. Original entry below.
+test, when `base` read 32 instead of ~52). The LED blip shipped in v1.19 (§21 of DEVELOPER). Original entry below.
 
 **What.** One append-only `/events.csv` on the card: `epoch_ms, kind, id, rssi, ch, extra`. v1 kinds: surveillance
 hits (category + tier) and **novelty** — a MAC not present in a `/seen.csv` baseline dropped on the same card. The
@@ -341,6 +342,12 @@ an associated client that re-auths → `deauth auto-stopped (handshake)` log lin
 
 ### C10 — Permit-join LED blip
 
+**Status: shipped v1.19** with 1.6.1 as one decision (D1; `led_alert.cpp`, DEVELOPER §21). Purple double flash when a
+node's permit-join bit first becomes set; the 802.15.4 ISR only sets `g_ledJoinFlag`. Open question (1) was settled the
+cheap way: no per-node timestamp (0 B) - the sticky bit means a node blips **once** when first seen permitting, not
+forever at beacon rate, so the 48 B fix was not needed. A node whose slot is evicted and recreated can blip again;
+the 2 s rate limit covers it. Not yet verified with a real coordinator opening joins. Original entry below.
+
 **What.** A Zigbee/Thread network setting its permit-join bit is a door opening — worth a blink. The flag already exists
 per node (`Dev154.flags` bit2); add a rate-limited transient double-flash in `driveLed()`.
 
@@ -457,7 +464,13 @@ an identification. See [DEVELOPER.md §18](DEVELOPER.md). Known limits (the coar
 device (`kSurvOuis` is matched in firmware precisely so the LCD can flag without a host); what is missing is
 everything around it.
 
-### 1.6.1 Alerting — *highest value, smallest change*
+### 1.6.1 Alerting — *highest value, smallest change*  ✅ shipped v1.19
+
+**Status:** the transient double-flash below was agreed (D1) and shipped with C10 and the C4 novelty blip
+(`led_alert.cpp`, DEVELOPER §21): a surveillance device's first slot this session gives an orange double flash, with
+or without the event log armed; it may override hunt/record/busy, never an active deauth (alerts are dropped during
+one); at most one blip per 2 s, highest pending kind wins. `alerts 1|0` (persisted) and `ledtest surv|new|join`.
+Original entry:
 
 A marker on a page you have to be looking at is not an alert. Needs an active signal when a surveillance OUI
 is matched.

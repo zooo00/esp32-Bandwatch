@@ -413,6 +413,8 @@ void handleCommand(char* line) {
         sdListFiles();
     } else if (!strcmp(line, "sdread")) {
         sdReadFile(arg);
+    } else if (!strcmp(line, "sdrm")) {
+        sdRemoveFile(arg);   // acks {"cmd":"sdrm","file","ok"}; refusals are "sdrm: ..." err lines
     } else if (!strcmp(line, "events")) {
         // C4: arm/disarm the SD event log (persisted). Arming works with no card: it retries the mount.
         if (atoi(arg) != 0) { if (!eventsEnable()) Serial.print("{\"t\":\"err\",\"msg\":\"events: not enough free heap\"}\n"); }

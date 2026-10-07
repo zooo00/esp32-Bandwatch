@@ -192,7 +192,9 @@ Decisions taken on the open questions: (1) **events wait during `sdcap`** (and d
 buffering in a 2 KB heap buffer and flush after the capture, overflow counted in `drop` - no second open file, no
 second 4 kB buffer; (2) rotation is the boring one: at 1 MB `/events.csv` becomes `/events.old.csv` (one previous
 file kept); (3) the baseline in RAM is the **newest 2048 entries** of `/seen.csv` (sorted 32-bit FNV hashes,
-`kBaseCap` 2560 leaves room for 512 new this session); the file itself is never trimmed; (4) **no LED yet** - still
+`kBaseCap` 2560 leaves room for 512 new this session); the file was never trimmed in 1.18 - since the D4 follow-up
+an attach that finds > 4096 entries rotates it (old file -> `/seen.old.csv`, newest 2048 rewritten, DEVELOPER §20);
+(4) **no LED yet** - still
 to be decided together with C10 and 1.6.1. Deviations from the sketch below: the queue is 16 entries, filled when a
 device *slot is created* (not per frame); the baseline set, row buffer and pending appends are heap while armed
 (~12.6 kB), not static; the card is mounted only per flush (every 60 s, at 16 rows, or at 48 pending new MACs),
@@ -207,7 +209,11 @@ mid-`sdcap` and re-inserted lost no rows (21 buffered, `written: 52` after). Pre
 R1 = 0xFF, card in 0x01, removal logged within ~4 s worst case (measured 1.1 s after the first absent reading).
 One of three hot-pulls reset the board (`rst: usb` - a USB-peripheral reset from a likely supply dip, not a panic,
 not the probe); pull the card gently. **Not verified:** the re-insert of pending new MACs (added after the pull
-test, when `base` read 32 instead of ~52). **Open:** the LED blip. Original entry below.
+test, when `base` read 32 instead of ~52). **Open:** the LED blip. **D4 follow-up (card-file management):** every
+card file (pcaps, `events.csv`/`.old`, `seen.csv`/`.old`, `surveil.csv`) is downloadable *and deletable* from dashboard
+v2 (`sdrm <name>`, refused for the file being recorded, during an `sdread` or mid-flush; deleting `seen.csv` while
+armed restarts novelty; DEVELOPER §12), and `/seen.csv` rotates as above. Written and compiled, hardware run
+pending. Original entry below.
 
 **What.** One append-only `/events.csv` on the card: `epoch_ms, kind, id, rssi, ch, extra`. v1 kinds: surveillance
 hits (category + tier) and **novelty** — a MAC not present in a `/seen.csv` baseline dropped on the same card. The
@@ -430,8 +436,10 @@ Open items:
 - ~~**Promote it.**~~ Done: v2 is the default at `/`.
 - ~~**Retire classic.**~~ Done in v1.19: `host/dashboard.html` and `host/run-v2.sh` removed (git tag `v1.18.2` has
   the last copy), `/classic` 301-redirects to `/`, `--ui` is accepted and ignored.
-- **SD pull still stops at download.** One step away from opening the pulled pcap in Wireshark directly; a tiny
-  "open" affordance or an in‑page frame counter would close that gap.
+- ~~**SD pull still stops at download.**~~ Now download + delete: every card file has a Download button (pull ->
+  progress -> the browser saves it) and a two-click inline Delete (`sdrm`; DEVELOPER §12). Copies already pulled to
+  the captures dir stay when the card file is deleted. Still open: opening a pulled pcap in Wireshark directly, or
+  an in-page frame counter.
 
 ---
 

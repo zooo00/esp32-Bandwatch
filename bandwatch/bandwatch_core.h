@@ -430,7 +430,8 @@ bool sdWriteFrame(const CapFrame& f);   // one frame -> record + link-layer head
 void serviceSdRead();
 void sdListFiles();
 void sdReadFile(const char* path);
-void sdServiceFlush();                  // fsync cadence, called from drainCapture()
+void sdRemoveFile(const char* arg);     // "sdrm <name>": delete one card-root file (refused while it is in use)
+void sdServiceFlush();                 // fsync cadence, called from drainCapture()
 
 // Deauth + diagnostics (deauth_diag.cpp).
 void startDeauth(const uint8_t* mac);
@@ -464,6 +465,8 @@ void eventsDisable();
 void serviceEvents();
 void sendEventStatus();   // host_proto.cpp: {"t":"ev"} every 5 s while armed
 int eventsBaseCount();
+bool eventsFlushing();                    // flush() has the event files open: sdrm refuses
+void eventsFileRemoved(const char* path); // sdrm deleted a card file: /seen.csv while armed reloads an empty baseline
 extern bool g_eventsWanted;   // settings.cpp: restored "events" flag, applied in Bandwatch_Init
 void loadSurvExtra();   // /surveil.csv extra surveillance OUIs, read at boot while the card is mounted
 

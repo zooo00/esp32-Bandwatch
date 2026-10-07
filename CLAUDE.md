@@ -141,7 +141,9 @@ lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`
 `snap <32..1600>` (capture snap length), `blescan active|passive|auto` (BLE scan policy; default `auto` stays
 passive and opens a short active window when a new scannable device has no name), `specstep 1|2|5` (fine-spectrum
 step in MHz; spec mode only), `mirror 1|0` (stream the LCD to the host over serial; default off, §19), `page next|prev` (step the LCD like a BOOT tap, §19), `reboot`.
-microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `time <epoch>` (no RTC —
+microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>` (delete one
+card-root file; refused for the file being recorded, during an `sdread` or mid event-log flush; deleting `seen.csv`
+while the event log is armed restarts novelty; §12), `time <epoch>` (no RTC —
 the host sends this on connect; it dates the pcap records and names the files, in UTC), `events 1|0` (C4 event log
 to `/events.csv`; persisted; arms with no card; status in `{"t":"ev"}` every 5 s, §20), `sdprobe` (raw CMD0 R1 of
 the presence probe; -1 while the card is mounted/busy), `sdface 0|1` (show the card-out/card-in LCD face).

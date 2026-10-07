@@ -80,6 +80,10 @@
   .push { margin-left: auto; white-space: nowrap; }
   .pullprog { width: 64px; height: 6px; background: var(--grid); border-radius: 999px; overflow: hidden; flex: none; }
   .pullprog i { display: block; height: 100%; background: var(--series); }
+  .files .acts { margin-left: auto; display: flex; gap: 5px; align-items: center; flex: none; white-space: nowrap; }
+  .files .fsize { flex: none; }
+  .filesfoot { margin-top: 7px; }
+  .filesfoot p { margin: 5px 0 0; }
 
   .devcard { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
   .devhead { display: flex; align-items: center; gap: 9px; padding: 10px 16px; cursor: pointer; user-select: none; }
@@ -217,14 +221,17 @@
         <button class="primary block" id="sdBtn">Record to SD</button>
         <div class="note capinfo" id="sdInfo"></div>
         <ul class="files" id="sdFiles"></ul>
+        <div id="sdFilesFoot" class="filesfoot" hidden>
+          <button class="tiny ghost" id="sdShowAll"></button>
+          <p class="note dim">Delete removes the file from the card only - copies already downloaded to this Mac stay.</p>
+        </div>
         <div id="evBox" hidden>
           <h3 style="margin-top:14px">Event log</h3>
           <button class="block" id="evBtn">Start event log</button>
           <div class="note capinfo" id="evInfo"></div>
-          <ul class="files" id="evFiles"></ul>
           <p class="note dim" style="margin:8px 0 0">Writes <code>events.csv</code> on the card: surveillance-OUI hits, and
             <b>new</b> devices - a MAC not seen on this card before (randomized MACs are ignored). The baseline
-            (<code>seen.csv</code>) grows as you walk, so early on almost everything is new. The setting stays on the device.</p>
+            (<code>seen.csv</code>) grows as you walk, so early on almost everything is new; past 4096 MACs it is trimmed to the newest 2048 when the log attaches (the rest move to <code>seen.old.csv</code>). Deleting <code>seen.csv</code> starts novelty from scratch. The setting stays on the device.</p>
         </div>
       </section>
 
@@ -438,8 +445,16 @@
   let explainPending = null;
   let specOpen = false;                                        // cached spectrum expanded outside spec mode                                   // {scope, t} latched from click until the host reports it active
   const prev = {};
-  const EV_FILES = ['events.csv', 'events.old.csv', 'seen.csv', 'surveil.csv'];   // C4 text files on the card (not pcaps)
-  const EV_PULL = ['events.csv', 'seen.csv'];                                     // the ones offered for pulling
+  // C4 text files on the card (not pcaps), in list order. The first two are the live log and baseline, shown even
+  // in the compact list; the rest (rotated .old files, the extra-OUI list) only under "show all".
+  const EV_FILES = ['events.csv', 'seen.csv', 'events.old.csv', 'seen.old.csv', 'surveil.csv'];
+  const EV_MAIN = ['events.csv', 'seen.csv'];
+  const SD_COMPACT_PCAPS = 4;                                  // newest pcaps in the compact list
+  let sdShowAll = false;                                       // "show all files" expander
+  let rmArm = null;                                            // {name, t}: first Delete click, waiting for the second
+  let rmPending = null;                                        // {name, t}: sdrm sent, until the host reports the result
+  let pullReq = null;                                          // name the user asked to download (auto-save on done)
+  const RM_ARM_MS = 4000, RM_PENDING_MS = 8000;
 
   const fmt = (n, d = 0) => (n == null ? '–' : Number(n).toLocaleString(undefined, { maximumFractionDigits: d }));
   const rate = (n) => n >= 10000 ? (n / 1000).toFixed(0) + 'k' : n >= 1000 ? (n / 1000).toFixed(1) + 'k' : n.toFixed(0);
@@ -585,12 +600,83 @@
     post({ cmd: 'dca', client_mac: client, ap_bssid: ap });
   });
   // Pull a file off the SD card over serial (the sdread wiring in bandwatch_host.py reassembles it).
+  // Download = pull (device streams it over serial) -> progress bar -> the browser saves it when it lands.
+  const pullActive = (s) => !!(s && s.sd_read && !s.sd_read.done && !s.sd_read.failed);
   document.addEventListener('click', (e) => {
     const b = e.target.closest('button[data-pull]');
-    if (!b || (state && state.sd_read && !state.sd_read.done)) return;   // one pull at a time
+    if (!b || pullActive(state) || rmPending) return;   // one card operation at a time
+    pullReq = b.dataset.pull.split('/').pop();
     post({ cmd: 'sdread', path: b.dataset.pull });
-    toast('Pulling from SD card', b.dataset.pull.split('/').pop(), 'rec');
+    toast('Downloading from SD card', pullReq, 'rec');
   });
+  function saveFile(name) {
+    const a = document.createElement('a');
+    a.href = `/file?name=${encodeURIComponent(name)}`; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  // Delete on the card: two clicks, no browser dialog (window.confirm blocks automation). The first click arms
+  // the row's button ("Really delete?") for RM_ARM_MS; a second click inside that window sends sdrm. The button
+  // then latches "Deleting…" until the host reports the device's answer (the poll is only 1 Hz).
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest('button[data-rm]');
+    if (!b || b.disabled) return;
+    const name = b.dataset.rm.split('/').pop();
+    if (rmArm && rmArm.name === name && Date.now() - rmArm.t < RM_ARM_MS) {
+      rmArm = null;
+      rmPending = { name, t: Date.now() };
+      post({ cmd: 'sdrm', path: '/' + name });
+      toast('Deleting on SD card', name, 'rec');
+    } else {
+      rmArm = { name, t: Date.now() };
+      setTimeout(() => { if (rmArm && rmArm.name === name && Date.now() - rmArm.t >= RM_ARM_MS && state) renderSdFiles(state); }, RM_ARM_MS + 50);
+    }
+    if (state) renderSdFiles(state);
+  });
+  $('#sdShowAll').addEventListener('click', () => { sdShowAll = !sdShowAll; if (state) renderSdFiles(state); });
+  // The host's sd_rm {name, pending, ok, msg, t}: release the latch and say how it went, once per result.
+  function sdRmTrack(r) {
+    if (rmPending && Date.now() - rmPending.t > RM_PENDING_MS) { toast('Delete not confirmed', `${rmPending.name}: no answer from the device`, 'warn'); rmPending = null; }
+    if (!r || r.pending || !rmPending || r.name !== rmPending.name || r.t * 1000 < rmPending.t - 2000) return;
+    if (r.ok) toast('Deleted on SD card', `${r.name} (any copy on this Mac stays)`, 'done');
+    else toast('Delete refused', `${r.name}${r.msg ? ': ' + r.msg : ''}`, 'warn');
+    rmPending = null;
+  }
+  // SD card file list: compact by default (the live event log + baseline, and the newest few pcaps); "show all"
+  // adds the older pcaps, the rotated .old files and surveil.csv. Each row: Download and Delete.
+  function renderSdFiles(s, files) {
+    const sd = s.sd || {};
+    if (files === undefined) files = (sd.mounted && sd.files) ? sd.files : [];
+    const rec = !!sd.cap, recName = rec ? (sd.file || '').split('/').pop() : '';
+    const sr = s.sd_read, busy = pullActive(s);
+    if (rmArm && Date.now() - rmArm.t >= RM_ARM_MS) rmArm = null;
+    const base = (n) => String(n).split('/').pop();
+    const texts = EV_FILES.map(t => files.find(([n]) => base(n) === t)).filter(Boolean);
+    const pcaps = files.filter(([n]) => !EV_FILES.includes(base(n))).reverse();   // directory order ≈ oldest first
+    const compact = [...pcaps.slice(0, SD_COMPACT_PCAPS), ...texts.filter(([n]) => EV_MAIN.includes(base(n)))];
+    const all = [...pcaps, ...texts];
+    const rows = sdShowAll ? all : compact;
+    const row = ([n, sz]) => {
+      const b = base(n), isRec = b === recName;
+      let dl;
+      if (sr && sr.name === b && busy)
+        dl = `<span class="pullprog" title="${kb(sr.received)} / ${kb(sr.total)}"><i style="width:${sr.total ? Math.round(sr.received / sr.total * 100) : 0}%"></i></span>`;
+      else if (sr && sr.name === b && sr.done)
+        dl = `<a class="link" href="/file?name=${encodeURIComponent(b)}" download="${esc(b)}" title="pulled to this Mac - save it again">save</a>`;
+      else
+        dl = `<button class="tiny" data-pull="${esc(n)}" ${busy || rmPending || isRec ? 'disabled' : ''} title="${isRec ? 'being recorded right now' : 'copy to this Mac'}">⬇ Download</button>`;
+      let rm;
+      if (rmPending && rmPending.name === b) rm = `<button class="tiny" disabled>Deleting…</button>`;
+      else if (rmArm && rmArm.name === b) rm = `<button class="tiny stop" data-rm="${esc(n)}">Really delete?</button>`;
+      else rm = `<button class="tiny ghost" data-rm="${esc(n)}" ${isRec || busy || rmPending ? 'disabled' : ''}
+        title="${isRec ? 'being recorded right now - stop recording first' : busy ? 'wait for the download to finish' : 'delete on the card'}">Delete</button>`;
+      return `<li><span class="fname mono" title="${esc(n)}">${esc(b)}</span><span class="note dim fsize">${kb(sz)}</span><span class="acts">${dl}${rm}</span></li>`;
+    };
+    $('#sdFiles').innerHTML = rows.map(row).join('');
+    const hidden = all.length - compact.length;
+    $('#sdFilesFoot').hidden = !all.length;
+    $('#sdShowAll').hidden = hidden <= 0;
+    $('#sdShowAll').textContent = sdShowAll ? 'Show fewer' : `Show all ${all.length} files (${hidden} more)`;
+  }
 
   function spark(hist) {
     if (!hist || hist.length < 2) return '';
@@ -655,25 +741,17 @@
       sdlsAt = Date.now(); post({ cmd: 'sdls' });
     }
     const sr = s.sd_read;   // file being pulled off the card (or the last one pulled this session)
-    if (sr && sr.done && !(prev.srName === sr.name && prev.srDone)) toast('SD file ready', `${sr.name} · ${kb(sr.received)}`, 'done');
+    if (sr && sr.done && !(prev.srName === sr.name && prev.srDone)) {
+      toast('SD file ready', `${sr.name} · ${kb(sr.received)}`, 'done');
+      if (pullReq === sr.name) saveFile(sr.name);   // the user asked to download this one: hand it to the browser
+      pullReq = null;
+    }
+    if (sr && sr.failed && pullReq === sr.name) { toast('Download failed', `${sr.name}: the card stopped answering`, 'warn'); pullReq = null; }
     prev.srName = sr ? sr.name : null; prev.srDone = !!(sr && sr.done);
-    const allFiles = (sd.mounted && !rec && sd.files) ? sd.files : [];
-    const isLog = (n) => EV_FILES.includes(n.split('/').pop());
-    const flist = allFiles.filter(([n]) => !isLog(n));   // pcaps; the event-log files get their own list below
-    const fileRow = ([n, sz]) => {
-      const base = n.split('/').pop();
-      let extra;
-      if (sr && !sr.done && sr.name === base)
-        extra = `<span class="pullprog"><i style="width:${sr.total ? Math.round(sr.received / sr.total * 100) : 0}%"></i></span><span class="note dim push">${kb(sr.received)} / ${kb(sr.total)}</span>`;
-      else if (sr && sr.done && sr.name === base)
-        extra = `<a class="link push" href="/file?name=${encodeURIComponent(base)}">download</a>`;
-      else
-        extra = `<button class="tiny push" data-pull="${esc(n)}" ${sr && !sr.done ? 'disabled' : ''}>⬇ pull to Mac</button>`;
-      return `<li><span class="fname mono" title="${esc(n)}">${esc(base)}</span><span class="note dim">${kb(sz)}</span>${extra}</li>`;
-    };
-    // directory order ≈ oldest first; show the newest few
-    $('#sdFiles').innerHTML = flist.slice(-5).map(fileRow).join('');
-    renderEvents(s, allFiles.filter(([n]) => isLog(n)), fileRow);
+    sdRmTrack(s.sd_rm);
+    const allFiles = (sd.mounted && sd.files) ? sd.files : [];
+    renderSdFiles(s, allFiles);
+    renderEvents(s);
     $('#sdInfo').innerHTML = !sd.mounted
       ? 'No card — insert a microSD to record pcaps on the device.'
       : rec
@@ -707,7 +785,7 @@
   }
 
   // C4 SD event log: status from the device's "ev" object (absent on firmware before C4 - hide the block then).
-  function renderEvents(s, logFiles, fileRow) {
+  function renderEvents(s) {
     const ev = s.events;
     $('#evBox').hidden = !ev;
     if (!ev) return;
@@ -729,9 +807,7 @@
         `<br>${n(ev.new)} new, ${n(ev.surv)} surveillance · <span title="${n(ev.file)} MACs in seen.csv">baseline ${n(ev.base)}</span>`;
     if (ev.drop || ev.err)
       html += `<br><b style="color:var(--critical)">${ev.drop ? `${n(ev.drop)} rows dropped` : ''}${ev.drop && ev.err ? ' · ' : ''}${ev.err ? `${n(ev.err)} card errors` : ''}</b>`;
-    $('#evInfo').innerHTML = html;
-    // pull buttons for the log and the baseline, once the card listing has them
-    $('#evFiles').innerHTML = logFiles.filter(([f]) => EV_PULL.includes(f.split('/').pop())).map(fileRow).join('');
+    $('#evInfo').innerHTML = html;   // events.csv / seen.csv download + delete live in the card's file list above
   }
 
   function renderHero(s) {

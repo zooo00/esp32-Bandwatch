@@ -8,7 +8,8 @@ of interleaving two readers). The port is opened with DTR/RTS asserted and HUPCL
 
 Each test restores what it changed (band, park, USB capture, SD capture, mirror, event log - compared against
 the hello read at the start); the LCD page is restored by the page test, but a band change also picks a page,
-so the page shown after a run can differ. `sdcap` (only when a card is in) leaves one small pcap on the card.
+so the page shown after a run can differ. `sdcap` (only when a card is in) leaves one small pcap on the card
+(the T11 sdrm tests delete the ones they record).
 
 Env: BANDWATCH_PORT (required), BANDWATCH_SOAK_S (per-mode soak length, default 30).
 Runtime: ~6-7 minutes with the default soak.
@@ -395,6 +396,67 @@ class T10WifiChunks(BoardTest):
                 self.assertRegex(r[16], r"^([0-9a-f]{6})?$")
         print("\n  w lines: %d, max rows/line %d, distinct MACs %d"
               % (len(ws), max(len(w["dev"]) for w in ws), len({r[0] for w in ws for r in w["dev"]})))
+
+
+class T11SdRm(BoardTest):
+    """sdrm (docs/DEVELOPER.md section 12): record a short pcap, find it with sdls, delete it, confirm it is gone."""
+
+    def sdls(self):
+        idx = board.mark()
+        board.send("sdls")
+        o = board.wait_json(lambda o: o.get("t") == "sdls" or (o.get("t") == "err" and str(o.get("msg", "")).startswith("sdls")),
+                            10, idx, "an sdls listing")
+        self.assertEqual(o.get("t"), "sdls", "sdls failed: %s" % o.get("msg"))
+        return {str(n).lstrip("/"): sz for n, sz in o["files"]}, o
+
+    def record_short(self, seconds=3.0):
+        board.set_band("2.4g")
+        r = board.command_or_err("sdcap 1", timeout=10)
+        self.assertEqual(r.get("t"), "ack", "sdcap 1 failed: %s" % r.get("msg"))
+        self.assertEqual(r["sdcap"], 1)
+        self.assertTrue(r["file"].startswith("/bandwatch-wifi-"), r)
+        time.sleep(seconds)
+        return r["file"]
+
+    def test_bad_names_refused_without_touching_the_card(self):
+        for arg in ("../seen.csv", "/a/b.pcap", "/" + "x" * 40, "", "seen.csv\"x"):
+            with self.subTest(arg=arg):
+                r = board.command_or_err("sdrm " + arg, timeout=5)
+                self.assertEqual(r.get("t"), "err", r)
+                self.assertIn("bad file name", r["msg"])
+
+    def test_sdrm_deletes_a_fresh_capture(self):
+        if not card_present():
+            self.skipTest("no microSD card in the slot")
+        path = self.record_short()
+        self.assertEqual(board.command("sdcap 0", timeout=10)["sdcap"], 0)
+        name = path.lstrip("/")
+        files, o = self.sdls()
+        if name not in files and o["sent"] < o["total"]:
+            self.skipTest("card listing truncated (%d of %d sent); cannot see the new file" % (o["sent"], o["total"]))
+        self.assertIn(name, files)
+        self.assertGreater(files[name], 24, "the pcap should hold more than its global header")
+        r = board.command_or_err("sdrm " + path, timeout=10)
+        self.assertEqual(r.get("t"), "ack", "sdrm failed: %s" % r.get("msg"))
+        self.assertEqual((r["file"], r["ok"]), (path, 1))
+        files, _ = self.sdls()
+        self.assertNotIn(name, files)
+        r = board.command("sdrm " + path, timeout=10)          # a second delete finds nothing
+        self.assertEqual((r["ok"], r.get("msg")), (0, "no such file"))
+
+    def test_sdrm_refused_while_recording(self):
+        if not card_present():
+            self.skipTest("no microSD card in the slot")
+        path = self.record_short(seconds=1.5)
+        try:
+            r = board.command_or_err("sdrm " + path, timeout=10)
+            self.assertEqual(r.get("t"), "err", "deleting the file being recorded must be refused: %s" % r)
+            self.assertIn("being recorded", r["msg"])
+            self.assertEqual(board.hello()["sd"]["cap"], 1, "the refusal must leave the recording running")
+        finally:
+            board.command("sdcap 0", timeout=10)
+        r = board.command_or_err("sdrm " + path, timeout=10)   # stopped: now it may go (and leaves no litter)
+        self.assertEqual((r.get("t"), r.get("ok")), ("ack", 1), r)
 
 
 class T99NoReboot(BoardTest):

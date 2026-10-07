@@ -1,8 +1,9 @@
 # Bandwatch roadmap and open items
 
-Planned work, open questions and known gaps. Current release: **v1.18** (v1.12 boot photos, v1.13-1.14 LCD mirror,
+Planned work, open questions and known gaps. Current release: **v1.19.1** (v1.12 boot photos, v1.13-1.14 LCD mirror,
 v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
-removal hardening). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
+removal hardening, v1.18.x mirror frames + regression suite, v1.19 LED alerts / classic retired / card-file
+management, v1.19.1 grouped card-file view + exclusive serial port). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
 C10 + 1.6.1 LED alert blips (v1.19, D1); C2/C5/C7/C9/C11 still candidates, C12 the exit ramp.
 
 **Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
@@ -21,7 +22,7 @@ of being assumed.
 
 **How to analyze.** Rank by value-for-effort against this project's identity (portable Wi‑Fi/BLE/15.4
 surveillance + interference tool; one time-shared radio). Check the RAM math in the preamble — static
-is under 3 kB below the line since v1.18 (77,272 B), and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
+is under 3 kB below the line since v1.18 (77,392 B at v1.19), and free heap at peak is what binds. Anything adding a protocol line costs a three-way sync (firmware sender ↔ host
 `merge_*` in `bandwatch_host.py` ↔ the §4 table in DEVELOPER.md); UI-only candidates skip that cost.
 The quick hits (C6–C11) are cheap enough to batch; the big ones each justify their own release.
 
@@ -35,7 +36,9 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   **80,544 B** (over the round "well under ~80 kB" line, CLAUDE.md rule 4); the v1.11 reclaim pass (smaller
   LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to 74,480 B,
   v1.15.4 to 74,032 B; v1.17's 96-slot Wi-Fi table took it to 76,816 B and v1.18 (C4 event log + SD presence
-  probe + LCD card faces) to **77,272 B** (measured from the build). The C4 log also holds ~12.6 kB of *heap* while
+  probe + LCD card faces) to 77,272 B, and v1.19's LED alerts to **77,392 B** (measured from the build; `tests/firmware` gates it at 77,800 B).
+  Peak load measured at v1.19 - event log armed + USB + SD capture, every LCD page - left **25,172 B** free (floor
+  24,576 B). The C4 log also holds ~12.6 kB of *heap* while
   armed (DEVELOPER §16/§20), not yet measured at peak load. Free heap at runtime (`both`, v1.15.4) depends on the LCD page: Overview ≈87.6 kB
   (now the heaviest), Devices ≈91, System ≈102, Channels ≈106; BLE ≈88 kB. USB + SD capture bottoms out at
   **~30.8 kB** on any page: `ensureCapRing()` sizes the ring to leave `kMinFreeHeapB` = 24 kB *plus*
@@ -209,8 +212,8 @@ once at boot by `sdProbeAtBoot()`, not at every mount.
 mid-`sdcap` and re-inserted lost no rows (21 buffered, `written: 52` after). Presence probe verified: empty slot
 R1 = 0xFF, card in 0x01, removal logged within ~4 s worst case (measured 1.1 s after the first absent reading).
 One of three hot-pulls reset the board (`rst: usb` - a USB-peripheral reset from a likely supply dip, not a panic,
-not the probe); pull the card gently. **Not verified:** the re-insert of pending new MACs (added after the pull
-test, when `base` read 32 instead of ~52). The LED blip shipped in v1.19 (DEVELOPER §21). **D4 follow-up (card-file management):** every
+not the probe); pull the card gently. **Verified (v1.19.1, from the card's `/events.csv`):** the re-insert of pending new MACs - the only duplicate
+`new` rows (8) come from the first pull test, before the fix; none after, across a later pull. The LED blip shipped in v1.19 (DEVELOPER §21). **D4 follow-up (card-file management):** every
 card file (pcaps, `events.csv`/`.old`, `seen.csv`/`.old`, `surveil.csv`) is downloadable *and deletable* from dashboard
 v2 (`sdrm <name>`, refused for the file being recorded, during an `sdread` or mid-flush; deleting `seen.csv` while
 armed restarts novelty; DEVELOPER §12), and `/seen.csv` rotates as above. Written and compiled, hardware run

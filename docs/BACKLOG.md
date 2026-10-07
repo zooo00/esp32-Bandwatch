@@ -10,7 +10,7 @@ Every item has a **Done when** line, and wherever possible a test to add, so wor
 Priority: **P1** wrong or misleading behaviour today · **P2** gap a user will notice · **P3** improvement / decision.
 Type: bug · verify (built, not proven on hardware) · decision (needs a call before code) · feature.
 
-State as of **v1.18.2** (2026-10-07).
+State as of **v1.19.1** (2026-10-07). Finished items move to **Done** at the end, with the evidence.
 
 ---
 
@@ -99,38 +99,12 @@ button is no longer "…".
 - **Done when:** the cause is known and either fixed (firmware: e.g. detect "no host" via `HWCDC` connected state and
   reset the TX side; or the suite restores HUPCL) or documented with a recovery that needs no RESET press.
 
-### B3 · `page prev` skipped unavailable pages forward — fixed in v1.18.2
-Kept here for one release so the history is visible. `showPage(n, dir)` now skips in the step's direction. The
-tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this row in the next release.
-
----
-
 ## Verify on hardware (built, not yet proven)
 
-### V1 · Event log: devices first seen while the card was out are not logged as "new" twice — P2, verify
-- **Where:** `bandwatch/events.cpp`, `attachCard()` re-inserts `ev.newMacs` into the baseline after a reload. This
-  was added after the removal test, where `base` read 32 instead of about 52.
-- **How:**
-  1. `events 1` with a card in.
-  2. Pull the card for about 60 s in a busy area.
-  3. Re-insert it and wait for a flush.
-  4. `sdread /events.csv`: no MAC should have two `new` rows.
-- **Done when:** checked on the board, and the ROADMAP C4 "Not verified" note is removed.
-- **Test:** this could become a tier-3 test only with a way to simulate removal (see I4). Until then it is manual.
-
-### V2 · The SD faces showed on the LCD during a real pull — P3, verify
+### V2 · The SD faces showed on the LCD during a real pull — P3, verify (needs your eyes)
 - Both faces were checked through the mirror (`sdface 0|1`), and the removal/insertion log lines were checked
   during a real pull. Nobody has yet confirmed seeing the faces on the panel itself during a pull.
 - **Done when:** someone watches the LCD through a pull and a re-insert.
-
-### V3 · Event-log heap at peak load — P2, verify
-- The armed log holds about 12.6 kB of heap (baseline set, row buffer, pending MACs). Nobody has measured it
-  together with the worst case.
-- **How:** run `events 1` + `cap 1` + `sdcap 1` on the Overview page (the heaviest), then step through every page.
-  `tests/device` `T04Capture.test_cap_and_sdcap_keep_heap_floor` does the stepping. Run it with events armed and
-  record the minimum.
-- **Done when:** the minimum free heap is recorded in DEVELOPER §16/§20 and stays at or above 24 kB. If not,
-  shrink `kBaseCap` or make `ensureCapRing()` account for the armed log.
 
 ### V5 · `/seen.csv` rotation time on hardware — P3, verify
 - Put a `/seen.csv` with ~5000 distinct globally-unique MAC lines on the card, `events 1` (or re-insert while armed):
@@ -145,7 +119,9 @@ tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this r
   devices count as new once more. Fine, or keep them?
 
 ### V4 · Hot-pulling the card reset the board once (`rst: usb`) — P3, verify
-- One of three pulls coincided with a USB-peripheral reset. Not a panic, and not the probe (DEVELOPER §12). A
+- One of three pulls (the second; the first during `sdcap` and the third under the reconnecting watcher did not)
+  coincided with a USB-peripheral reset. Note that a second program reading the port (B4) can look similar but shows
+  *no* uptime reset; this one did reset (`up` restarted, `rst: usb`). Not a panic, and not the probe (DEVELOPER §12). A
   likely cause is a supply dip briefly dropping the USB link.
 - **How:** about 10 pulls with `card_watch`-style monitoring (it reconnects, and logs `REBOOT` when uptime goes
   backwards). Once with a powered hub and once direct.
@@ -156,13 +132,6 @@ tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this r
 
 ## Decisions needed (no code until decided)
 
-### D1 · LED feedback for events — decided **yes**, done in v1.19
-Blips for surveillance hits (1.6.1), new devices (C4) and permit-join (C10); DEVELOPER §21. Real-hit check: V6.
-
-### D2 · Retire the classic dashboard — decided **yes**, done in v1.19
-`host/dashboard.html` and `run-v2.sh` removed; `/classic` redirects to `/`; `--ui` is accepted and ignored. Last copy:
-tag `v1.18.2`.
-
 ### D3 · Mirror on pages that out-run the link — P3, decision **deferred** (2026-10-07: "wait")
 - The BLE Devices page repaints about 220 KB/s of base64, so the mirror never gets a complete frame there; it shows
   "repairing" (DEVELOPER §19). Options:
@@ -170,9 +139,6 @@ tag `v1.18.2`.
   - (b) while mirroring, re-sort the LCD device list less often (e.g. 2 s instead of 500 ms);
   - (c) a mirror frame-rate cap.
 - (b) changes the device's own UI behaviour while mirroring; decide whether that is acceptable.
-
-### D4 · `/seen.csv` growth — decided: rotate + download/delete from the dashboard, done in v1.19
-Rotation at > 4096 entries, `sdrm`, Download/Delete for every card file (DEVELOPER §12, §20). Timing check: V5.
 
 ---
 
@@ -184,7 +150,9 @@ Rotation at > 4096 entries, `sdrm`, Download/Delete for every card file (DEVELOP
 - **Done when:** a push with a failing host test or a static-RAM jump past `tests/firmware/static_ram_ceiling.json`
   is refused.
 
-### I2 · Raise test coverage where bugs were found — P2, feature
+### I2 · Raise test coverage where bugs were found — P2, feature (partly done)
+- Since written: `tests/host/test_sdrm.py` (10), alerts command/protocol tests, `T11SdRm` and `T12Alerts` on the board.
+  Still to do:
 - **Tier 1:**
   - a dashboard render harness committed to `tests/host/` (jsdom or a stub DOM), so B1/B2 and future v2 changes
     have checks;
@@ -193,10 +161,6 @@ Rotation at > 4096 entries, `sdrm`, Download/Delete for every card file (DEVELOP
   - the C1 `pr` line shape (needs a directed probe nearby, so skip if none is heard);
   - `w` chunking with more than 24 devices;
   - a no-truncated-lines soak in BLE mode with the mirror on.
-
-### I3 · Record the tier-3 baseline — P3, feature
-After each release, save the device-suite summary (pass counts, minimum heap seen, soak line counts) to
-`tests/device/RESULTS.md`, so the next run can be compared against it.
 
 ### I4 · Simulated card removal for tests — P3, feature
 A diagnostic command (e.g. `sdsim 0|1`) that makes `sdMount()` fail and the presence probe report "absent"
@@ -240,3 +204,18 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 - Whether a deauth actually disconnects a real station is untested (DEVELOPER §11).
 - BLE 5 extended advertising is invisible with the prebuilt core (rule 7; C12 would lift it).
 - Surveillance OUI matches are evidence, not proof, and have never been seen live.
+
+---
+
+## Done (most recent first)
+
+| Item | Version | Evidence |
+| --- | --- | --- |
+| **I3** tier-3 baseline recorded | v1.19.1 | `tests/device/RESULTS.md` (19/19 at v1.18.2, 26/26 at v1.19) |
+| **V3** event-log heap at peak load | v1.19 | `events 1` + `cap 1` + `sdcap 1`, `both` band, walking every LCD page: minimum **25,172 B** free (Overview), floor 24,576 B. Holds by design - the capture ring shrinks to keep the floor - but the margin is thin (~0.6 kB); DEVELOPER §16/§20 |
+| **V1** no duplicate `new` rows after a card swap | v1.18 fix | `/events.csv` on the card: 174 `new` rows, 166 distinct. All 8 duplicates are from one boot at 12:54-12:58, the first pull test, which ran *before* the re-insert fix (each MAC logged before the pull and again after). 100+ later rows, including a pull on the fixed firmware, have no duplicates. Caveat: that later pull lasted only ~17 s |
+| **D4** `/seen.csv` rotation + card files downloadable/deletable | v1.19 / v1.19.1 | `T11SdRm` on the board (deleted a real pcap; refused the file being recorded); grouped "SD card files" card in v1.19.1. Rotation timing still open (V5) |
+| **D2** classic dashboard retired | v1.19 | `/classic` 301 -> `/`; last copy at tag v1.18.2 |
+| **D1** LED alert blips | v1.19 | `T12Alerts` on the board (`alerts` round-trip, `ledtest` acks); the colours themselves still need eyes (V6) |
+| **B3** `page prev` stuck on unavailable pages | v1.18.2 | `T08Page.test_page_prev_is_inverse_of_next` |
+| **B4 (likely)** "silent" serial port | v1.19.1 | two processes on one port split the bytes; host now opens it exclusively. Kept open above until confirmed |

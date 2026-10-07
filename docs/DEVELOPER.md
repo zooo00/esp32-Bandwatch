@@ -1122,7 +1122,9 @@ added *after* that test, because `base` read 32 instead of about 52 — it has n
   row blips white; a surveillance device blips orange whether or not this log is armed.
 - The presence probe has no open items (card out reads `0xFF`, card in `0x01`, removal detected within ~4 s;
   §12). Hot-pulling the card can intermittently reset the board over USB (`rst: usb`, a hardware effect, §12).
-- Not yet measured: free heap at peak load with the log armed; the time a `/seen.csv` rotation takes on hardware
+- Measured (v1.19): free heap at peak load with the log armed - `events 1` + `cap 1` + `sdcap 1`, `both` band, every
+  LCD page - bottoms at **25,172 B** (Overview), ~0.6 kB above the 24 kB floor that `ensureCapRing()` sizes the ring
+  to keep. Not yet measured: the time a `/seen.csv` rotation takes on hardware
   (a > 4096-entry file; written, compiled, not yet run on the board).
 
 ## 21. LED alert blips (D1: 1.6.1 alerting, C4 novelty, C10 permit-join; 1.19)

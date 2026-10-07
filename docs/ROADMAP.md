@@ -512,8 +512,9 @@ System ≈ 101.4 kB, Devices ≈ 90.3, Overview ≈ 86.8, **Channels ≈ 55.8** 
 ~156 LVGL objects. v1.15.4 draws the grid as one object (`chanGridDraw()` on `LV_EVENT_DRAW_MAIN_END`, a 3-byte
 `ChanCell` snapshot per row, only changed cells invalidated): Channels now sits at **≈106.3 kB** (+50 kB) and builds
 in ~1.9 kB, making it the lightest page. That inverted the risk - a capture sized on Channels went under the floor on
-the next step to Overview (16.4 kB) - hence `lcdPageHeadroomB()`. Next heaviest pages if more is ever needed:
-Overview (~20 kB to build) and Devices (~16 kB), the same custom-draw treatment would apply. Parked from the audit,
+the next step to Overview (16.4 kB) - hence `lcdPageHeadroomB()`. v1.15.5 custom-drew Overview's
+channel strip and the Devices list too (+11.3 / +15.2 kB on those pages; the five pages now span ~99-106 kB). Left:
+the Spectrum page's 42 bar widgets (spec mode only - capture is refused there, so it does not bind the floor). Parked from the audit,
 not worth their risk at this headroom: heap `specFine[]` only in spec (504 B, null guards in five readers), `buf1`
 `/21` → `/30` (~1.6 kB, flicker risk), `Deauth.slotPad` (§9 territory - leave).
 

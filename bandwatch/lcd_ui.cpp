@@ -62,7 +62,13 @@ lv_obj_t* sweepLabel = nullptr;
 lv_obj_t* topRows[3] = {nullptr};
 lv_obj_t* topRates[3] = {nullptr};
 lv_obj_t* topBars[3] = {nullptr};
-lv_obj_t* specBars[kChannelCount] = {nullptr};
+// Per-channel strip: one custom-drawn object (ovStripDraw), not kChannelCount bar widgets. refreshOverview()
+// lays the visible bars out (x, height, colour) into ovBars[] and invalidates only the columns that changed.
+struct OvBar { uint8_t x; uint8_t h; uint16_t col565; };
+lv_obj_t* ovStrip = nullptr;
+OvBar ovBars[kChannelCount];
+int ovBarCount = 0;
+int ovBarW = 0;
 lv_obj_t* specLabel = nullptr;
 lv_obj_t* statsLine1 = nullptr;
 lv_obj_t* statsLine2 = nullptr;
@@ -82,10 +88,11 @@ int chanCellCount = 0;
 lv_obj_t* listFoot = nullptr;
 // devices
 lv_obj_t* devHdrRight = nullptr;
-lv_obj_t* devRow[kDevRows] = {nullptr};
-lv_obj_t* devName[kDevRows] = {nullptr};
-lv_obj_t* devRssi[kDevRows] = {nullptr};
-lv_obj_t* devBar[kDevRows] = {nullptr};
+// Device list: one custom-drawn object (devListDraw) painting devRows[] directly; devRowHash[] fingerprints what
+// each row showed last time so refreshDevices() invalidates only rows whose text, colour or RSSI changed.
+lv_obj_t* devList = nullptr;
+uint32_t devRowHash[kDevRows] = {0};
+int devListShown = 0;
 lv_obj_t* devFoot = nullptr;
 // hunt
 lv_obj_t* huntHdrRight = nullptr;
@@ -168,18 +175,15 @@ constexpr SplashText kSplash[] = {   // indexed by BandMode (kBandName is too te
 uint16_t apMaxWindow = 0;
 uint32_t apWindowStartedMs = 0;
 
-lv_color_t scoreColor(float s) {
-    if (s > 70.0f) return c565(RED_565);
-    if (s > 40.0f) return c565(YELLOW_565);
-    return c565(GREEN_565);
+uint16_t score565(float s) {
+    if (s > 70.0f) return RED_565;
+    if (s > 40.0f) return YELLOW_565;
+    return GREEN_565;
 }
+lv_color_t scoreColor(float s) { return c565(score565(s)); }
 
-lv_color_t rssiColor(int rssi) {
-    if (rssi >= -50) return c565(RED_565);
-    if (rssi >= -65) return c565(ORANGE_565);
-    if (rssi >= -80) return c565(YELLOW_565);
-    return c565(CYAN_565);
-}
+uint16_t rssi565(int rssi);
+lv_color_t rssiColor(int rssi) { return c565(rssi565(rssi)); }
 
 void fmtRate(char* out, size_t n, float perSec, const char* unit) {
     if (perSec >= 10000.0f) snprintf(out, n, "%.0fk%s", perSec / 1000.0f, unit);
@@ -256,6 +260,134 @@ lv_obj_t* make_bar(lv_obj_t* parent, int w, int h) {
     return bar;
 }
 
+inline int rssiPct(int rssi) {   // -100 dBm -> 0, -30 dBm -> 100
+    int p = (rssi + 100) * 100 / 70;
+    return p < 0 ? 0 : p > 100 ? 100 : p;
+}
+
+struct DevRowInfo { uint8_t mac[6]; int8_t rssi; bool ap; uint8_t surv; bool destOnly; char label[33]; };
+DevRowInfo devRows[kDevRows];
+int devRowCount = 0;
+
+// lv_area_intersect() is private API in LVGL 9.3 (lv_area_private.h); this is the same few lines.
+bool areaIntersect(lv_area_t& out, const lv_area_t& a, const lv_area_t& b) {
+    out.x1 = LV_MAX(a.x1, b.x1); out.y1 = LV_MAX(a.y1, b.y1);
+    out.x2 = LV_MIN(a.x2, b.x2); out.y2 = LV_MIN(a.y2, b.y2);
+    return out.x1 <= out.x2 && out.y1 <= out.y2;
+}
+
+void chanCellArea(int slot, lv_area_t& a) {
+    lv_obj_get_coords(chanGrid, &a);
+    const int32_t x = a.x1 + (slot / kChanRowsPerCol) * (kChanColW + kChanColGap);
+    const int32_t y = a.y1 + (slot % kChanRowsPerCol) * kChanRowH;
+    a.x1 = x; a.y1 = y; a.x2 = x + kChanColW - 1; a.y2 = y + kChanRowH - 1;
+}
+
+// One text run clipped to its box, the way LV_LABEL_LONG_CLIP kept "165"/"100" inside their columns:
+// the draw task records the layer's clip area when it is created, so narrow it just for this call.
+void drawClippedText(lv_layer_t* layer, lv_draw_label_dsc_t& l, const lv_area_t& box) {
+    const lv_area_t saved = layer->_clip_area;
+    lv_area_t clip;
+    if (areaIntersect(clip, saved, box)) {
+        layer->_clip_area = clip;
+        lv_draw_label(layer, &l, &box);
+    }
+    layer->_clip_area = saved;
+}
+
+// Overview strip: bars bottom-aligned in a 36 px box, positions precomputed by refreshOverview().
+void ovStripDraw(lv_event_t* e) {
+    lv_layer_t* layer = lv_event_get_layer(e);
+    lv_area_t a;
+    lv_obj_get_coords(ovStrip, &a);
+    lv_draw_rect_dsc_t r;
+    lv_draw_rect_dsc_init(&r);
+    r.radius = 1;
+    for (int i = 0; i < ovBarCount; i++) {
+        const OvBar& b = ovBars[i];
+        const lv_area_t bar{a.x1 + b.x, a.y2 - b.h + 1, a.x1 + b.x + ovBarW - 1, a.y2};
+        lv_area_t tmp;
+        if (!areaIntersect(tmp, bar, layer->_clip_area)) continue;
+        r.bg_color = c565(b.col565);
+        lv_draw_rect(layer, &r, &bar);
+    }
+}
+
+// What row i of the Devices list shows: its text (prefix + surveillance name / label / MAC tail) and name colour.
+// Shared by refreshDevices() (to fingerprint the row) and devListDraw() (to paint it).
+uint16_t devRowText(int i, char* buf, size_t n) {
+    const DevRowInfo& d = devRows[i];
+    // "!" marks known surveillance hardware, "~" a device only ever seen as a destination (tier 1).
+    const char* pfx = d.surv ? "! " : d.destOnly ? "~ " : d.ap ? "* " : "";
+    if (d.surv)          snprintf(buf, n, "%s%s", pfx, kSurvName[d.surv]);
+    else if (d.label[0]) snprintf(buf, n, "%s%s", pfx, d.label);
+    else                 snprintf(buf, n, "%s%02x:%02x:%02x", pfx, d.mac[3], d.mac[4], d.mac[5]);
+    const bool hunted = hunt.active && (hunt.kind == 1 ? memcmp(d.mac, hunt.key, 6) == 0 : macEq(d.mac, hunt.mac));
+    return d.surv ? ORANGE_565 : hunted ? CYAN_565 : d.destOnly ? GREY_565 : WHITE_565;
+}
+
+uint16_t rssi565(int rssi) {
+    if (rssi >= -50) return RED_565;
+    if (rssi >= -65) return ORANGE_565;
+    if (rssi >= -80) return YELLOW_565;
+    return CYAN_565;
+}
+
+// Same geometry as the old widget rows (flex row, 3 px gap): name 84 px clipped, RSSI 26 px right-aligned, bar 44x8.
+constexpr int kDevRowH = 20;
+void devRowArea(int i, lv_area_t& a) {
+    lv_obj_get_coords(devList, &a);
+    a.y1 += i * kDevRowH;
+    a.y2 = a.y1 + kDevRowH - 1;
+}
+
+void devListDraw(lv_event_t* e) {
+    lv_layer_t* layer = lv_event_get_layer(e);
+    const lv_font_t* font = &lv_font_montserrat_12;
+    const int32_t ty = (kDevRowH - lv_font_get_line_height(font)) / 2;
+    for (int i = 0; i < devListShown; i++) {
+        lv_area_t row, tmp;
+        devRowArea(i, row);
+        if (!areaIntersect(tmp, row, layer->_clip_area)) continue;
+        char text[48], num[8];
+        lv_draw_label_dsc_t l;
+        lv_draw_label_dsc_init(&l);
+        l.font = font;
+        l.text_local = 1;
+        l.text = text;
+        l.color = c565(devRowText(i, text, sizeof(text)));
+        l.flag = LV_TEXT_FLAG_EXPAND;   // one line, clipped - never wrap at a space like an 84 px box would
+        drawClippedText(layer, l, lv_area_t{row.x1, row.y1 + ty, row.x1 + 83, row.y2 - ty});
+        l.flag = LV_TEXT_FLAG_NONE;
+
+        // A tier-1 ("~") device has only been seen as a destination: there is no RSSI to show.
+        const bool heard = !devRows[i].destOnly;
+        const int rssi = devRows[i].rssi;
+        if (heard) snprintf(num, sizeof(num), "%d", rssi);
+        else snprintf(num, sizeof(num), "--");
+        l.text = num;
+        l.align = LV_TEXT_ALIGN_RIGHT;
+        l.color = c565(GREY_565);
+        drawClippedText(layer, l, lv_area_t{row.x1 + 87, row.y1 + ty, row.x1 + 112, row.y2 - ty});
+
+        lv_draw_rect_dsc_t r;
+        lv_draw_rect_dsc_init(&r);
+        r.radius = 2;
+        r.bg_color = c565(BLACK_565);
+        r.bg_opa = LV_OPA_30;
+        lv_area_t bar{row.x1 + 116, row.y1 + 6, row.x1 + 159, row.y1 + 13};
+        lv_draw_rect(layer, &r, &bar);
+        const int fill = heard ? (44 * rssiPct(rssi) + 50) / 100 : 0;
+        if (fill > 0) {
+            r.radius = LV_RADIUS_CIRCLE;   // lv_bar's indicator is pill-shaped in the default theme
+            r.bg_color = c565(rssi565(rssi));
+            r.bg_opa = LV_OPA_COVER;
+            bar.x2 = bar.x1 + fill - 1;
+            lv_draw_rect(layer, &r, &bar);
+        }
+    }
+}
+
 void buildOverviewPage(lv_obj_t* page) {
     make_header(page, "Activity", &chanLabel);   // was "Bandwatch" (the product name) - ambiguous next to Channels/Devices/...
 
@@ -287,27 +419,16 @@ void buildOverviewPage(lv_obj_t* page) {
     }
 
     lv_obj_t* spec = make_panel(page, 58, PANEL_565, 4);
-    lv_obj_t* barsRow = lv_obj_create(spec);
-    lv_obj_set_size(barsRow, LV_PCT(100), 36);
-    lv_obj_align(barsRow, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_opa(barsRow, LV_OPA_TRANSP, 0);
-    lv_obj_set_style_border_width(barsRow, 0, 0);
-    lv_obj_set_style_pad_all(barsRow, 0, 0);
-    lv_obj_set_style_pad_column(barsRow, 1, 0);
-    lv_obj_set_flex_flow(barsRow, LV_FLEX_FLOW_ROW);
-    lv_obj_set_flex_align(barsRow, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_END, LV_FLEX_ALIGN_END);
-    lv_obj_remove_flag(barsRow, LV_OBJ_FLAG_SCROLLABLE);
-    for (int i = 0; i < kChannelCount; i++) {
-        lv_obj_t* b = lv_obj_create(barsRow);
-        lv_obj_set_size(b, 5, 2);
-        lv_obj_set_style_bg_color(b, c565(DIM_565), 0);
-        lv_obj_set_style_border_width(b, 0, 0);
-        lv_obj_set_style_radius(b, 1, 0);
-        lv_obj_set_style_pad_all(b, 0, 0);
-        lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
-        for (int g = 1; g < 5; g++) if (i == kGroupStart[g]) lv_obj_set_style_margin_left(b, 3, 0);
-        specBars[i] = b;
-    }
+    ovStrip = lv_obj_create(spec);
+    lv_obj_set_size(ovStrip, LV_PCT(100), 36);
+    lv_obj_align(ovStrip, LV_ALIGN_TOP_MID, 0, 0);
+    lv_obj_set_style_bg_opa(ovStrip, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(ovStrip, 0, 0);
+    lv_obj_set_style_pad_all(ovStrip, 0, 0);
+    lv_obj_remove_flag(ovStrip, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(ovStrip, ovStripDraw, LV_EVENT_DRAW_MAIN_END, nullptr);
+    ovBarCount = 0;
+    ovBarW = 0;
     specLabel = make_label(spec, "", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(specLabel, LV_PCT(100));
     lv_obj_set_style_text_align(specLabel, LV_TEXT_ALIGN_CENTER, 0);
@@ -322,32 +443,6 @@ void buildOverviewPage(lv_obj_t* page) {
     footLabel = make_label(page, "APs --", c565(YELLOW_565), &lv_font_montserrat_14);
     lv_obj_set_width(footLabel, LV_PCT(100));
     lv_obj_set_style_text_align(footLabel, LV_TEXT_ALIGN_CENTER, 0);
-}
-
-// lv_area_intersect() is private API in LVGL 9.3 (lv_area_private.h); this is the same few lines.
-bool areaIntersect(lv_area_t& out, const lv_area_t& a, const lv_area_t& b) {
-    out.x1 = LV_MAX(a.x1, b.x1); out.y1 = LV_MAX(a.y1, b.y1);
-    out.x2 = LV_MIN(a.x2, b.x2); out.y2 = LV_MIN(a.y2, b.y2);
-    return out.x1 <= out.x2 && out.y1 <= out.y2;
-}
-
-void chanCellArea(int slot, lv_area_t& a) {
-    lv_obj_get_coords(chanGrid, &a);
-    const int32_t x = a.x1 + (slot / kChanRowsPerCol) * (kChanColW + kChanColGap);
-    const int32_t y = a.y1 + (slot % kChanRowsPerCol) * kChanRowH;
-    a.x1 = x; a.y1 = y; a.x2 = x + kChanColW - 1; a.y2 = y + kChanRowH - 1;
-}
-
-// One text run clipped to its box, the way LV_LABEL_LONG_CLIP kept "165"/"100" inside their columns:
-// the draw task records the layer's clip area when it is created, so narrow it just for this call.
-void drawClippedText(lv_layer_t* layer, lv_draw_label_dsc_t& l, const lv_area_t& box) {
-    const lv_area_t saved = layer->_clip_area;
-    lv_area_t clip;
-    if (areaIntersect(clip, saved, box)) {
-        layer->_clip_area = clip;
-        lv_draw_label(layer, &l, &box);
-    }
-    layer->_clip_area = saved;
 }
 
 // Same geometry as the old widget rows: name 20 px right-aligned, 2 px, bar 11x8, 2 px, value 18 px.
@@ -382,6 +477,7 @@ void chanGridDraw(lv_event_t* e) {
         lv_draw_rect(layer, &r, &bar);
         const int fill = (st == CELL_DATA) ? (11 * c.val + 50) / 100 : 0;
         if (fill > 0) {
+            r.radius = LV_RADIUS_CIRCLE;   // lv_bar's indicator is pill-shaped in the default theme
             r.bg_color = scoreColor(c.val);
             r.bg_opa = LV_OPA_COVER;
             bar.x2 = bar.x1 + fill - 1;
@@ -408,20 +504,9 @@ void buildChannelsPage(lv_obj_t* page) {
 
 void buildDevicesPage(lv_obj_t* page) {
     make_header(page, "Devices", &devHdrRight);
-    lv_obj_t* box = make_panel(page, 246, BG_565, 0);
-    lv_obj_set_style_pad_row(box, 0, 0);
-    lv_obj_set_flex_flow(box, LV_FLEX_FLOW_COLUMN);
-    for (int i = 0; i < kDevRows; i++) {
-        lv_obj_t* row = make_row(box, 20, 3);
-        devRow[i] = row;
-        devName[i] = make_label(row, "", c565(WHITE_565), &lv_font_montserrat_12);
-        lv_obj_set_width(devName[i], 84);
-        lv_label_set_long_mode(devName[i], LV_LABEL_LONG_CLIP);
-        devRssi[i] = make_label(row, "", c565(GREY_565), &lv_font_montserrat_12);
-        lv_obj_set_width(devRssi[i], 26);
-        lv_obj_set_style_text_align(devRssi[i], LV_TEXT_ALIGN_RIGHT, 0);
-        devBar[i] = make_bar(row, 44, 8);
-    }
+    devList = make_panel(page, 246, BG_565, 0);
+    lv_obj_add_event_cb(devList, devListDraw, LV_EVENT_DRAW_MAIN_END, nullptr);
+    devListShown = 0;   // a fresh page is wholly dirty
     devFoot = make_label(page, "", c565(GREY_565), &lv_font_montserrat_12);
     lv_obj_set_width(devFoot, LV_PCT(100));
     lv_obj_set_style_text_align(devFoot, LV_TEXT_ALIGN_CENTER, 0);
@@ -710,27 +795,51 @@ void refreshOverview(float global) {
         lv_label_set_text(topRates[i], r1);
     }
 
+    // Lay the strip out the way the old flex row did (SPACE_BETWEEN, 3 px extra before each band group), then
+    // repaint only what changed: everything on a layout change, otherwise just the columns whose bar moved.
     const int nEnabled = enabledCount();
     int barW = (150 / (nEnabled > 0 ? nEnabled : 1)) - 1;
     if (barW < 2) barW = 2;
     if (barW > 10) barW = 10;
+    lv_obj_update_layout(ovStrip);   // a just-built page has no width yet
+    const int stripW = lv_obj_get_width(ovStrip);
+    int used = 0, n = 0;
     for (int i = 0; i < kChannelCount; i++) {
-        const ChannelState& ch = channels[i];
-        if (!chanEnabled(i)) { lv_obj_add_flag(specBars[i], LV_OBJ_FLAG_HIDDEN); continue; }
-        lv_obj_remove_flag(specBars[i], LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_width(specBars[i], barW);
-        int h = 2;
-        lv_color_t col = c565(DIM_565);
-        if (ch.unavailable) {
-            col = c565(BLACK_565);
-        } else if (ch.hasData) {
-            h = 2 + static_cast<int>(ch.busyEma * 34.0f / 100.0f);
-            col = (ch.busyEma < 3.0f) ? c565(GREY_565) : scoreColor(ch.busyEma);
-        }
-        if (i == currentIdx && monitorReady) col = c565(CYAN_565);
-        lv_obj_set_height(specBars[i], h);
-        lv_obj_set_style_bg_color(specBars[i], col, 0);
+        if (!chanEnabled(i)) continue;
+        used += barW;
+        for (int g = 1; g < 5; g++) if (i == kGroupStart[g]) used += 3;
+        n++;
     }
+    int gap = n > 1 ? (stripW - used) / (n - 1) : 0;
+    if (gap < 1) gap = 1;
+    const bool relayout = (n != ovBarCount) || (barW != ovBarW);
+    lv_area_t sa;
+    lv_obj_get_coords(ovStrip, &sa);
+    int x = 0, k = 0;
+    for (int i = 0; i < kChannelCount; i++) {
+        if (!chanEnabled(i)) continue;
+        for (int g = 1; g < 5; g++) if (i == kGroupStart[g]) x += 3;
+        const ChannelState& ch = channels[i];
+        OvBar b{static_cast<uint8_t>(x), 2, DIM_565};
+        if (ch.unavailable) {
+            b.col565 = BLACK_565;
+        } else if (ch.hasData) {
+            b.h = static_cast<uint8_t>(2 + static_cast<int>(ch.busyEma * 34.0f / 100.0f));
+            b.col565 = (ch.busyEma < 3.0f) ? GREY_565 : score565(ch.busyEma);
+        }
+        if (i == currentIdx && monitorReady) b.col565 = CYAN_565;
+        OvBar& o = ovBars[k];
+        if (!relayout && (o.x != b.x || o.h != b.h || o.col565 != b.col565)) {
+            const lv_area_t col{sa.x1 + b.x, sa.y1, sa.x1 + b.x + barW - 1, sa.y2};
+            lv_obj_invalidate_area(ovStrip, &col);
+        }
+        o = b;
+        x += barW + gap;
+        k++;
+    }
+    ovBarCount = n;
+    ovBarW = barW;
+    if (relayout) lv_obj_invalidate(ovStrip);
     lv_label_set_text(specLabel, bandMode == BAND_5G ? "36-64   100-144   149-165"
                                  : bandMode == BAND_24G ? "2.4 GHz channels 1-13"
                                  : bandMode == BAND_154 ? "802.15.4 channels 11-26"
@@ -800,15 +909,6 @@ void refreshChannels(float global) {
     lv_label_set_text(listFoot, buf);
 }
 
-inline int rssiPct(int rssi) {   // -100 dBm -> 0, -30 dBm -> 100
-    int p = (rssi + 100) * 100 / 70;
-    return p < 0 ? 0 : p > 100 ? 100 : p;
-}
-
-struct DevRowInfo { uint8_t mac[6]; int8_t rssi; bool ap; uint8_t surv; bool destOnly; char label[33]; };
-DevRowInfo devRows[kDevRows];
-int devRowCount = 0;
-
 void refreshDevices() {
     static uint32_t lastSortMs = 0;
     const uint32_t now = millis();
@@ -875,28 +975,23 @@ void refreshDevices() {
         snprintf(buf, sizeof(buf), "%s %d%s", mode154() ? "15.4" : "WiFi", n, recTag());
     lv_label_set_text(devHdrRight, buf);
     applyRecColor(devHdrRight);
+    // Fingerprint each row as drawn (text, colour, RSSI) and repaint only rows that changed or went away.
+    lv_area_t a;
     for (int i = 0; i < kDevRows; i++) {
-        if (i >= n) { lv_obj_add_flag(devRow[i], LV_OBJ_FLAG_HIDDEN); continue; }
-        lv_obj_remove_flag(devRow[i], LV_OBJ_FLAG_HIDDEN);
-        const uint8_t* mac = devRows[i].mac;
-        const int rssi = devRows[i].rssi;
-        const char* label = devRows[i].label;
-        const bool ap = devRows[i].ap;
-        // "!" marks known surveillance hardware, "~" a device only ever seen as a destination (tier 1).
-        const char* pfx = devRows[i].surv ? "! " : devRows[i].destOnly ? "~ " : ap ? "* " : "";
-        if (devRows[i].surv)      snprintf(buf, sizeof(buf), "%s%s", pfx, kSurvName[devRows[i].surv]);
-        else if (label[0])        snprintf(buf, sizeof(buf), "%s%s", pfx, label);
-        else                      snprintf(buf, sizeof(buf), "%s%02x:%02x:%02x", pfx, mac[3], mac[4], mac[5]);
-        lv_label_set_text(devName[i], buf);
-        const bool hunted = hunt.active && (hunt.kind == 1 ? memcmp(mac, hunt.key, 6) == 0 : macEq(mac, hunt.mac));
-        lv_obj_set_style_text_color(devName[i], devRows[i].surv ? c565(ORANGE_565)
-                                               : hunted ? c565(CYAN_565)
-                                               : devRows[i].destOnly ? c565(GREY_565) : c565(WHITE_565), 0);
-        snprintf(buf, sizeof(buf), "%d", rssi);
-        lv_label_set_text(devRssi[i], buf);
-        lv_bar_set_value(devBar[i], rssiPct(rssi), LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(devBar[i], rssiColor(rssi), LV_PART_INDICATOR);
+        uint32_t h = 0;
+        if (i < n) {
+            char text[48];
+            const uint16_t col = devRowText(i, text, sizeof(text));
+            h = 2166136261u;   // FNV-1a
+            for (const char* c = text; *c; c++) h = (h ^ static_cast<uint8_t>(*c)) * 16777619u;
+            h = (h ^ col) * 16777619u;
+            h = (h ^ static_cast<uint8_t>(devRows[i].rssi)) * 16777619u;
+            h |= 1;   // never 0, so an empty row always differs from a live one
+        }
+        if (h != devRowHash[i]) { devRowArea(i, a); lv_obj_invalidate_area(devList, &a); devRowHash[i] = h; }
     }
+    if (devListShown == 0) lv_obj_invalidate(devList);   // first paint after a page build
+    devListShown = n;
     if (mode154()) snprintf(buf, sizeof(buf), "* = beacons (router)  seen < 20 s");
     else if (wifiMode()) snprintf(buf, sizeof(buf), "* = AP (beacons)  seen < 20 s");
     else snprintf(buf, sizeof(buf), "BLE scan cycle %lu  seen < 20 s", static_cast<unsigned long>(bleScan.cycles));

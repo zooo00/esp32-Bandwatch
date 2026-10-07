@@ -267,7 +267,9 @@ int collectWifiRefs(DevRef* refs, int maxN, uint32_t freshMs) {
     portENTER_CRITICAL(&g_devMux);
     for (int i = 0; i < kWifiDevSlots && n < maxN; i++) {
         if (wifiDevs[i].lastMs && (now - wifiDevs[i].lastMs) <= freshMs) {
-            refs[n].rssi = wifiDevs[i].rssi;
+            // Sort key only. A tier-1 (destination-only) sighting has never been heard, so it carries rssi 0;
+            // left as is it would sort above every real transmitter and push them off the LCD's 12 rows.
+            refs[n].rssi = (wifiDevs[i].flags & 4) ? INT8_MIN : wifiDevs[i].rssi;
             refs[n].idx = static_cast<uint8_t>(i);
             memcpy(refs[n].key, wifiDevs[i].mac, 6);
             n++;

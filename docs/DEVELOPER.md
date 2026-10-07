@@ -681,6 +681,15 @@ Devices ~16 kB, System ~5.7 kB, Channels ~1.9 kB), and `lcdPageHeadroomB()` - th
 the heaviest page available in this mode - is added to `kMinFreeHeapB` when the ring is sized or re-fitted.
 Measured: USB + SD capture started on any page bottoms out at **~30.8 kB** on Overview.
 
+v1.15.5 gave Overview's per-channel strip (`ovStripDraw`, one `OvBar{x,h,col565}` per visible channel, laid out
+the way the old `SPACE_BETWEEN` flex row did) and the Devices list (`devListDraw`, painting `devRows[]` with an
+FNV fingerprint per row in `devRowHash[]` so only changed rows repaint) the same treatment. Free heap in `both`:
+Overview ≈98.9 kB (+11.3), Devices ≈106.4 (+15.2), Channels ≈106.4, System ≈102.3 - a ~7.5 kB spread, with
+Overview still the heaviest (its remaining cost is the header, global bar and Top-3 widgets). USB + SD capture
+now keeps a full 20-slot ring and bottoms out at ~27.8 kB on Overview. Drawn text that must stay on one line
+sets `LV_TEXT_FLAG_EXPAND` - `lv_draw_label` word-wraps inside its box, unlike `LV_LABEL_LONG_CLIP`. The Spectrum
+page's 42 bar widgets are the last per-item widget set (spec mode only, where capture is refused).
+
 ### The floor, as built (see [ROADMAP.md](ROADMAP.md))
 
 The proposal landed in `ensureCapRing()` (`capture.cpp`): right after allocating the ring it checks total free

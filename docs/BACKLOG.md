@@ -19,8 +19,9 @@ State as of **v1.18.2** (2026-10-07).
 ### B1 · Dashboard v2 hides a running deauth while a hunt is active — P1, bug
 **Symptom.** With a hunt and a deauth running at the same time, the v2 action bar shows only the hunt. The deauth's
 frame counter, the "rejected by the driver" count and the unpatched-image warning are hidden, and the bar's single
-Stop button stops the hunt only. A running transmit is then invisible in the default UI. Classic shows both
-(`#huntCard` + `#deauthCard` in `host/dashboard.html`, `renderHunt()` / `renderDeauth()`): use it as the reference.
+Stop button stops the hunt only. A running transmit is then invisible in the default UI. The retired classic
+dashboard showed both (`#huntCard` + `#deauthCard`, `renderHunt()` / `renderDeauth()` in `host/dashboard.html`): use
+it as the reference - `git show v1.18.2:host/dashboard.html`.
 
 **Where (host/dashboard2.html, v1.18.2 line numbers):**
 - Markup: `<section class="card actbar" id="actBar">` (~line 259). One status block (`#actTitle`, `#actNum`,
@@ -124,17 +125,15 @@ tier-3 test `T08Page.test_page_prev_is_inverse_of_next` covers it. Delete this r
 
 ## Decisions needed (no code until decided)
 
-### D1 · LED feedback for events — P3, decision
-C4 novelty/surveillance hits, C10 permit-join, and 1.6.1 alerting all want the single WS2812. ROADMAP 1.6.1 proposes
-a short distinct double-flash that yields back. **Decide:** the priority order in `driveLed()` and the blip pattern.
-Then implement all three together.
+### D1 · LED feedback for events — decided **yes** (2026-10-07), in progress for v1.19
+Blips for surveillance hits (1.6.1), new devices (C4) and permit-join (C10); never over an active deauth; an
+`alerts 1|0` setting. Being built.
 
-### D2 · Retire the classic dashboard? — P3, decision
-v2 is the default and now covers the classic gaps except B1. Classic has no LCD mirror, no SD pulls and no
-"last seen" caches. **Decide:** keep classic at `/classic` indefinitely, or remove it after B1 and drop the
-duplicate maintenance (every protocol change currently touches two dashboards).
+### D2 · Retire the classic dashboard — decided **yes**, done in v1.19
+`host/dashboard.html` and `run-v2.sh` removed; `/classic` redirects to `/`; `--ui` is accepted and ignored. Last copy:
+tag `v1.18.2`.
 
-### D3 · Mirror on pages that out-run the link — P3, decision
+### D3 · Mirror on pages that out-run the link — P3, decision **deferred** (2026-10-07: "wait")
 - The BLE Devices page repaints about 220 KB/s of base64, so the mirror never gets a complete frame there; it shows
   "repairing" (DEVELOPER §19). Options:
   - (a) accept it, as today;
@@ -142,10 +141,9 @@ duplicate maintenance (every protocol change currently touches two dashboards).
   - (c) a mirror frame-rate cap.
 - (b) changes the device's own UI behaviour while mirroring; decide whether that is acceptable.
 
-### D4 · `/seen.csv` growth policy — P3, decision
-The file is never trimmed; only its newest 2048 entries are loaded. It is about 18 B per MAC, so years of walks are
-still small, but a card used long-term grows forever. **Decide:** trim on load when the file exceeds N entries, or
-leave it.
+### D4 · `/seen.csv` growth — decided (2026-10-07): rotate, and make card files downloadable + deletable from the dashboard
+In progress for v1.19: `/seen.csv` rotates to `/seen.old.csv` keeping the newest baseline, a firmware `sdrm` command,
+and Download/Delete for every card file in the v2 SD card.
 
 ---
 
@@ -174,6 +172,16 @@ After each release, save the device-suite summary (pass counts, minimum heap see
 ### I4 · Simulated card removal for tests — P3, feature
 A diagnostic command (e.g. `sdsim 0|1`) that makes `sdMount()` fail and the presence probe report "absent"
 without touching the card. It would let tier 3 cover V1 and the event log's no-card path unattended.
+
+### I6 · Measure power draw per mode — P2, verify
+- Needs an inline USB-C power meter (or an INA219 on the 5 V line); the board has no current sensor and macOS only
+  reports the 500 mA USB allocation.
+- **How:** `BANDWATCH_PORT=... python3 tools/power_profile.py` holds each mode (5g / 2.4g / both / BLE / 802.15.4 /
+  spectrum / + SD capture / + event log) for 45 s, asks for the meter reading, and prints battery life for 2/5/10 Ah
+  power banks.
+- **Done when:** the table is in README ("Battery life") and DEVELOPER §1.
+- **Follow-up lever if it is high:** the LCD backlight (GPIO10) is always on; a dim / timeout setting is likely the
+  biggest saving outside the radio.
 
 ### I5 · 802.15.4 devices in the event log — P3, feature
 C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globally unique, so novelty would work.

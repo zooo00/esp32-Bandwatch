@@ -831,6 +831,25 @@ touching either sink (20 → 11 slots, 30.5 kB free; the `sdcap`-first order giv
 headroom above), so rule 4 still keeps the rest honest: current static usage is 77,272 B (v1.18; 74,032 B at v1.15.4), under 3 kB
 below the line, and that headroom is the edge of an unverified budget rather than a wall.
 
+### Where the static RAM went (symbol-level, v1.5.5 -> v1.10 -> v1.19.1)
+
+Measured by diffing `.dram0.data`/`.bss` symbols (`nm -S --size-sort`) between builds of each tag, not estimated.
+v1.5.5 -> v1.10 grew static RAM from 79,592 to 80,544 B (**+952 B**); about 95% of that is spectrum mode (v1.7/v1.8),
+not the v1.10 mode splash:
+
+| Symbol | Delta | What it is |
+| --- | --- | --- |
+| `specFine[84]` | +504 B | v1.8 fine-spectrum bin array (`SpecBin` x 6 B) |
+| `channels[]` | +216 B | v1.7 added `edMin/edMax/edMean/edSamples` to `ChannelState`: +4 B x 54 channels |
+| `spBars` (`lcd_ui.cpp`) | +168 B | v1.7 LCD spectrum page bar array |
+| splash + button-walk state | ~+30 B | `splashTitle/Sub/Bg/DurMs/StartMs`, `pages[]`, walk vars - all of v1.10 |
+| energy accumulator | ~+25 B | `s_edSum` etc., `currentSpecMhz`/`specStepMhz` |
+| misc | +-15 B | `kickFc` +1, `softApPoc` -1 (removed SoftAP PoC), 1.6/1.9 bits |
+
+Since then (80,544 -> 77,392 B at v1.19.1): the 4 KB `DevSnap` union became the compact `g_devRefs` listing (+960 B,
+~-3.3 kB, net **-3,136 B**), which nearly offsets v1.17's `kWifiDevSlots` 64 -> 96 (+2,048 B) and the `BleDev` repack
+56 -> 48 B (-384 B); the C-series features (`probeSeen`, `probeQ`, `evtQ`, prefs) add about +1 kB.
+
 ## 17. Station-to-BSS association (1.5.4, ported to the module layout in 1.5.5)
 
 Every station row can now say which BSS it is on. This is what makes the targeted deauth (`dca`) usable from

@@ -33,7 +33,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
   differs per radio). New mode = extend `BandMode`, `kBandName[]`, `chanEnabled()`, `setBandMode()`,
   LCD pages, `sendHello`'s `chs`, dashboard buttons (checklist in DEVELOPER §6).
 - **RAM is the constraint.** No PSRAM; statics and heap share ~320 kB DRAM. Static usage: v1.10 was
-  **80,544 B** (over the round "well under ~80 kB" line, CLAUDE.md rule 4); the v1.11 reclaim pass (smaller
+  **80,544 B** (+952 B since 1.5.5, ~95% of it spectrum mode, not the splash - DEVELOPER §16; over the round "well under ~80 kB" line, CLAUDE.md rule 4); the v1.11 reclaim pass (smaller
   LVGL buffer + the `DevRef` listing path replacing the 4 kB `DevSnap` copy) brought it to 74,480 B,
   v1.15.4 to 74,032 B; v1.17's 96-slot Wi-Fi table took it to 76,816 B and v1.18 (C4 event log + SD presence
   probe + LCD card faces) to 77,272 B, and v1.19's LED alerts to **77,392 B** (measured from the build; `tests/firmware` gates it at 77,800 B).

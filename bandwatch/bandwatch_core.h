@@ -219,18 +219,23 @@ struct CapFrame {
 };
 
 // Hunt target, tracked from all three radios. mac = 6-byte MAC (Wi-Fi/BLE); key = 802.15.4 key
-// (extended address or 0xFF 0xFE pan-short marker form). kind: 0 = MAC, 1 = 802.15.4 key.
+// (extended address or 0xFF 0xFE pan-short marker form). kind: 0 = MAC, 1 = 802.15.4 key, 2 = SSID (C7).
+// An SSID hunt keeps the name in label (it is the label) - no extra RAM, and label is only rewritten when
+// kind changes under g_devMux, so the RX callback can compare against it. For kind 2, mac/ch are the
+// strongest matching AP heard recently (noteHuntSsidHit), and rssi/lastMs are that AP's.
 struct Hunt {
     uint8_t mac[6] = {};
     uint8_t key[8] = {};
     uint8_t kind = 0;
     volatile bool active = false;
     volatile int8_t rssi = -127;
+    volatile uint8_t ch = 0;      // kind 2: channel the strongest matching beacon was last heard on (sits in padding)
     volatile uint32_t lastMs = 0;
     volatile uint32_t count = 0;
     char label[33] = "";
     bool parked = false;
 };
+static_assert(sizeof(Hunt) == 64, "Hunt grew: the SSID hunt (C7) was meant to fit in its padding");
 
 // Deauth attack: spoof a BSSID and broadcast deauth/disassoc frames until stopped, so every station on that
 // network drops (they usually reconnect — with capture running you can grab the EAPOL handshakes).
@@ -507,7 +512,21 @@ void huntIdText(char* out, size_t n);   // "aa:bb:.." (MAC) or extended 15.4 key
 void lookupHuntLabel();                 // best-effort name/pan for the LCD + serial; empty if nothing seen yet
 void startHunt(const uint8_t* mac, int ch);
 void startHunt154(const uint8_t* key);
+void startHuntSsid(const char* name);   // C7: name is 1..32 bytes, already sanitized like a beacon SSID
 void stopHunt();
+// C7 SSID hunt. huntSsidEq: exact, case-sensitive; an empty SSID never matches. noteHuntSsidHit: caller holds
+// g_devMux and has matched a beacon/probe response. serviceHuntSsid: loop task, derives the park.
+inline bool IRAM_ATTR huntSsidEq(const char* a, const char* b) {
+    if (!a[0]) return false;
+    for (; *a && *a == *b; a++, b++) {}
+    return *a == *b;
+}
+constexpr uint32_t kHuntSsidFreshMs = 15000;   // a matching AP silent this long loses "strongest" (> one "both" sweep)
+constexpr uint32_t kHuntSsidRescanMs = 30000;  // while parked, hop one full sweep this often so a stronger AP can win
+constexpr uint32_t kHuntSsidLostMs = 5000;     // parked and the followed AP silent this long: rescan at once
+void IRAM_ATTR noteHuntSsidHit(const uint8_t* mac, int8_t rssi, uint32_t now);
+int huntSsidScan(uint32_t freshMs, uint32_t sinceMs, uint8_t* bestCh);   // matching APs in the table; strongest's ch
+void serviceHuntSsid();
 
 // Host protocol (host_proto.cpp).
 void sendHello();

@@ -107,6 +107,10 @@
   .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 9px; }
   .toolbar input[type=search] { flex: 1; min-width: 170px; width: auto; padding: 5px 9px; font-size: 13px; }
   .toolbar label { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+  .huntname { display: inline-flex; gap: 6px; align-items: center; }
+  .huntname input { width: 170px; padding: 5px 9px; font-size: 13px; }
+  .huntaps { margin-top: 6px; font-size: 12.5px; line-height: 1.6; font-variant-numeric: tabular-nums; }
+  .huntaps .best { font-weight: 650; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
   th, td { text-align: right; padding: 5px 8px; border-bottom: 1px solid var(--grid); vertical-align: middle; }
@@ -322,6 +326,7 @@
         </div>
         <div class="act-mid">
           <div class="meta" id="huntMeta"></div>
+          <div class="huntaps" id="huntAps" hidden></div>
           <svg id="huntTrend" viewBox="0 0 420 96" style="max-width:440px;margin-top:10px"></svg>
         </div>
         <button class="small stop" id="huntStop">Stop hunting</button>
@@ -411,6 +416,10 @@
             <label class="note"><input type="checkbox" id="survOnly"> surveillance only</label>
             <label class="note"><input type="checkbox" id="wifiApOnly"> access points only</label>
             <label class="note"><input type="checkbox" id="wifiActive" checked> seen in last 60 s</label>
+            <span class="huntname" title="Hunt every AP beaconing this exact network name (case-sensitive, 1-32 bytes)">
+              <input type="text" id="huntSsidIn" placeholder="network name to hunt" maxlength="32" spellcheck="false" autocomplete="off">
+              <button class="small" id="huntSsidGo">Hunt name</button>
+            </span>
             <span class="note dim push" id="wifiNote"></span>
             <button class="small" data-csv="wifi" title="Download the rows shown now as CSV (respects the filter, the checkboxes and the sort)">CSV</button>
           </div>
@@ -782,6 +791,17 @@
   for (const [id, t] of [['wifiApOnly', 'wifi'], ['survOnly', 'wifi'], ['wifiActive', 'wifi'], ['bleActive', 'ble'], ['zigActive', 'zig']]) $('#' + id).addEventListener('change', () => renderTableNow(t));
 
   document.addEventListener('click', (e) => { const b = e.target.closest('button[data-hunt]'); if (b) post({ cmd: 'hunt', mac: b.dataset.hunt, ch: b.dataset.ch ? +b.dataset.ch : null }); });
+  // C7: hunt by network name - from an AP row's "Hunt name" or the box in the Wi-Fi toolbar. The name goes as typed
+  // (exact, case-sensitive); the host refuses what cannot be an SSID, and post() toasts that refusal.
+  function huntSsid(name) {
+    if (!name) return post({ cmd: 'huntssid', ssid: null });
+    if (new TextEncoder().encode(name).length > 32) { toast('Name too long', 'an SSID is at most 32 bytes', 'warn'); return; }
+    toast('Hunting a network name', `“${name}” - every AP beaconing it; the device parks on the strongest`);
+    return post({ cmd: 'huntssid', ssid: name });
+  }
+  document.addEventListener('click', (e) => { const b = e.target.closest('button[data-huntssid]'); if (b) huntSsid(b.dataset.huntssid); });
+  $('#huntSsidGo').addEventListener('click', () => { const v = $('#huntSsidIn').value; if (v) huntSsid(v); });
+  $('#huntSsidIn').addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.value) { e.preventDefault(); huntSsid(e.target.value); } });
   // "Scan 2.4 GHz" from any mode: latch every scan button until the device reports spec mode (poll is 1 Hz).
   document.addEventListener('click', (e) => {
     if (!e.target.closest('[data-startspec]') || pending.spec) return;
@@ -1169,8 +1189,21 @@
     const live = h.rssi != null && h.age_ms != null && h.age_ms < 5000;
     $('#huntNum').textContent = live ? fmt(h.rssi) : '–';
     $('#huntMeter').style.width = (live ? pct(h.rssi) : 0) + '%';
-    $('#huntMeta').innerHTML = `<b>${esc(h.label || '(no name)')}</b> <span class="mono">${esc(h.mac)}</span><br>` +
-      `[${esc([h.vendor, h.kind].filter(Boolean).join(' · ') || 'unknown kind')}] ${h.age_ms == null ? 'not seen yet' : `seen ${h.age_ms < 1000 ? 'just now' : (h.age_ms / 1000).toFixed(1) + ' s ago'} · ${fmt(h.count)} hits`}`;
+    const seenTxt = h.age_ms == null ? 'not seen yet' : `seen ${h.age_ms < 1000 ? 'just now' : (h.age_ms / 1000).toFixed(1) + ' s ago'} · ${fmt(h.count)} hits`;
+    const aps = h.ssid ? (h.aps || []) : null;
+    $('#huntAps').hidden = !aps;
+    if (aps) {
+      // C7 SSID hunt: the number is the strongest matching AP heard recently; list every AP carrying the name.
+      $('#huntMeta').innerHTML = `<b>“${esc(h.ssid)}”</b> <span class="sub">network name · ${aps.length} AP${aps.length === 1 ? '' : 's'} in the table</span><br>` +
+        `${seenTxt}${h.mac ? ` · loudest <span class="mono">${esc(h.mac)}</span>${h.vendor ? ' ' + esc(h.vendor) : ''}` : ''}`;
+      $('#huntAps').innerHTML = aps.length
+        ? aps.slice(0, 12).map(a => `<div class="${a.mac === h.mac ? 'best' : ''}"><span class="mono">${esc(a.mac)}</span> · ch ${a.ch ? esc(a.ch) : '–'} · ${a.rssi == null ? '–' : fmt(a.rssi) + ' dBm'} · ${ago(a.age)}${a.vendor ? ` · <span class="sub">${esc(a.vendor)}</span>` : ''}</div>`).join('') +
+          (aps.length > 12 ? `<div class="sub">+${aps.length - 12} more in the Wi-Fi table</div>` : '')
+        : '<span class="sub">No AP with this exact name heard yet (names are case-sensitive; hidden SSIDs never match).</span>';
+    } else {
+      $('#huntMeta').innerHTML = `<b>${esc(h.label || '(no name)')}</b> <span class="mono">${esc(h.mac)}</span><br>` +
+        `[${esc([h.vendor, h.kind].filter(Boolean).join(' · ') || 'unknown kind')}] ${seenTxt}`;
+    }
     const pts = (h.hist || []).filter(p => p[1] != null), W = 420, H = 96, padL = 30, padR = 10, padT = 8, padB = 16;
     if (pts.length < 2) $('#huntTrend').innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:12px">waiting for the target…</text>';
     else {
@@ -1510,7 +1543,14 @@
     const name = (ap && ap.ssid) || d.parent;
     return ` · on <span title="${esc(d.parent)}">${esc(name)}</span>`;
   }
-  function huntBtn(mac, ch, s) { const on = s.hunt && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : esc(mac)}" ${ch ? `data-ch="${esc(ch)}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
+  // An SSID hunt reports its loudest AP as .mac: that row's MAC "Hunt" must not turn into "Stop" (it has "Stop name").
+  const huntedSsid = (d, s) => !!(s.hunt && s.hunt.ssid && d.ap && d.ssid === s.hunt.ssid);
+  function huntSsidBtn(d, s) {
+    if (!d.ap || !d.ssid) return '';
+    const on = huntedSsid(d, s);
+    return ` <button class="small ${on ? 'stop' : ''}" data-huntssid="${on ? '' : esc(d.ssid)}" title="${on ? 'Stop the network-name hunt' : 'Hunt every AP beaconing this name'}">${on ? 'Stop name' : 'Hunt name'}</button>`;
+  }
+  function huntBtn(mac, ch, s) { const on = s.hunt && !s.hunt.ssid && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : esc(mac)}" ${ch ? `data-ch="${esc(ch)}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
   function deauthBtn(d, s) {
     // "Stop" belongs on whichever row the running attack is pinned to: in targeted mode the device
     // reports the client as .mac and the AP as .ap_bssid, so an AP row matches on either.
@@ -1567,8 +1607,8 @@
       <td class="l mono">${esc(d.mac)}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? esc(d.bw) + ' MHz' : ''}</td><td>${d.ch ? esc(d.ch) : '<span class="dim" title="channel unknown: seen only as a frame destination">–</span>'}</td>
       <td>${d.util != null ? esc(d.util) + ' %' : ''}</td><td>${d.stations != null && d.ap ? esc(d.stations) : ''}</td>
-      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, d.ch, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, freezeOf('wifi'));
-    for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.deauth && (s.deauth.mac === d.mac || s.deauth.ap_bssid === d.mac) ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
+      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, d.ch, s)}${huntSsidBtn(d, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, freezeOf('wifi'));
+    for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${(s.hunt && !s.hunt.ssid && s.hunt.mac === d.mac) || huntedSsid(d, s) ? 'hunted' : ''} ${s.deauth && (s.deauth.mac === d.mac || s.deauth.ap_bssid === d.mac) ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
   function renderBle(s) {

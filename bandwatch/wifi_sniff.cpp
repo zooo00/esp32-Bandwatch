@@ -176,7 +176,13 @@ void IRAM_ATTR trackWifiDevice(const uint8_t* mac, int8_t rssi, uint8_t fc0, con
         d.beacons++;
     }
     // kind == 0: a 15.4 key hunt (kind 1) must not match on a stale hunt.mac left by an earlier MAC hunt.
-    noteHuntHit(hunt.kind == 0 && macEq(hunt.mac, mac), rssi, now);
+    // kind == 2 (C7): beacons/probe responses whose stored, sanitized SSID is the hunted name; hunt.mac then
+    // tracks the strongest such AP, so it must not be read as a MAC target here.
+    if (hunt.kind == 2) {
+        if (isBeacon && hunt.active && huntSsidEq(d.ssid, hunt.label)) noteHuntSsidHit(mac, rssi, now);
+    } else {
+        noteHuntHit(hunt.kind == 0 && macEq(hunt.mac, mac), rssi, now);
+    }
     portEXIT_CRITICAL_ISR(&g_devMux);
 }
 

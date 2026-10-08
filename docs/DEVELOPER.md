@@ -85,7 +85,8 @@ file-local helpers live in an anonymous namespace.
   disabled/rejected channels, honouring `parkedIdx`; `setBandMode()` is the only place radios are swapped),
   dwell scoring (`computeBusyScore()` log-scaled pkt/s, B/s, strong ratio, unique talkers; smaller references in
   802.15.4 mode; EMA α = 0.22, `globalActivityMax()`, `sortTop3()`), device-table snapshots (copy under lock,
-  sort outside), hunt orchestration (`startHunt/stopHunt/lookupHuntLabel`), and the entry points —
+  sort outside), hunt orchestration (`startHunt/startHuntSsid/stopHunt/lookupHuntLabel`, and `serviceHuntSsid()`,
+  the SSID hunt's park, §23), and the entry points —
   `Bandwatch_Init()` (called from `Lvgl_Init` in `LVGL_Driver.cpp`) and `Bandwatch_Loop()` (from `loop()`):
   serial commands, button, capture drain, BLE cycle, periodic device/status lines. The per-channel `ChannelState`,
   the shared `Accum` written by the RX paths under `g_accumMux`, and the mode flags live here too.
@@ -147,7 +148,7 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `spec_step` (fine-spectrum step in MHz), `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21), `pt` (C5 patrol, 1.20: `null` when idle, else `{leg, left, cyc, legs}` — see the `pt` row) |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `spec_step` (fine-spectrum step in MHz), `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21); for an SSID hunt the escaped name, followed by `ssid` with the same name — C7, v1.20, §23, `pt` (C5 patrol, 1.20: `null` when idle, else `{leg, left, cyc, legs}` — see the `pt` row) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes, **in chunks of ≤24 rows** (v1.17; loudest first, each chunk a complete line; the host merges by MAC, so a chunk dropped for TX room just waits a cycle) | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv, apSuffix]`; `apSuffix` = last 3 bytes of the BSSID this device was heard associated with, lower-case hex, `""` if never seen on a BSS (§17); flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
@@ -166,7 +167,11 @@ Device → host, one JSON object per line unless noted:
 Host → device commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>` / `park 0`, `cap 1|0`, `snap <32..1600>`,
 `hunt <mac> [ch]` / `hunt <ext addr>` / `hunt <pan>/<short>` / `hunt 0` (the 8-byte 802.15.4 extended address
 works since v1.19.3: `parseMac` used to accept its first 6 bytes as a Wi‑Fi MAC; a key hunt parks only in 802.15.4
-mode),
+mode; ack `{"t":"ack","cmd":"hunt","hunt":"<id>"|null,"park":N}`),
+`huntssid <name>` / `huntssid 0` (C7, v1.20, §23: hunt every AP beaconing that exact name - the rest of the line,
+spaces included, 1..32 bytes, case-sensitive; acked with the hunt ack plus `"ssid"`:
+`{"t":"ack","cmd":"hunt","hunt":"<name>","ssid":"<name>","park":N}`, both JSON-escaped; a longer name is
+`{"t":"err","msg":"huntssid: name longer than 32 bytes"}` and leaves the running hunt alone),
 `deauth <bssid>` (Wi‑Fi modes only — broadcast deauth to all clients of that AP; stops itself after `kDeauthMaxMs`,
 5 min) / `deauth 0`, 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one specific station — both MACs colon-separated, the
@@ -222,12 +227,16 @@ HTTP API:
 
 - `GET /api/state` — everything, JSON. Wi‑Fi rows with `dest_only` (tier 1, seen only as a frame destination,
   §15) carry `rssi`/`max` as `null` since v1.19.3: the device has no RSSI of their own (the frame's RSSI is the
-  sender's), and the dashboard shows "–" for them.
+  sender's), and the dashboard shows "–" for them. During an SSID hunt (C7, §23) `hunt` also carries `ssid` and
+  `aps` (every AP in the table beaconing that name, loudest first: `mac`, `ch`, `rssi`, `age`, `vendor`), and its
+  `mac` is the loudest one heard in the last 60 s (`""` if none).
 - `GET /api/screen` (mirror status) and `GET /screen.bin` (raw RGB565-LE framebuffer, 172×320; §19).
 - `GET /file?name=<basename>` — a file in `--captures` (an `sdread` pull or a host pcap) as a download; plain
   basenames only, anything else is 404.
 - `POST /api/cmd` — a JSON object `{"cmd": ..., ...}`. Commands: `band` (`value` 5g|2.4g|both|ble|154|spec),
   `specstep` (`value` 1|2|5), `park` (`value` = channel, 0 = hop), `capture` (truthy `value` starts, optional `snaplen`), `hunt` (`mac` = any hunt id, `ch`),
+  `huntssid` (`ssid` = a network name, 1..32 bytes of UTF-8, no control characters, not `"0"` - anything else is
+  400; null/empty stops; sent unstripped, since an SSID may end in a space; C7, §23),
   `deauth` (`mac` = the AP's BSSID, empty stops; broadcast to every client of that AP), `dca` (`client_mac`, `ap_bssid`; one station), and the
   on/off switches `sdcap`, `events`, `alerts`, `mirror`, `addr1` (truthy `value`), plus `ledtest` (`value` surv|new|join), `page` (`value` next|prev), `blescan`
   (`value` passive|active|auto), `sdinfo`, `sdls`, `sdread` / `sdrm` (`path`, a card-root name checked by
@@ -1323,3 +1332,51 @@ line is <= 139 B every 2 s, through `sendLinef()` (dropped whole when the TX buf
 `patrol both:5,ble:5` and watch `hello` lines alternate `both`/`ble` with `pt.leg` 0/1 and `pt.cyc` counting up, and
 `{"t":"pt"}` every 2 s in BLE too (`tests/device` T13). Free heap before/after each hand-off should stay within a few
 hundred bytes (testing checklist 7). The LCD header counts the leg down. Not yet run on the board.
+
+## 23. Hunt by SSID (C7, v1.20)
+
+`huntssid <name>` hunts a network name instead of a MAC: "where is my mesh node" without knowing its BSSID. It is a
+third hunt kind (`Hunt.kind` 2) beside MAC (0) and 802.15.4 key (1); one hunt runs at a time, and starting any hunt
+replaces the running one (and releases a park the old one held).
+
+**Matching.** The name is the rest of the command line, spaces included, 1..32 bytes. It goes through the same
+`sanitizeText()` as an SSID off the air, then is compared exactly and case-sensitively (`huntSsidEq`) with the SSID
+stored in the Wi-Fi table, in `trackWifiDevice()`, for **beacons and probe responses only** - an AP's data frames
+and every client are ignored. An empty SSID (hidden network) never matches. `huntssid 0` stops, so a network
+literally named `0` cannot be hunted; the host refuses that name (400) rather than send a stop.
+
+**RAM.** No new static buffer: the name lives in `hunt.label` (33 B, already there for the LCD), which is only
+rewritten when `kind` changes under `g_devMux`, so the RX callback can read it. The best AP's channel sits in the
+struct's padding (`static_assert(sizeof(Hunt) == 64)`). The park state machine adds a few loop-task bytes:
+77,184 -> 77,192 B static.
+
+**The reading.** Several APs can share a name (mesh, extenders, 2.4 + 5 GHz radios). `noteHuntSsidHit()` keeps
+`hunt.mac/ch/rssi/lastMs` on the strongest matching AP heard recently: the current one keeps the reading while it
+is heard, a louder one takes it over at once, a quieter one only after the current one has been silent for
+`kHuntSsidFreshMs` (15 s, longer than one `both` sweep). Every matching frame counts as a hit. The serial `h`
+status (`[rssi, age_ms, hits]`) is unchanged, so old hosts keep working; the dashboard lists every matching AP
+from the device table it already has (no extra protocol).
+
+**The park (`serviceHuntSsid()`, loop task).** A MAC hunt parks only when given a channel; an SSID hunt derives it:
+- On start, if the table already holds a matching AP, park on the strongest one's channel (last writer wins, like
+  `hunt <mac> <ch>`). Otherwise keep hopping and park as soon as one is heard (SEEK).
+- While parked only that channel is heard, so every `kHuntSsidRescanMs` (30 s), or as soon as the followed AP has
+  been silent for `kHuntSsidLostMs` (5 s), the hunt releases the park for one full sweep
+  (`(enabledCount() + 2) x dwell`) and re-parks on the strongest AP heard during it. That is how the park follows
+  you from one AP to another on a different channel; it costs a few seconds of hopping per rescan.
+- Someone else parking elsewhere (`park <ch>`, a deauth) takes the park for the rest of the hunt (YIELD); an unpark
+  (`park 0`, a band change that disabled the channel) sends it back to SEEK, which re-derives the park. While a
+  deauth runs the hunt never moves the park (that attack is pinned to its channel).
+
+**Wire format.** The hunt ack and `hello` keep their shape; an SSID hunt puts the escaped name in `hunt` and adds
+`"ssid"` with the same name. Both are budgeted with `jsonStrLen()` (rule 6): the ack goes through `sendLinef()`
+(2 x 66 B worst case), `hello` adds the measured excess over its 25-byte hunt id to its room check.
+
+**LCD.** PAGE_HUNT shows the name as the label, wrapped to two lines and then cut with "...": the label is 160 px
+wide, a typical 32-char SSID measures 255-275 px at Montserrat 14 (fits two lines), and only extreme names
+(32 x `W` = 504 px) lose their tail. The line above it reads `N APs  best ch X` (or `N APs known` before the first
+hit). The Montserrat fonts are ASCII-only, so non-ASCII bytes in a name still render as boxes.
+
+**Verify on hardware.** Two APs with one SSID on different channels: walk between them; the reading and the park
+should follow the stronger (allow one rescan, up to ~35 s). A name that matches nothing: zero hits, hopping, no
+crash. `park 6` during the hunt: the hunt leaves the park alone from then on.

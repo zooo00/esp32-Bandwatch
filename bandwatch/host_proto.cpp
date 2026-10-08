@@ -414,7 +414,8 @@ void sendBleStatus() {
                   captureEnabled ? 1 : 0, static_cast<unsigned long>(capDropped),
                   sd.capEnabled ? 1 : 0, static_cast<unsigned long>(sd.frames),
                   static_cast<unsigned long>(sd.bytes));
-    printHunt();
+    printHunt();   // the format string's trailing comma leads into it; neither writes one out, so separate by hand
+    Serial.print(",");
     printBleKick();
     Serial.print("}\n");
 }

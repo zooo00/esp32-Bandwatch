@@ -1504,4 +1504,6 @@ shared with deauth.
 **Open questions (honest failure modes).** A victim busy while paired *refuses* new peers: `kicks=0`, `fails` climbs —
 that is the signal, not a bug; v2 adds parallel attempts or an L2CAP echo flood. Resolvable-private addresses fail to
 connect (no IRK held) -> also honest `fails`; static random and public work. The passive raw-terminate family defeats
-busy-refuse outright at the cost of a coprocessor board (`tools/witness` pattern).
+busy-refuse outright at the cost of a coprocessor board (`tools/witness` pattern). First beach run: every attempt came
+back synchronously with rc=15 (CONN_REJ_BD_ADDR) while our discovery ran — counted as fails, retried after the full gap;
+if a willing victim still never connects, pause the scan during attempts.

@@ -17,6 +17,8 @@ Connection"), evicting or stuttering single-connection-slot peripherals like a b
 - **Patrol parity.** Refused mid-patrol like hunt/deauth (a hand-off would stop it every leg), and patrol refuses to
   start over a running kick ("stop kick first").
 - Static RAM 77,288 -> 77,312 B (+24).
+- First beach run found the GAP layer refusing at the door (rc=15 straight back from `ble_gap_connect()`, while our
+  discovery runs): those now count as `fails` and retry after the full gap instead of every tick.
 
 ## v1.20.1
 

@@ -136,8 +136,17 @@ void serviceBleKick() {
             bleKick.st = 1;   // connecting; the CONNECT callback resolves it to won or failed
             bleKick.stateMs = now;
             portEXIT_CRITICAL(&g_devMux);
-        } else if (serialRoom(80)) {
-            Serial.printf("{\"t\":\"log\",\"msg\":\"blekick connect refused rc=%d\"}\n", rc);
+        } else {
+            // Refused at the door: this port can hand back rc=15 (CONN_REJ_BD_ADDR) straight from the call while our
+            // discovery runs. Count it like a failed attempt and park stateMs, so we retry after the full gap instead
+            // of every ~120 ms tick. The st==0 guard keeps a CONNECT landing mid-way out of double-counting.
+            portENTER_CRITICAL(&g_devMux);
+            if (bleKick.st == 0) { bleKick.fails = bleKick.fails + 1; bleKick.stateMs = now; }
+            const uint32_t n = bleKick.fails;
+            portEXIT_CRITICAL(&g_devMux);
+            if ((n == 1 || (n & 15u) == 0) && serialRoom(96))   // first refusal plus every 16th, like the callback path
+                Serial.printf("{\"t\":\"log\",\"msg\":\"blekick connect refused rc=%d (%lu total)\"}\n",
+                              rc, static_cast<unsigned long>(n));
         }
     } else if (st == 2 && now - stateMs >= kBleKickHoldMs) {
         // Held a won connection long enough: drop it. ENOTCONN = the peer went first; the DISCONNECT event then

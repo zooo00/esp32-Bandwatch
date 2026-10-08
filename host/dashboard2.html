@@ -1588,10 +1588,10 @@
   }
   function huntBtn(mac, ch, s) { const on = s.hunt && !s.hunt.ssid && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : esc(mac)}" ${ch ? `data-ch="${esc(ch)}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
   function kickBtn(d, s) {
-    const on = !!(s.blekick && s.blekick.mac === d.mac);
+    const b = s.blekick, on = !!(b && b.mac === d.mac);
     return pending.bk
       ? `<button class="small" disabled>…</button>`
-      : `<button class="small ${on ? 'stop' : ''}" data-bkick="${on ? '' : esc(d.mac)}" title="${on ? `Stop — ${s.blekick.kicks} kick${s.blekick.kicks === 1 ? '' : 's'} so far` : 'Connect, hold, disconnect — repeat (the BLE deauth)'}">${on ? 'Stop' : 'Kick'}</button>`;
+      : `<button class="small ${on ? 'stop' : ''}" data-bkick="${on ? '' : esc(d.mac)}" title="${on ? `Stop — ${b.kicks} kick${b.kicks === 1 ? '' : 's'} so far${b.fails ? `, ${b.fails} refused` : ''}` : 'Connect, hold, disconnect — repeat (the BLE deauth)'}">${on ? 'Stop' : 'Kick'}</button>`;
   }
   function deauthBtn(d, s) {
     // "Stop" belongs on whichever row the running attack is pinned to: in targeted mode the device

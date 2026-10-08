@@ -3,6 +3,32 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.20.0
+
+Features C5, C7, C11 and the seen.csv device register; the B4 USB stall found and fixed. Flashed and tested on the
+board: device suite 32/32 (`tests/device/RESULTS.md`), host 137, firmware build. Static RAM 77,184 -> 77,288 B.
+
+- **Patrol mode (C5).** `patrol 1` walks spec 30 s -> both 40 s -> ble 20 s; `patrol <mode>:<sec>,...` sets 2-6 legs
+  of 5-600 s; `patrol 0` stops. Hand-offs on a dwell boundary. Refused while a capture, hunt or deauth runs, and those
+  are refused while it walks; any `band` stops it; never persisted. Status `pt` in hello and `{"t":"pt"}` every 2 s,
+  LCD header `patrol BOTH 23s`, dashboard Patrol block. The serial command line grew 48 -> 64 B and an over-long line
+  is now refused instead of cut. DEVELOPER §22.
+- **Hunt by SSID (C7).** `huntssid <name>` / `huntssid 0`: exact, case-sensitive match on beacon SSIDs; follows the
+  strongest AP with that name and parks on its channel, re-sweeping every 30 s (or after 5 s silent) to follow you
+  to another AP. Dashboard "Hunt name" buttons and name box; the hunt bar lists every matching AP. DEVELOPER §23.
+- **CSV export (C11).** A CSV button on the Wi-Fi, BLE, Zigbee and probe tables exports the rows shown (filter and
+  sort respected), with RSSI min/avg/max over the sparkline history; RFC 4180, UTF-8 BOM, formula-injection guarded.
+- **seen.csv device register.** `/seen.csv` rows are now `mac,type,label,first_seen,last_seen,sessions` (fixed
+  83 B, rewritten in place; v1 files convert on attach). Rotation keeps the 2048 with the newest last_seen.
+  `seengen <n>|0` diagnostic. Measured: 5000 -> 2048 in 582 ms, whole attach 1,312 ms (BACKLOG V5 done).
+- **B4 fixed: USB serial output could stop for good** while the board kept running and receiving. Cause: the core's
+  HWCDC driver loses its TX interrupt if it lands while the IN FIFO is not writable. `serviceSerialTx()` flushes the
+  FIFO and re-arms the interrupt after 1 s without progress; `txk` in hello counts recoveries; `txkick` by hand.
+  The device suite stalled once without it and recovered twice on its own with it.
+- **Docs.** Deauth confirmed working on real stations (owner, own network). V4 closed on observation; the D4 choice
+  recorded (pending MACs dropped on a `seen.csv` delete). Open: I6 (needs a power meter), V6 (LED on real hits),
+  V7 (patrol heap per hand-off and a long run).
+
 ## v1.19.5
 
 Tooling only; firmware changes only `kVersion`.

@@ -705,6 +705,7 @@ void Bandwatch_Init(void) {
 void Bandwatch_Loop(void) {
     static uint32_t lastDevMs = 0, bleStatusMs = 0;
     pollSerial();
+    serviceSerialTx();   // B4: kick a stalled USB TX path back to life
     pollButton();
     serviceMirror();     // paces the live LCD-mirror full refresh (no-op unless mirror is on)
     serviceSdRead();

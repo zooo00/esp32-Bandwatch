@@ -8,7 +8,7 @@
 
 void setup()
 {
-  Serial.setTxBufferSize(8192);   // room for a burst of captured frames (each line checks for space first)
+  Serial.setTxBufferSize(8192);   // = kSerialTxBuf: room for a burst of captured frames (each line checks for space first)
   Serial.begin(115200);
   Serial.setTxTimeoutMs(0);       // never block the UI if nobody is reading the USB serial port
   LCD_Init();

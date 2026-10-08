@@ -8,6 +8,47 @@
 #include <esp_wifi.h>   // C API for the txtest branch (promiscuous on/off, channel)
 #include <SD.h>     // the sdinfo branch reports card size while mounted
 #include <stdarg.h>
+#include "hal/usb_serial_jtag_ll.h"   // B4: the TX FIFO flush + IN_EMPTY re-arm in kickSerialTx()
+
+// B4: the USB-Serial-JTAG TX path can stall for good while reception keeps working. The core's HWCDC moves bytes
+// from its ring into the 64-byte IN FIFO only from the IN_EMPTY interrupt; if that interrupt fires while the FIFO
+// is not writable, the handler just clears it, nothing is ever offered to the host again, IN_EMPTY never returns,
+// and the ring fills. HWCDC only flushes the FIFO again when it thinks the link dropped, which a live link never
+// does - so output stopped until RESET (seen twice, both right after heavy capture output). kickSerialTx() does
+// what that recovery would: flush the FIFO and re-arm IN_EMPTY. g_txRecoveries counts kicks after which the ring
+// started draining again ("txk" in hello), so a kick with no host reading is harmless and not counted.
+namespace {
+uint32_t g_txRecoveries = 0;
+portMUX_TYPE txKickMux = portMUX_INITIALIZER_UNLOCKED;
+void kickSerialTx() {
+    portENTER_CRITICAL(&txKickMux);   // single core: also keeps the HWCDC ISR out of the INT_ENA read-modify-write
+    usb_serial_jtag_ll_txfifo_flush();
+    usb_serial_jtag_ll_ena_intr_mask(USB_SERIAL_JTAG_INTR_SERIAL_IN_EMPTY);
+    portEXIT_CRITICAL(&txKickMux);
+}
+} // namespace
+
+// Called every loop. "Stalled" = data queued in the ring (free space below the whole buffer) and the free space has
+// not grown for kTxStallMs: a host that reads frees space within milliseconds. Kicks at most every kTxKickGapMs.
+void serviceSerialTx() {
+    constexpr uint32_t kTxStallMs = 1000, kTxKickGapMs = 2000;
+    static int lastFree = kSerialTxBuf;
+    static uint32_t okSince = 0, kickedAt = 0;
+    static bool report = false;
+    const uint32_t now = millis();
+    const int fr = Serial.availableForWrite();   // 0 also when the TX lock is busy for a moment: needs 1 s to count
+    if (fr > lastFree || fr >= kSerialTxBuf - 64) {
+        if (kickedAt) { g_txRecoveries++; kickedAt = 0; report = true; }
+        okSince = now;
+    } else if (now - okSince >= kTxStallMs && (!kickedAt || now - kickedAt >= kTxKickGapMs)) {
+        kickSerialTx();
+        kickedAt = now ? now : 1;
+    }
+    lastFree = fr;
+    if (report && sendLinef("{\"t\":\"log\",\"msg\":\"usb tx stalled, kick restored it (%lu)\"}\n",
+                            static_cast<unsigned long>(g_txRecoveries)))
+        report = false;
+}
 #include <string.h>
 
 bool sendLinef(const char* fmt, ...) {
@@ -223,12 +264,12 @@ void sendHello() {
     // Worst case, from the format strings below with every field at its widest: 132 B of literal text in the
     // first printf + ver/dwell/step/band (16) + the channel list (kChannelCount x 4, "165,") + the park..hunt
     // printf (119, incl. a 23-char 15.4 hunt id) + "h" (32) + a targeted "deauth" (74) + "sd" (166, incl. a 47-char
-    // path) + mir/alerts (20) + "ev" (189) + "}\n" = 750 + 152 = 902, + C5's ",\"pt\":{...}" (128, kPatrolJsonMax)
+    // path) + mir/alerts/txk (20 + 17) + "ev" (189) + "}\n" = 750 + 152 = 902, + C5's ",\"pt\":{...}" (128, kPatrolJsonMax)
     // = 1,030, plus the four esp_err_to_name() strings,
     // measured at run time because their length is the one part not bounded here. A line that passes the check
     // and then overruns is truncated mid-JSON, which is exactly what the drop-whole-lines rule exists to prevent.
     // An SSID hunt (C7) replaces the 25-byte hunt id with the escaped name twice ("hunt" and "ssid"): measured too.
-    constexpr size_t kHelloFixed = 750 + kPatrolJsonMax + kChannelCount * 4;
+    constexpr size_t kHelloFixed = 767 + kPatrolJsonMax + kChannelCount * 4;
     const size_t errLen = strlen(esp_err_to_name(errCountry)) + strlen(esp_err_to_name(errBand)) +
                           strlen(esp_err_to_name(errProto)) + strlen(esp_err_to_name(errPromisc));
     const size_t huntLen = huntJsonLen();
@@ -260,7 +301,8 @@ void sendHello() {
                   sd.capEnabled ? 1 : 0, sd.capEnabled ? sd.path : "",
                   static_cast<unsigned long>(sd.frames), static_cast<unsigned long>(sd.bytes),
                   static_cast<unsigned long>(sd.errors), epochValid ? 1 : 0);
-    Serial.printf(",\"mir\":%d,\"alerts\":%d,", g_mirror ? 1 : 0, g_ledAlerts ? 1 : 0);
+    Serial.printf(",\"mir\":%d,\"alerts\":%d,\"txk\":%lu,", g_mirror ? 1 : 0, g_ledAlerts ? 1 : 0,
+                  static_cast<unsigned long>(g_txRecoveries));
     printEvents();
     char pt[kPatrolJsonMax + 8];
     fmtPatrol(pt, sizeof(pt));
@@ -824,6 +866,11 @@ void handleCommand(char* line) {
     } else if (!strcmp(line, "page")) {
         stepPage(!strcmp(arg, "prev") ? -1 : 1);   // "next"/empty = forward, like a BOOT tap
         sendLinef("{\"t\":\"ack\",\"cmd\":\"page\",\"page\":%d}\n", currentPage);
+    } else if (!strcmp(line, "txkick")) {
+        // B4 diagnostic: the same kick serviceSerialTx() applies on its own. Reception still works during a stall,
+        // so "txkick" sent blind tests the theory: output that resumes after it was the stuck-FIFO state.
+        kickSerialTx();
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"txkick\",\"txk\":%lu}\n", static_cast<unsigned long>(g_txRecoveries));
     } else if (!strcmp(line, "reboot")) {
         sendLinef("{\"t\":\"ack\",\"cmd\":\"reboot\"}\n");
         delay(50);

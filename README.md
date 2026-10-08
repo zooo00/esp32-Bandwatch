@@ -185,7 +185,7 @@ deauth to all clients of that AP, auto‑stops after 5 min), `dca <client_mac> <
 to one specific station), `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>`, `events 0|1`,
 `alerts 0|1`, `ledtest surv|new|join`, `mirror 0|1`, `page next|prev`, `patrol 1|0` / `patrol <mode>:<sec>,…`,
 `time <epoch>`, `info`, `reboot`, and the
-diagnostics `sdprobe`, `sdface 0|1` and `seengen <n>|0`. Each is described in [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §4.
+diagnostics `sdprobe`, `sdface 0|1`, `seengen <n>|0` and `txkick`. Each is described in [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §4.
 Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
 `cap 1` afterwards.
 802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need

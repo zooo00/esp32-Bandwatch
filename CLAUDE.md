@@ -88,6 +88,11 @@ Install the push guard once per machine: `cp tools/pre-push .git/hooks/pre-push 
    included - first checks `serialRoom()` (`Serial.availableForWrite()`) against a budget built from the real
    JSON-escaped string lengths, so lines are dropped whole, never truncated (v1.19.3). A budget that
    underestimates its line truncates mid-JSON instead, so keep budgets exact when adding fields.
+   **The USB TX path can stall for good while RX keeps working** (B4): the core's HWCDC only moves the ring into
+   the 64-byte IN FIFO from the IN_EMPTY interrupt, and an IN_EMPTY that lands while the FIFO is not writable is
+   cleared and never returns. `serviceSerialTx()` (loop) flushes the FIFO and re-arms the interrupt when queued
+   output has not drained for 1 s; `txk` in hello counts the recoveries (2 in one v1.20 device-suite run). Do not
+   remove it. If output still stops, `txkick` sent blind, or `reboot` (RX works), recovers without RESET.
 7. **The prebuilt Arduino core cannot be reconfigured** (sdkconfig is fixed): BLE extended advertising is off,
    802.15.4 is on, 5 GHz Wi-Fi is on. Changing that means switching to ESP-IDF.
 8. **Do not bump the core casually.** The deauth path pokes hard-coded offsets inside the prebuilt
@@ -186,7 +191,7 @@ while the event log is armed restarts novelty; §12), `time <epoch>` (no RTC —
 the host sends this on connect; it dates the pcap records and names the files, in UTC), `events 1|0` (C4 event log
 to `/events.csv`, plus the `/seen.csv` device register: type, label, first/last seen, sessions per device; persisted;
 arms with no card; status in `{"t":"ev"}` every 5 s, §20), `sdprobe` (raw CMD0 R1 of
-the presence probe; -1 while the card is mounted/busy), `sdface 0|1` (show the card-out/card-in LCD face),
+the presence probe; -1 while the card is mounted/busy), `sdface 0|1` (show the card-out/card-in LCD face), `txkick` (B4: un-stall the USB TX path by hand),
 `seengen <1..10000>` (diagnostic: replace `/seen.csv` with synthetic rows, the real one parked in `/seen.bak.csv`, so the
 next attach rotates and logs its time - BACKLOG V5) | `seengen 0` (put the real register back).
 LED: `alerts 1|0` (alert blips on the LED - surveillance hit orange double, Zigbee permit-join purple double, new device

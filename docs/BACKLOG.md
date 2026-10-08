@@ -10,7 +10,7 @@ Every item has a **Done when** line, and wherever possible a test to add, so wor
 Priority: **P1** wrong or misleading behaviour today · **P2** gap a user will notice · **P3** improvement / decision.
 Type: bug · verify (built, not proven on hardware) · decision (needs a call before code) · feature.
 
-State as of **v1.19.5** (2026-10-07). Finished items move to **Done** at the end, with the evidence.
+State as of **v1.20.0** (2026-10-08). Finished items move to **Done** at the end, with the evidence.
 
 ---
 
@@ -26,19 +26,8 @@ None open (B4 closed in v1.20, see Done).
   counts down, the channel views collapse/return like a manual mode click, the LCD header reads `patrol SPEC 12s`.
 - Free heap from the `s`/`ble`/`fs` lines before and after each hand-off stays within a few hundred bytes (no leak per
   cycle); leave it walking ~30 min with `events 1` and check `T99`-style no reboot.
-- **Done when:** T13 passes on the board and the heap numbers per hand-off are in DEVELOPER §22.
-
-### V5 · `/seen.csv` rotation time on hardware — P3, verify
-- Now with the v2 device register (83 B rows, so the file at the threshold is ~340 KB, not ~74 KB) and a `seengen`
-  diagnostic that makes the file: `events 0`, `seengen 5000` (parks the real register in `/seen.bak.csv`), `events 1`.
-  Expect `{"t":"log","msg":"seen.csv rotated: 5000 -> 2048 in R ms (attach A ms)"}` before the ack and `ev.file` 2048.
-  R is the copy, A the whole attach - the loop task is busy for A (LCD and hopping pause). Pull `seen.csv` /
-  `seen.old.csv` and check: 2048 rows with the largest `last`, header first, every row 83 B. Then `events 0`,
-  `seengen 0` to put the real register back. `T14SeenGen` in `tests/device` runs this sequence and prints R and A.
-  Also worth one look on the board: a v1 `seen.csv` converts on attach (`seen.csv converted to v2: ...`), and a known
-  device's row gets `last`/`sessions` rewritten in place within ~5 min (`kRegisterMs`) or at `events 0`.
-- **Done when:** R and A are in DEVELOPER §20; if A is more than ~1 s, consider rotating in chunks across loops
-  (the register pass already runs in 8 ms slices).
+- T13Patrol passed on the board (v1.20.0, 2026-10-08, 32/32 run).
+- **Done when:** the heap numbers per hand-off are in DEVELOPER §22 and a ~30 min `patrol 1` run shows no reboot.
 
 ### V6 · LED alerts on real hits — P3, verify
 - `ledtest` covers the patterns. Still unseen: a real surveillance OUI in range (or a test OUI in `/surveil.csv`) and
@@ -123,7 +112,8 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 
 | Item | Version | Evidence |
 | --- | --- | --- |
-| **B4** USB serial silent after the device suite | v1.20 | Not reproduced on v1.19.5 (2026-10-08): full device suite passed, then five fresh opens from new processes all got hello, uptime continuous (1529 -> 1545 s, no reset). Cause taken as a second program reading the port: the host (v1.19.1), `tests/device` and `tools/smoke.py` now open it exclusively, so a second reader is refused with "could not exclusively lock" instead of splitting the bytes. Recovery: find and stop the other reader; RESET only if none |
+| **V5** `/seen.csv` rotation time | v1.20 | `seengen 5000` 522 ms; rotation 5000 -> 2048 **582 ms**, whole attach **1,312 ms** (measured v1.20.0, 2026-10-08, `T14SeenGen`); 2048 kept, header and 83 B rows (the test checks them). ~1.3 s loop pause once per rotation: no chunking needed |
+| **B4** USB serial went silent (TX only) | v1.20 | Reproduced on v1.20.0 (2026-10-08) mid device suite, right after the capture tests: zero bytes out, no other program on the port (exclusive open), but the board still ran commands (`page next` and `ledtest new` visibly worked) - so RX alive, TX stalled. Cause: HWCDC moves its ring into the IN FIFO only from IN_EMPTY; one landing while the FIFO is not writable is cleared and never returns, and HWCDC only re-flushes on a link drop. Fix: `serviceSerialTx()` flushes the FIFO + re-arms IN_EMPTY after 1 s without draining (+24 B static), `txk` in hello, `txkick` by hand. Next full suite: 32/32 with `txk` = 2 (two stalls recovered). (A first close earlier the same day blamed a second reader - wrong.) |
 | **V4** card hot-pull resetting the board | v1.20 | Closed on the owner's observation (2026-10-08): pulls "seem to work fine"; the one `rst: usb` stays unexplained (likely a supply dip). README still advises pulling gently |
 | **D4 choice** pending MACs on a `seen.csv` delete | v1.20 | Decided: dropped. A deliberate delete means "start novelty over" |
 | **C11** host CSV export | v1.20 | `dashboard2.html`: a *CSV* button on the Wi-Fi, BLE, Zigbee and probe tables exports the rows shown (DEVELOPER §5). Checked with a scratch Node harness over the pure builder (hostile `=HYPERLINK` SSID, comma/quote/newline name, null-RSSI `dest_only` row, non-ASCII names, RFC 4180 round-trip) and the host tier; not yet clicked in a browser against a live board |

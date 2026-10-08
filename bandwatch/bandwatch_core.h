@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.19.5";
+constexpr const char* kVersion = "1.20.0";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -113,6 +113,7 @@ inline void putLE32(uint8_t* p, uint32_t v) { p[0] = v; p[1] = v >> 8; p[2] = v 
 // block. To avoid half-written lines when the host is slow or absent, every line checks for room first and
 // is dropped whole.
 inline bool serialRoom(size_t n) { return static_cast<size_t>(Serial.availableForWrite()) >= n; }
+constexpr int kSerialTxBuf = 8192;   // Serial.setTxBufferSize() in bandwatch.ino; serviceSerialTx() reads it
 // One complete line (the caller ends fmt with "\n"), formatted into a stack buffer first and written only when it
 // fits both that buffer and the TX buffer: an ack/err line is dropped whole, never truncated (rule 6). host_proto.cpp.
 bool sendLinef(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
@@ -538,6 +539,7 @@ void sendDwell(int idx);
 void sendBleStatus();
 void sendDevices();
 void pollSerial();
+void serviceSerialTx();   // B4: un-stalls the USB-Serial-JTAG TX path (host_proto.cpp)
 const char* bleScanModeName();
 
 // C5 patrol (bandwatch.cpp, DEVELOPER §22): walk a list of (mode, seconds) legs round-robin through setBandMode(),

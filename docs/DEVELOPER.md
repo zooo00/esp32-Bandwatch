@@ -181,7 +181,9 @@ device rejects anything else) / `dca 0`,
 `{"t":"ack","cmd":"events","ev":{...}}`, or `{"t":"err","msg":"events: not enough free heap"}` when its ~12.6 KB
 will not allocate), `sdprobe` (diagnostic: `{"t":"ack","cmd":"sdprobe","r1":N,"present":0|1}` — the raw CMD0
 reply of the presence probe; `r1` is -1 when the card is mounted or busy and the probe was not sent),
-`sdface 0|1` (diagnostic: show the card-out / card-in LCD face for 3 s without touching the card).
+`sdface 0|1` (diagnostic: show the card-out / card-in LCD face for 3 s without touching the card). `txkick`
+(1.20, diagnostic for B4: flush the USB TX FIFO and re-arm its interrupt, what `serviceSerialTx()` does on its own;
+replies `{"t":"ack","cmd":"txkick","txk":N}`). hello carries `txk`: how many times a kick got a stalled TX moving.
 `seengen <n>` (diagnostic, §20: replace `/seen.csv` with n = 1..10000 synthetic register rows, parking the real one in
 `/seen.bak.csv`; ack `{"t":"ack","cmd":"seengen","n":N,"ms":M,"ok":0|1}`; `seengen 0` restores; refusals are
 `{"t":"err","msg":"seengen: ..."}`).
@@ -1266,6 +1268,7 @@ replaces the synthetic file. `seengen 0` deletes the synthetic `/seen.csv` and `
 rows). With the log armed the new file is loaded at once (an attach); disarmed, the next `events 1` or card
 insertion is the attach. Measuring V5: `events 0`, `seengen 5000`, `events 1` -> `seen.csv rotated: 5000 -> 2048 in
 R ms (attach A ms)` before the ack, `ev.file` 2048; then `events 0`, `seengen 0` (`T14SeenGen` does exactly this).
+Measured on v1.20.0: R = 582 ms, A = 1,312 ms for 5000 rows.
 
 ### Buffering and flushing
 Rows go into a 2 KB heap buffer (~25-30 rows); overflow is counted in `drop`, not hidden. The card is **not**
@@ -1320,9 +1323,10 @@ added *after* that test, because `base` read 32 instead of about 52 — it has n
   §12). Hot-pulling the card can intermittently reset the board over USB (`rst: usb`, a hardware effect, §12).
 - Measured (v1.19): free heap at peak load with the log armed - `events 1` + `cap 1` + `sdcap 1`, `both` band, every
   LCD page - bottoms at **25,172 B** (Overview), ~0.6 kB above the 24 kB floor that `ensureCapRing()` sizes the ring
-  to keep. Not yet measured: the time a `/seen.csv` rotation takes on hardware (BACKLOG V5; `seengen`, above, makes
-  the file and the log line carries the time), and the v2 register on the board at all - the register pass, the
-  v1 conversion and `seengen` are compiled and their row logic natively tested, not yet run on hardware.
+  to keep.
+- Measured (v1.20.0): `seengen 5000` 522 ms; rotation 5000 -> 2048 **582 ms**, whole attach **1,312 ms** (measured v1.20.0, 2026-10-08, `T14SeenGen`). The loop task is busy for the
+  attach (LCD and hopping pause ~1.3 s), once per rotation, so no chunking for now. Not yet seen on the board: a
+  real v1 file converting, and a known device's row rewritten in place by the register pass.
 
 ## 21. LED alert blips (D1: 1.6.1 alerting, C4 novelty, C10 permit-join; 1.19)
 

@@ -3,6 +3,20 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.20.1
+
+Dashboard layout fixes after checking v1.20 in Chrome against the board. No firmware or protocol change (`kVersion`
+only).
+
+- Channel load over time: the line and its area break where the host got no samples for over 5 s (BLE, spectrum, a
+  patrol's non-hopping legs), with a faint shaded band and dashed edges for the hole. It used to draw a false slope
+  across it.
+- Wi-Fi toolbar in two rows: the filter (wider minimum) and the checkboxes, then the name hunt, the counts and CSV.
+  The filter box used to be squeezed to a few characters and CSV wrapped alone.
+- Wi-Fi action column: "Hunt name" is now "Name" (tooltip explains it), and the buttons sit in two groups that never
+  split, [Hunt Name] and [Deauth ⚙]. PHY may wrap once and Width never, with tighter side padding: AP rows 87 -> 68 px,
+  and the table fits its box instead of cutting the action column off.
+
 ## v1.20.0
 
 Features C5, C7, C11 and the seen.csv device register; the B4 USB stall found and fixed. Flashed and tested on the

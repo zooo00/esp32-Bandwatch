@@ -108,6 +108,16 @@
   .toolbar input[type=search] { flex: 1; min-width: 170px; width: auto; padding: 5px 9px; font-size: 13px; }
   .toolbar label { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
   .huntname { display: inline-flex; gap: 6px; align-items: center; }
+  .toolbar.sub { margin-top: -3px; }   /* the Wi-Fi card's second row: name hunt + counts + CSV */
+  .toolbar input[type=search] { min-width: 240px; }
+  .actgrp { display: inline-block; white-space: nowrap; margin: 1px 0; }   /* [Hunt Name] [Deauth ⚙] never split inside */
+  .actgrp + .actgrp { margin-left: 4px; }
+  /* The Wi-Fi table has 17 columns: PHY squeezed to "n (Wi- / Fi 4)" made AP rows 4 lines tall. PHY may wrap once
+     ("n" / "(Wi-Fi 4)"), Width never; tighter side padding pays for it, so the action column is not cut off. */
+  #wifiTbl th, #wifiTbl td { padding-left: 5px; padding-right: 5px; }
+  #wifiTbl td:nth-child(5) { min-width: 58px; }
+  #wifiTbl td:nth-child(6) { white-space: nowrap; }
+  .trend-gap { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 2 3; opacity: .5; }
   .huntname input { width: 170px; padding: 5px 9px; font-size: 13px; }
   .huntaps { margin-top: 6px; font-size: 12.5px; line-height: 1.6; font-variant-numeric: tabular-nums; }
   .huntaps .best { font-weight: 650; }
@@ -420,6 +430,8 @@
             <label class="note"><input type="checkbox" id="survOnly"> surveillance only</label>
             <label class="note"><input type="checkbox" id="wifiApOnly"> access points only</label>
             <label class="note"><input type="checkbox" id="wifiActive" checked> seen in last 60 s</label>
+          </div>
+          <div class="toolbar sub">
             <span class="huntname" title="Hunt every AP beaconing this exact network name (case-sensitive, 1-32 bytes)">
               <input type="text" id="huntSsidIn" placeholder="network name to hunt" maxlength="32" spellcheck="false" autocomplete="off">
               <button class="small" id="huntSsidGo">Hunt name</button>
@@ -1306,11 +1318,24 @@
     if (pts.length < 2) { svg.innerHTML = '<text x="50%" y="50%" text-anchor="middle" style="fill:var(--muted);font-size:12px">collecting…</text>'; return; }
     const t0 = pts[0][0], t1 = pts[pts.length - 1][0], span = Math.max(60, t1 - t0);
     const x = (t) => padL + ((t - t0) / span) * (W - padL - padR), y = (v) => padT + (H - padT - padB) - (v / 100) * (H - padT - padB);
-    const d = pts.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1)).join(' ');
+    // The host samples about once a second, but only while a sweep mode reports dwells: BLE, spectrum and a patrol's
+    // non-hopping legs leave a hole in time. Joining across it drew a false slope, so the line and the area break at
+    // any gap over TREND_GAP_S and a faint marker shows where the hole was.
+    const TREND_GAP_S = 5;
+    const brk = (i) => i === 0 || pts[i][0] - pts[i - 1][0] > TREND_GAP_S;
+    const path = (val) => pts.map((p, i) => (brk(i) ? 'M' : 'L') + x(p[0]).toFixed(1) + ',' + y(val(p)).toFixed(1)).join(' ');
+    const d = path(p => p[1]);
     // Second series: band average (p[4]); older sessions' points may lack it, so fall back to the max.
     const hasAvg = pts.some(p => p.length > 4);
-    const dAvg = pts.map((p, i) => (i ? 'L' : 'M') + x(p[0]).toFixed(1) + ',' + y(p.length > 4 ? p[4] : p[1]).toFixed(1)).join(' ');
-    const area = d + ` L${x(t1).toFixed(1)},${y(0)} L${x(t0).toFixed(1)},${y(0)} z`, last = pts[pts.length - 1];
+    const dAvg = path(p => p.length > 4 ? p[4] : p[1]);
+    const segs = []; let a = 0;
+    for (let i = 1; i <= pts.length; i++) if (i === pts.length || brk(i)) { segs.push([a, i - 1]); a = i; }
+    const area = segs.map(([i, j]) => pts.slice(i, j + 1).map((p, k) => (k ? 'L' : 'M') + x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1)).join(' ')
+      + ` L${x(pts[j][0]).toFixed(1)},${y(0)} L${x(pts[i][0]).toFixed(1)},${y(0)} z`).join(' ');
+    const gaps = segs.slice(1).map(([i]) => `<rect class="trend-gap-bg" x="${x(pts[i - 1][0]).toFixed(1)}" y="${padT}" width="${(x(pts[i][0]) - x(pts[i - 1][0])).toFixed(1)}" height="${H - padT - padB}" style="fill:var(--muted);opacity:.06"/>`
+      + `<line class="trend-gap" x1="${x(pts[i - 1][0]).toFixed(1)}" x2="${x(pts[i - 1][0]).toFixed(1)}" y1="${padT}" y2="${H - padB}"/>`
+      + `<line class="trend-gap" x1="${x(pts[i][0]).toFixed(1)}" x2="${x(pts[i][0]).toFixed(1)}" y1="${padT}" y2="${H - padB}"/>`).join('');
+    const last = pts[pts.length - 1];
     const AVG = '#f59e0b';
     svg.innerHTML = `<defs><linearGradient id="trendGrad" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stop-color="var(--series)" stop-opacity="0.30"/>
@@ -1318,7 +1343,7 @@
       <g class="grid">${[0, 50, 100].map(v => `<line x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/>`).join('')}</g>
       <g>${[0, 50, 100].map(v => `<text x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${v}</text>`).join('')}
       <text x="${padL}" y="${H - 6}">${new Date(t0 * 1000).toLocaleTimeString()}</text><text x="${W - padR}" y="${H - 6}" text-anchor="end">now</text></g>
-      <path class="area" d="${area}" style="fill:url(#trendGrad);opacity:1"/><path class="line" d="${d}"/>
+      ${gaps}<path class="area" d="${area}" style="fill:url(#trendGrad);opacity:1"/><path class="line" d="${d}"/>
       ${hasAvg ? `<path d="${dAvg}" fill="none" stroke="${AVG}" stroke-width="1.6" stroke-dasharray="4 3" opacity="0.95"/>` : ''}
       <circle class="enddot" cx="${x(last[0])}" cy="${y(last[1])}" r="4"/>
       ${hasAvg ? `<g transform="translate(${padL + 6},${padT + 4})" style="font-size:12px">
@@ -1552,7 +1577,7 @@
   function huntSsidBtn(d, s) {
     if (!d.ap || !d.ssid) return '';
     const on = huntedSsid(d, s);
-    return ` <button class="small ${on ? 'stop' : ''}" data-huntssid="${on ? '' : esc(d.ssid)}" title="${on ? 'Stop the network-name hunt' : 'Hunt every AP beaconing this name'}">${on ? 'Stop name' : 'Hunt name'}</button>`;
+    return ` <button class="small ${on ? 'stop' : ''}" data-huntssid="${on ? '' : esc(d.ssid)}" title="${on ? 'Stop the network-name hunt' : 'Hunt every AP beaconing this name'}">${on ? 'Stop name' : 'Name'}</button>`;
   }
   function huntBtn(mac, ch, s) { const on = s.hunt && !s.hunt.ssid && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : esc(mac)}" ${ch ? `data-ch="${esc(ch)}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
   function deauthBtn(d, s) {
@@ -1611,7 +1636,7 @@
       <td class="l mono">${esc(d.mac)}</td><td class="l">${esc(d.vendor)}${d.cc ? `<br><span class="sub">country ${esc(d.cc)}</span>` : ''}</td>
       <td class="l">${esc(d.sec)}</td><td class="l">${esc(d.phy)}</td><td>${d.bw ? esc(d.bw) + ' MHz' : ''}</td><td>${d.ch ? esc(d.ch) : '<span class="dim" title="channel unknown: seen only as a frame destination">–</span>'}</td>
       <td>${d.util != null ? esc(d.util) + ' %' : ''}</td><td>${d.stations != null && d.ap ? esc(d.stations) : ''}</td>
-      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, d.ch, s)}${huntSsidBtn(d, s)}${d.ap ? ' ' + deauthBtn(d, s) : ''}</td>`, freezeOf('wifi'));
+      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.frames)}</td><td>${ago(d.age)}</td><td class="l"><span class="actgrp">${huntBtn(d.mac, d.ch, s)}${huntSsidBtn(d, s)}</span>${d.ap ? '<span class="actgrp">' + deauthBtn(d, s) + '</span>' : ''}</td>`, freezeOf('wifi'));
     for (const tr of $('#wifiTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${(s.hunt && !s.hunt.ssid && s.hunt.mac === d.mac) || huntedSsid(d, s) ? 'hunted' : ''} ${s.deauth && (s.deauth.mac === d.mac || s.deauth.ap_bssid === d.mac) ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 

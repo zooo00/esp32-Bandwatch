@@ -55,7 +55,8 @@ requests. `blescan passive` keeps BLE mode fully silent.
   3. *Spectrum* (spectrum mode only): peak dBm and a bar per frequency bin across 2400–2483 MHz.
   4. *Devices* (all but spectrum): the 12 strongest Wi‑Fi transmitters (SSID or MAC tail, `*` = AP), BLE devices
      or 802.15.4 nodes seen in the last 20 s, with RSSI bars.
-  5. *Hunt* (while hunting): target RSSI, near/far bar, name, hits, channel.
+  5. *Hunt* (while hunting): target RSSI, near/far bar, name, hits, channel. For a network-name hunt
+     (`huntssid`) the name is the label, with the number of matching APs and the strongest one's channel.
   6. *System*: busiest channel details, uptime, sweeps, mode, park/capture/hunt state, radio status, free heap.
 - **RGB LED** mirrors the max busy score (green → yellow → orange → red).
 - **USB serial protocol** (JSON lines) for the host tool: live stats, band/park/capture commands, and raw
@@ -84,8 +85,9 @@ requests. `blescan passive` keeps BLE mode fully silent.
   2 s, so a change shows within about 4 s. Pull the card gently: one hot‑pull in three reset the board over USB.
 - **Host dashboard** (`host/bandwatch_host.py`, one page — see below): busy‑score chart per channel, load trend,
   spectrum views, **Wi‑Fi**, **Bluetooth LE** and **Zigbee / Thread** device tables (sortable, filterable, vendor
-  names from the IEEE OUI registry, RSSI sparklines, a *Hunt* button per row and a *Deauth* button per AP row), a hunt
-  bar with live RSSI trend and a deauth bar with a frame counter (both can show at once), mode/park/capture controls.
+  names from the IEEE OUI registry, RSSI sparklines, a *Hunt* button per row, a *Hunt name* and a *Deauth* button per AP
+  row, and a box to hunt any network name), a hunt bar with live RSSI trend (and, for a name hunt, every AP carrying
+  it) and a deauth bar with a frame counter (both can show at once), mode/park/capture controls.
   Tables freeze while the mouse is over them and there is a Pause button (space bar), so buttons stay put.
 
 ## Hardware
@@ -170,7 +172,8 @@ accordingly (fewer slots, so expect more `drop` on a very busy channel than with
 
 Serial commands (newline‑terminated, also usable from any terminal): `band 5g|2.4g|both|ble|154|spec`,
 `park <ch>|0`, `cap 0|1`, `snap <bytes>`, `specstep 1|2|5`, `blescan passive|active|auto`, `addr1 0|1`,
-`hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi modes only — broadcast
+`hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `huntssid <name>` / `huntssid 0` (hunt a network name: every AP
+beaconing it, exact and case-sensitive; the device parks on the strongest), `deauth <bssid>` / `deauth 0` (Wi‑Fi modes only — broadcast
 deauth to all clients of that AP, auto‑stops after 5 min), `dca <client_mac> <ap_bssid>` / `dca 0` (targeted deauth
 to one specific station), `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>`, `events 0|1`,
 `alerts 0|1`, `ledtest surv|new|join`, `mirror 0|1`, `page next|prev`, `time <epoch>`, `info`, `reboot`, and the

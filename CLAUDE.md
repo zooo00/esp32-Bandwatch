@@ -170,7 +170,8 @@ runs the hardware tier against a live board (stop the host tool first). `python3
 ~15 s read-only check for right after a flash (hello, version = `kVersion`, heap, radio reporting, card readable;
 sends only `info`/`sdinfo`/`sdls`).
 Everything is observable over serial. From Python: open the port (DTR/RTS asserted), send `info`, read JSON
-lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
+lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`, `hunt <id> [ch]`, `huntssid <name>|0` (hunt every AP beaconing that exact name, 1..32 bytes,
+case-sensitive; the park follows the strongest; §22), `deauth <bssid>|0` (Wi‑Fi modes only, broadcast deauth), 
 `dca <client_mac> <ap_bssid>` (targeted deauth to one station; both MACs must be colon-separated) | `dca 0`,
 `snap <32..1600>` (capture snap length), `addr1 1|0` (also track Wi-Fi devices seen only as a frame destination,
 tier 1, §15; persisted), `blescan active|passive|auto` (BLE scan policy; default `auto` stays

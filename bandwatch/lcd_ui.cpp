@@ -555,8 +555,12 @@ void buildHuntPage(lv_obj_t* page) {
     lv_obj_set_flex_flow(info, LV_FLEX_FLOW_COLUMN);
     huntMacLbl = make_label(info, "", c565(CYAN_565), &lv_font_montserrat_14);
     huntNameLbl = make_label(info, "", c565(WHITE_565), &lv_font_montserrat_14);
+    // Two lines, then "...": the box is 160 px wide inside, and a typical 32-char SSID measures 255-275 px at
+    // Montserrat 14 (wraps to two lines whole); only extreme names (32 x 'W' = 504 px) lose their tail. Measured
+    // from the font's advance widths for C7, where the SSID is what is being hunted.
     lv_obj_set_width(huntNameLbl, LV_PCT(100));
-    lv_label_set_long_mode(huntNameLbl, LV_LABEL_LONG_CLIP);
+    lv_obj_set_height(huntNameLbl, 2 * lv_font_get_line_height(&lv_font_montserrat_14));
+    lv_label_set_long_mode(huntNameLbl, LV_LABEL_LONG_DOT);
     huntInfo1 = make_label(info, "", c565(GREY_565), &lv_font_montserrat_12);
     huntInfo2 = make_label(info, "", c565(GREY_565), &lv_font_montserrat_12);
     huntHint = make_label(page, "hold to stop the hunt", c565(GREY_565), &lv_font_montserrat_12);   // one line: ~140 px in a 164 box
@@ -1127,7 +1131,14 @@ void refreshHunt() {
     lv_label_set_text(huntBig, buf);
     lv_bar_set_value(huntBar, (seen && age < 5000) ? rssiPct(rssi) : 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(huntBar, rssiColor(rssi), LV_PART_INDICATOR);
-    huntIdText(buf, sizeof(buf));
+    if (hunt.kind == 2) {
+        // SSID hunt (C7): how many APs carry the name, and where the strongest one (the reading) was heard.
+        const int n = huntSsidScan(kDevFreshMs, millis() - kDevFreshMs, nullptr);
+        if (seen) snprintf(buf, sizeof(buf), "%d AP%s  best ch %u", n, n == 1 ? "" : "s", static_cast<unsigned>(hunt.ch));
+        else snprintf(buf, sizeof(buf), "%d AP%s known", n, n == 1 ? "" : "s");   // both lines < 134 px at 14
+    } else {
+        huntIdText(buf, sizeof(buf));
+    }
     lv_label_set_text(huntMacLbl, buf);
     if (!hunt.label[0]) lookupHuntLabel();
     lv_label_set_text(huntNameLbl, hunt.label[0] ? hunt.label : "(no name seen)");
@@ -1197,7 +1208,7 @@ void refreshSystem(float global) {
     else if (sd.mounted) snprintf(buf, sizeof(buf), "sd: card ready (host: sdcap 1)");
     else snprintf(buf, sizeof(buf), "sd: no card");
     lv_label_set_text(sysLines[n++], buf);
-    if (hunt.active) { char m[26]; huntIdText(m, sizeof(m)); snprintf(buf, sizeof(buf), "hunt %s", m); }
+    if (hunt.active) { char m[34]; huntIdText(m, sizeof(m)); snprintf(buf, sizeof(buf), hunt.kind == 2 ? "hunt \"%s\"" : "hunt %s", m); }
     else snprintf(buf, sizeof(buf), "hunt off");
     if (deauth.active) {
         char d[26];

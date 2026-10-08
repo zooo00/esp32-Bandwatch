@@ -174,10 +174,38 @@ void huntIdText(char* out, size_t n) {
         else
             snprintf(out, n, "%02x:%02x:%02x:%02x:%02x:%02x:%02x:%02x", hunt.key[0], hunt.key[1], hunt.key[2], hunt.key[3],
                      hunt.key[4], hunt.key[5], hunt.key[6], hunt.key[7]);
+    } else if (hunt.kind == 2) {
+        snprintf(out, n, "%s", hunt.label);   // the LCD's "hunt <id>" line; the protocol escapes it separately
     } else {
         fmtMac(out, n, hunt.mac);
     }
 }
+
+namespace {
+
+// The "hunt" id as a JSON value for the hello line: null, a MAC / 15.4 id string, or for an SSID hunt (C7) the
+// escaped name followed by ,"ssid":<name> - an old host keeps working (it shows the name as the target, with
+// the "h" readings), a new one sees "ssid" and knows it is a network name. Bytes it writes: huntJsonLen().
+size_t huntJsonLen() {
+    if (!hunt.active) return 4;
+    if (hunt.kind == 2) return 2 * jsonStrLen(hunt.label) + 8;   // <name>,"ssid":<name>
+    return 25;                                                    // a quoted 23-char 15.4 id at most
+}
+
+void printHuntJson() {
+    if (!hunt.active) { Serial.print("null"); return; }
+    if (hunt.kind == 2) {
+        printJsonStr(hunt.label);
+        Serial.print(",\"ssid\":");
+        printJsonStr(hunt.label);
+        return;
+    }
+    char id[26];
+    huntIdText(id, sizeof(id));
+    Serial.printf("\"%s\"", id);
+}
+
+} // namespace
 
 void sendHello() {
     // Worst case, from the format strings below with every field at its widest: 132 B of literal text in the
@@ -186,10 +214,12 @@ void sendHello() {
     // path) + mir/alerts (20) + "ev" (189) + "}\n" = 750 + 152 = 902, plus the four esp_err_to_name() strings,
     // measured at run time because their length is the one part not bounded here. A line that passes the check
     // and then overruns is truncated mid-JSON, which is exactly what the drop-whole-lines rule exists to prevent.
+    // An SSID hunt (C7) replaces the 25-byte hunt id with the escaped name twice ("hunt" and "ssid"): measured too.
     constexpr size_t kHelloFixed = 750 + kChannelCount * 4;
     const size_t errLen = strlen(esp_err_to_name(errCountry)) + strlen(esp_err_to_name(errBand)) +
                           strlen(esp_err_to_name(errProto)) + strlen(esp_err_to_name(errPromisc));
-    if (!serialRoom(kHelloFixed + errLen)) return;
+    const size_t huntLen = huntJsonLen();
+    if (!serialRoom(kHelloFixed + errLen + (huntLen > 25 ? huntLen - 25 : 0))) return;
     Serial.printf("{\"t\":\"hello\",\"fw\":\"bandwatch\",\"ver\":\"%s\",\"dwell_ms\":%u,\"spec_step\":%u,\"band\":\"%s\",\"country\":\"%s\",\"bandmode\":\"%s\","
                   "\"proto\":\"%s\",\"promisc\":\"%s\",\"chs\":[",
                   kVersion, static_cast<unsigned>(dwellMs()), static_cast<unsigned>(specStepMhz), kBandName[bandMode], esp_err_to_name(errCountry), esp_err_to_name(errBand),
@@ -200,16 +230,15 @@ void sendHello() {
         Serial.printf("%s%u", first ? "" : ",", kChannels[i]);
         first = false;
     }
-    char mac[26];
-    huntIdText(mac, sizeof(mac));
     static const char* const kRst[] = {"unknown", "poweron", "ext", "sw", "panic", "int_wdt", "task_wdt", "wdt",
                                        "deepsleep", "brownout", "sdio", "usb", "jtag", "efuse", "pwr_glitch", "cpu_lockup"};
     const int rr = static_cast<int>(esp_reset_reason());
-    Serial.printf("],\"park\":%d,\"cap\":%d,\"snap\":%u,\"heap\":%u,\"up\":%lu,\"rst\":\"%s\",\"hunt\":%s%s%s,",
+    Serial.printf("],\"park\":%d,\"cap\":%d,\"snap\":%u,\"heap\":%u,\"up\":%lu,\"rst\":\"%s\",\"hunt\":",
                   parkedIdx >= 0 ? kChannels[parkedIdx] : 0, captureEnabled ? 1 : 0,
                   static_cast<unsigned>(capSnapLen), static_cast<unsigned>(ESP.getFreeHeap()),
-                  static_cast<unsigned long>(millis() / 1000), (rr >= 0 && rr < 16) ? kRst[rr] : "?",
-                  hunt.active ? "\"" : "null", hunt.active ? mac : "", hunt.active ? "\"" : "");
+                  static_cast<unsigned long>(millis() / 1000), (rr >= 0 && rr < 16) ? kRst[rr] : "?");
+    printHuntJson();
+    Serial.print(",");
     printHunt();
     Serial.print(",");
     printDeauth();
@@ -440,6 +469,23 @@ bool parseKey154(const char* s, uint8_t* key) {
     return false;
 }
 
+// The hunt/huntssid ack: {"t":"ack","cmd":"hunt","hunt":<id|name|null>[,"ssid":<name>],"park":N}. Escaped with
+// jsonQuote and sent whole through sendLinef (a 32-byte name of '"' escapes to 66 bytes, twice: inside its 320).
+void sendHuntAck() {
+    const int park = parkedIdx >= 0 ? kChannels[parkedIdx] : 0;
+    if (!hunt.active) {
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":null,\"park\":%d}\n", park);
+    } else if (hunt.kind == 2) {
+        char q[2 * 32 + 3];
+        if (jsonQuote(q, sizeof(q), hunt.label))
+            sendLinef("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":%s,\"ssid\":%s,\"park\":%d}\n", q, q, park);
+    } else {
+        char m[26];
+        huntIdText(m, sizeof(m));
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":\"%s\",\"park\":%d}\n", m, park);
+    }
+}
+
 void handleCommand(char* line) {
     // One command per line; the full list and each reply's shape are in docs/DEVELOPER.md (and CLAUDE.md).
     // Every ack/err/log reply goes through sendLinef(), so a full TX buffer drops the reply whole (rule 6).
@@ -581,10 +627,7 @@ void handleCommand(char* line) {
             if (ch > 0 && mode154()) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); hunt.parked = true; } }
         }
         else stopHunt();
-        char m[26];
-        huntIdText(m, sizeof(m));
-        sendLinef("{\"t\":\"ack\",\"cmd\":\"hunt\",\"hunt\":%s%s%s,\"park\":%d}\n", hunt.active ? "\"" : "null",
-                  hunt.active ? m : "", hunt.active ? "\"" : "", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
+        sendHuntAck();
         if (hunt.active && hunt.kind == 1 && mode154()) {
             // park on the channel the node was last seen on
             portENTER_CRITICAL(&g_devMux);
@@ -592,6 +635,25 @@ void handleCommand(char* line) {
             for (int i = 0; i < kDev154Slots; i++) if (devs154[i].lastMs && key8Eq(devs154[i].key, hunt.key)) { ch = devs154[i].ch; break; }
             portEXIT_CRITICAL(&g_devMux);
             if (ch && parkedIdx < 0) { const int idx = indexOfChannel154(ch); if (idx >= 0) { setPark(idx); hunt.parked = true; } }
+        }
+    } else if (!strcmp(line, "huntssid")) {
+        // C7: "huntssid <name>" - the name is the rest of the line, spaces included, 1..32 bytes, matched exactly
+        // (case-sensitive) against beacon SSIDs as stored, i.e. after the control-character sanitize, which is
+        // applied to the name too. "huntssid 0" (or no name) stops the hunt. A name that cannot be an SSID is
+        // refused and the running hunt is left alone. pollSerial's 48-byte line holds "huntssid " + 32 bytes.
+        const size_t n = strlen(arg);
+        if (n > 32) {
+            sendLinef("{\"t\":\"err\",\"msg\":\"huntssid: name longer than 32 bytes\"}\n");
+        } else {
+            if (n == 0 || !strcmp(arg, "0")) {
+                stopHunt();
+            } else {
+                char name[33];
+                memcpy(name, arg, n + 1);
+                sanitizeText(name, sizeof(name));   // rule 9: the same transform as the stored SSIDs it is matched to
+                startHuntSsid(name);
+            }
+            sendHuntAck();
         }
     } else if (!strcmp(line, "deauth")) {
         uint8_t mac[6];

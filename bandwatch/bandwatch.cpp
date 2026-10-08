@@ -38,6 +38,22 @@ void noteHuntHit(bool isTarget, int8_t rssi, uint32_t now) {   // IRAM_ATTR: see
     }
 }
 
+// C7: a beacon/probe response carrying the hunted SSID. The reading follows the strongest matching AP heard
+// recently: the current one keeps it while it is heard, a louder one takes it over, and a quieter one only once
+// the current one has been silent for kHuntSsidFreshMs (hopping hears each channel once a sweep). Every matching
+// frame counts as a hit. Caller holds g_devMux.
+void noteHuntSsidHit(const uint8_t* mac, int8_t rssi, uint32_t now) {   // IRAM_ATTR: see the decl in bandwatch_core.h
+    if (!hunt.active) return;
+    const uint32_t last = hunt.lastMs;
+    if (!last || macEq(mac, hunt.mac) || rssi >= hunt.rssi || now - last > kHuntSsidFreshMs) {
+        for (int i = 0; i < 6; i++) hunt.mac[i] = mac[i];
+        hunt.ch = currentChannelNum;
+        hunt.rssi = rssi;
+        hunt.lastMs = now;
+    }
+    hunt.count = hunt.count + 1;
+}
+
 // Wall clock: the host sends "time <epoch>"; without it timestamps fall back to uptime (1970-based).
 uint32_t epochBase = 0;         // epoch seconds at millis() == epochBaseMs
 uint32_t epochBaseMs = 0;
@@ -347,6 +363,7 @@ void setPark(int idx) {
 }
 
 void lookupHuntLabel() {
+    if (hunt.kind == 2) return;   // an SSID hunt's label is the hunted name itself: never overwrite it
     hunt.label[0] = 0;
     if (hunt.kind == 1) {
         // Copy the two fields under the lock and format after it: the radio callbacks wait on g_devMux.
@@ -372,7 +389,122 @@ void lookupHuntLabel() {
     portEXIT_CRITICAL(&g_devMux);
 }
 
+namespace {
+// C7 park state for an SSID hunt (loop task only). SEEK: no park held; take a free one once a matching AP is
+// heard. HELD: parked on huntSsidParkIdx. RESCAN: we let go of the park to hop one full sweep (until
+// huntSsidMarkMs), then park on the strongest AP heard during it. YIELD: someone else parked elsewhere (the
+// "park" command, a deauth); last writer wins, so the hunt stops moving the park until it is restarted.
+enum : uint8_t { HS_SEEK, HS_HELD, HS_RESCAN, HS_YIELD };
+uint8_t huntSsidState = HS_SEEK;
+int8_t huntSsidParkIdx = -1;
+uint32_t huntSsidMarkMs = 0;   // HELD: when we parked; RESCAN: when the sweep ends
+uint32_t huntSsidSweepMs = 0;  // RESCAN: when the sweep started
+
+// A new hunt replaces the old one: release a park the old hunt held, so it does not linger under the new one.
+void releaseHuntPark() {
+    if (hunt.parked) { setPark(-1); hunt.parked = false; }
+    huntSsidState = HS_SEEK;
+    huntSsidParkIdx = -1;
+}
+
+bool huntSsidPark(int ch, uint32_t now) {
+    const int idx = indexOfChannel(ch);
+    if (idx < 0 || !chanEnabled(idx)) return false;
+    setPark(idx);
+    hunt.parked = true;
+    huntSsidState = HS_HELD;
+    huntSsidParkIdx = static_cast<int8_t>(idx);
+    huntSsidMarkMs = now;
+    return true;
+}
+} // namespace
+
+int huntSsidScan(uint32_t freshMs, uint32_t sinceMs, uint8_t* bestCh) {
+    const uint32_t now = millis();
+    int n = 0, best = -128;
+    uint8_t ch = 0;
+    portENTER_CRITICAL(&g_devMux);
+    if (hunt.active && hunt.kind == 2) {
+        for (int i = 0; i < kWifiDevSlots; i++) {
+            const WifiDev& d = wifiDevs[i];
+            if (!(d.flags & 1) || !devFresh(d.lastMs, now, freshMs) || static_cast<int32_t>(d.lastMs - sinceMs) < 0) continue;
+            if (!huntSsidEq(d.ssid, hunt.label)) continue;
+            n++;
+            if (d.ch && d.rssi > best) { best = d.rssi; ch = d.ch; }
+        }
+    }
+    portEXIT_CRITICAL(&g_devMux);
+    if (bestCh) *bestCh = ch;
+    return n;
+}
+
+void serviceHuntSsid() {
+    if (!hunt.active || hunt.kind != 2 || !wifiMode() || deauth.active) return;   // never move a running attack's park
+    const uint32_t now = millis();
+    switch (huntSsidState) {
+        case HS_YIELD: return;
+        case HS_HELD: {
+            if (parkedIdx != huntSsidParkIdx) {
+                // Someone moved the park. Parked elsewhere: theirs now. Unparked ("park 0", a band change that
+                // disabled our channel): back to seeking, which re-derives it.
+                hunt.parked = false;
+                huntSsidState = parkedIdx >= 0 ? HS_YIELD : HS_SEEK;
+                return;
+            }
+            // Parked, only this channel is heard: every kHuntSsidRescanMs, or as soon as the AP we follow has gone
+            // quiet (moved channel, out of range), hop one full sweep so the strongest AP anywhere can win.
+            const uint32_t last = hunt.lastMs;
+            const uint32_t heard = (last && static_cast<int32_t>(last - huntSsidMarkMs) > 0) ? last : huntSsidMarkMs;
+            if (now - huntSsidMarkMs >= kHuntSsidRescanMs || now - heard > kHuntSsidLostMs) {
+                setPark(-1);
+                hunt.parked = false;
+                huntSsidState = HS_RESCAN;
+                huntSsidSweepMs = now;
+                huntSsidMarkMs = now + static_cast<uint32_t>(enabledCount() + 2) * dwellMs();
+            }
+            return;
+        }
+        case HS_RESCAN: {
+            if (parkedIdx >= 0) { huntSsidState = HS_YIELD; return; }   // parked by someone else mid-sweep
+            if (static_cast<int32_t>(now - huntSsidMarkMs) < 0) return;
+            uint8_t ch = 0;
+            huntSsidScan(kHuntSsidFreshMs + (now - huntSsidSweepMs), huntSsidSweepMs, &ch);
+            if (!ch || !huntSsidPark(ch, now)) huntSsidState = HS_SEEK;   // nothing heard this sweep: keep hopping
+            return;
+        }
+        default: {   // HS_SEEK
+            if (parkedIdx >= 0) return;   // a park we do not own: leave it
+            uint8_t ch = 0;
+            huntSsidScan(kHuntSsidFreshMs, now - kHuntSsidFreshMs, &ch);
+            if (ch) huntSsidPark(ch, now);
+            return;
+        }
+    }
+}
+
+void startHuntSsid(const char* name) {
+    releaseHuntPark();
+    portENTER_CRITICAL(&g_devMux);
+    strncpy(hunt.label, name, sizeof(hunt.label) - 1);
+    hunt.label[sizeof(hunt.label) - 1] = 0;
+    hunt.kind = 2;
+    memset(hunt.mac, 0, 6);
+    hunt.ch = 0;
+    hunt.rssi = -127;
+    hunt.lastMs = 0;
+    hunt.count = 0;
+    hunt.active = true;
+    portEXIT_CRITICAL(&g_devMux);
+    // Park at once where the strongest matching beacon was last seen (any AP still in the table), like a MAC hunt
+    // given a channel: last writer wins. Not over a running deauth - that attack is pinned to its channel.
+    uint8_t ch = 0;
+    const uint32_t now = millis();
+    if (wifiMode() && !deauth.active && huntSsidScan(kDevFreshMs, now - kDevFreshMs, &ch) && ch) huntSsidPark(ch, now);
+    showPage(PAGE_HUNT);
+}
+
 void startHunt154(const uint8_t* key) {
+    releaseHuntPark();
     portENTER_CRITICAL(&g_devMux);
     memcpy(hunt.key, key, 8);
     hunt.kind = 1;
@@ -387,6 +519,7 @@ void startHunt154(const uint8_t* key) {
 }
 
 void startHunt(const uint8_t* mac, int ch) {
+    releaseHuntPark();
     portENTER_CRITICAL(&g_devMux);
     memcpy(hunt.mac, mac, 6);
     hunt.kind = 0;
@@ -406,7 +539,7 @@ void startHunt(const uint8_t* mac, int ch) {
 
 void stopHunt() {
     hunt.active = false;
-    if (hunt.parked) { setPark(-1); hunt.parked = false; }
+    releaseHuntPark();
     if (currentPage == PAGE_HUNT) showPage(hopMode() ? PAGE_OVERVIEW : PAGE_DEVICES);
 }
 
@@ -502,6 +635,7 @@ void Bandwatch_Loop(void) {
     serviceSdRead();
     drainCapture();
     serviceProbes();     // C1: directed probe requests -> "pr" lines (Wi-Fi modes)
+    serviceHuntSsid();   // C7: an SSID hunt's park follows the strongest matching AP (no-op otherwise)
     sdServicePresence(); // card-presence probe while idle (LCD face on removal/insertion)
     serviceSdFace();
     serviceEvents();     // C4: classify new/surveillance sightings, flush /events.csv (no-op unless events on)

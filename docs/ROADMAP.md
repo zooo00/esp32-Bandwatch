@@ -4,7 +4,7 @@ Planned work, open questions and known gaps. Release history is in [`CHANGELOG.m
 v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
 removal hardening, v1.18.x mirror frames + regression suite, v1.19 LED alerts / classic retired / card-file
 management, v1.19.1 grouped card-file view + exclusive serial port, v1.19.3 review fixes). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
-C10 + 1.6.1 LED alert blips (v1.19, D1); C2/C5/C7/C9/C11 still candidates, C12 the exit ramp.
+C10 + 1.6.1 LED alert blips (v1.19, D1); C7 hunt by SSID (v1.20); C2/C5/C9/C11 still candidates, C12 the exit ramp.
 
 **Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
 
@@ -77,7 +77,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 | C4 ✅ v1.18 | Event log → SD CSV (+ novelty baseline) | persistent hits + "new device here" without a host | 16-entry queue 160 B + ~12.6 kB heap while armed (1.18 total incl. presence/faces: +456 B static) | yes in the end: `ev` status line + `events` cmd | M |
 | C5 | Patrol mode (auto round-robin) | keeps the spectrum's "known emitters" fresh; passive logging | timer state, few bytes | yes: `patrol` cmd/ack, leg in status lines | S–M |
 | C6 | Top talker per dwell | name the loudest voice on each channel | +≈8 B in `Accum` (one instance) | field added to `d` line | S |
-| C7 | Hunt by SSID | "where's my network" without knowing its MAC | 34 B while active, heap-allocated | reuses `hunt` ack shape; new command | S–M |
+| C7 ✅ v1.20 | Hunt by SSID | "where's my network" without knowing its MAC | +8 B static (name reuses `hunt.label`, no heap) | reuses `hunt` ack shape + `ssid`; new command | S–M |
 | C8 | Least-busy readout | quietest channel on Overview / dashboard | 0 — computable from today's `s` rows | no | S (UI only) |
 | C9 | Deauth refinements | rate control + auto-stop when the handshake is caught | a few bytes | fields in `d`, new command | S–M |
 | C10 ✅ v1.19 | Permit-join LED blip | a Zigbee door opening = brief double-flash | 0 (or +48 B, see entry) | no | S |
@@ -300,7 +300,17 @@ else happens inside locks already held per frame.
 **Verify.** Park on a channel with one strong AP — `top` should be its MAC every dwell. Add a second emitter, move it
 closer/farther, watch the field follow.
 
-### C7 — Hunt by SSID
+### C7 — Hunt by SSID  ✅ SHIPPED v1.20
+
+**Status (shipped, DEVELOPER §22).** Decisions on the open questions: (1) the reading is the strongest matching AP
+heard recently; the dashboard lists every matching AP (bssid, ch, rssi, age) from the device table, no extra
+protocol. (2) Exact, case-sensitive compare after the same sanitize as the stored SSID; beacons/probe responses
+only; hidden SSIDs never match. (3) The LCD label wraps to two lines and then ends in "..." (measured: a typical
+32-char SSID is 255-275 px at Montserrat 14 in a 160 px label). The name lives in the existing `hunt.label` rather
+than on the heap, so static RAM grew only 8 B (77,184 -> 77,192, the park state). Park: auto-derived, plus a
+one-sweep rescan every 30 s (or when the followed AP goes quiet 5 s) so it can follow a stronger AP on another
+channel - parked, nothing else is heard. Wire: the hunt ack / `hello` add `"ssid"`; `h` is unchanged. Verified
+offline (build + host tests + a dashboard render harness); the walk test below still needs hardware.
 
 **What.** `huntssid <name>` / `huntssid 0`: show live RSSI of every beacon carrying that name while hopping or parked —
 "where's my mesh node" without knowing its MAC. Reuses PAGE_HUNT with the name as label.

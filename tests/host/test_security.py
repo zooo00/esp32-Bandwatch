@@ -197,6 +197,7 @@ class NotConnectedTest(unittest.TestCase):
     def test_device_commands_503(self):
         for obj in ({"cmd": "info"}, {"cmd": "band", "value": "ble"}, {"cmd": "deauth", "mac": "11:22:33:44:55:66"},
                     {"cmd": "hunt", "mac": "aa:bb:cc:dd:ee:ff"}, {"cmd": "hunt"}, {"cmd": "sdcap", "value": 1},
+                    {"cmd": "huntssid", "ssid": "HomeNet"}, {"cmd": "huntssid"},
                     {"cmd": "capture", "value": 1}, {"cmd": "capture", "value": 0},
                     {"cmd": "sdrm", "path": "events.csv"}, {"cmd": "sdread", "path": "events.csv"},
                     {"cmd": "explain", "value": "full"}):
@@ -210,6 +211,7 @@ class NotConnectedTest(unittest.TestCase):
 
     def test_validation_still_400_and_host_side_ok(self):
         self.assertEqual(self.post({"cmd": "band", "value": "6g"})[0], 400)
+        self.assertEqual(self.post({"cmd": "huntssid", "ssid": "x" * 33})[0], 400)   # validated before the device
         self.assertEqual(self.post({"cmd": "explain", "value": "clear"}), (200, {"ok": True}))
 
     def test_capture_send_failure_removes_file(self):

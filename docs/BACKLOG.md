@@ -122,7 +122,6 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 | --- | --- | --- |
 | C2 | Ghost AP (beacon, then probe responder) | Transmits: needs the dead-man's switch pattern; stage 1 before stage 2 |
 | C5 | Patrol mode (auto round-robin) | Keeps the spectrum's "explained" sources fresh; covers the 1.7 time-separation gap |
-| C7 | Hunt by SSID | Small; reuses the hunt ack shape |
 | C9 | Deauth refinements (rate, auto-stop) | Read the corrected EAPOL detection in ROADMAP C9 first |
 | C11 | Host CSV export | Host-only |
 | C12 | ESP-IDF port | The exit ramp: BLE extended advertising, the fixed ~59 kB stack |
@@ -141,6 +140,7 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 
 | Item | Version | Evidence |
 | --- | --- | --- |
+| **C7** hunt by SSID | v1.20 | `huntssid <name>` / `huntssid 0`, DEVELOPER §22. Offline only: firmware builds (77,192 B static, +8), `tests/host/test_hunt_ssid.py` (route validation, ack/hello parsing, AP list), dashboard render harness. The two-APs walk test (park follows the stronger) still needs hardware |
 | **B1** dashboard hid a running deauth while a hunt was active | v1.19.3 | `dashboard2.html` renders the hunt and deauth bars independently, so both show at once, each with its own Stop. Code review only; not yet watched on hardware with both running |
 | **B2** deauth row buttons stuck on "…" | v1.19.3 | the `pending.deauth` latch is released on every render whenever no deauth is running, not only inside the active-deauth branch. Code review only (the render harness in I2 is still to do) |
 | **C10 + 1.6.1** permit-join LED blip / alerting | v1.19 | shipped as D1 (§21) |

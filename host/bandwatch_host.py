@@ -33,7 +33,8 @@ Serial protocol (one line each):
                                                  firmware without markers is published per region.
     {"t":"sdls","files":[[name,bytes],...],"total":N,"sent":M}   microSD listing ("sdls"); sent<total = truncated mid-list
 Commands to the device: "band 5g|2.4g|both|ble|154|spec", "park <ch>|0", "cap 0|1", "snap N", "hunt <mac> [ch]" /
-"hunt 0", "deauth <bssid>" / "deauth 0" (Wi-Fi modes; reaches the air only on the raw-TX-patched image that
+"hunt 0", "huntssid <name>" / "huntssid 0" (C7: hunt a network name, 1..32 bytes, exact and case-sensitive; acked
+with the hunt ack plus "ssid"), "deauth <bssid>" / "deauth 0" (Wi-Fi modes; reaches the air only on the raw-TX-patched image that
 build.sh flashes by default - confirm with tools/witness/verify.py, never from the counter; docs/DEVELOPER.md 11),
 "dca <client_mac> <ap_bssid>" / "dca 0" (targeted deauth to one client),
 "sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "sdrm <path>" (delete one
@@ -231,6 +232,24 @@ def clean_hunt_id(v):
         return None
     v = v.strip()
     return v.lower() if MAC_RE.match(v) or KEY154_RE.match(v) else None
+
+
+def clean_hunt_ssid(v):
+    """A network name for "huntssid" (C7): 1..32 bytes of UTF-8 (an SSID's limit), no control characters (the
+    device stores SSIDs with them replaced, so such a name could never match, and CR/LF would end the serial
+    line), and not "0", which the device reads as "stop". Kept exactly as given - no strip: the match is exact,
+    and an SSID may start or end with a space. Returns None when it is not a usable name."""
+    if not isinstance(v, str) or v == "0":
+        return None
+    try:
+        n = len(v.encode("utf-8"))   # a lone surrogate (legal in JSON) cannot be sent at all
+    except UnicodeEncodeError:
+        return None
+    if not 1 <= n <= 32:
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in v):
+        return None
+    return v
 
 
 def find_port():
@@ -524,14 +543,15 @@ class Bandwatch:
     def connected(self):
         return self.ser is not None
 
-    def send(self, cmd):
+    def send(self, cmd, strip=True):
         err = None
         with self.lock:
             if self.ser is None:
                 return False
             # Collapse embedded newlines/CRs so a value from the HTTP API (e.g. a crafted "mac") can't
-            # smuggle a second command onto the serial line.
-            line = cmd.strip().replace("\r", " ").replace("\n", " ")
+            # smuggle a second command onto the serial line. strip=False keeps edge spaces that are part of the
+            # argument (an SSID for "huntssid" may end in one); its caller has already refused control chars.
+            line = (cmd.strip() if strip else cmd).replace("\r", " ").replace("\n", " ")
             try:
                 self.ser.write((line + "\n").encode())
             except Exception as e:   # includes serial.SerialTimeoutException (write_timeout)
@@ -594,10 +614,16 @@ class Bandwatch:
                     self.stop_capture()
             time.sleep(1.0)
 
-    def _set_hunt(self, mac):
+    def _set_hunt(self, mac, ssid=None):
+        """The device's "hunt" field (hello / hunt ack): a MAC or 15.4 id, or for an SSID hunt (C7) the name, with
+        "ssid" alongside - firmware before C7 never sends "ssid". A different target starts a fresh history."""
         st = self.state
-        if mac and (st["hunt"] is None or st["hunt"]["mac"] != mac):
-            st["hunt"] = {"mac": mac, "rssi": None, "age_ms": None, "count": 0, "hist": deque(maxlen=400)}
+        ssid = ssid if isinstance(ssid, str) and ssid else None
+        if not isinstance(mac, str):   # a malformed line ({} / [] / 7) must not become a dict key in snapshot()
+            mac = None
+        if mac and (st["hunt"] is None or st["hunt"]["mac"] != mac or st["hunt"].get("ssid") != ssid):
+            st["hunt"] = {"mac": mac, "ssid": ssid, "rssi": None, "age_ms": None, "count": 0,
+                          "hist": deque(maxlen=400)}
         elif not mac:
             st["hunt"] = None
 
@@ -711,7 +737,7 @@ class Bandwatch:
             st["channels"] = {c: v for c, v in st["channels"].items() if c in st["chs"]}
             for c in st["chs"]:
                 st["channels"].setdefault(c, {"s": 0.0, "r": 0.0, "f": 0, "b": 0, "st": 0, "u": 0, "state": 1, "t": 0})
-            self._set_hunt(msg.get("hunt"))
+            self._set_hunt(msg.get("hunt"), msg.get("ssid"))
             self._hunt_update(msg.get("h"))
             self._set_deauth(msg.get("deauth"))
             if msg.get("sd") is not None:
@@ -856,8 +882,8 @@ class Bandwatch:
                 st["park"] = msg["park"]
             if "cap" in msg:
                 st["cap"] = msg["cap"]
-            if msg.get("cmd") == "hunt":
-                self._set_hunt(msg.get("hunt"))
+            if msg.get("cmd") == "hunt":   # "huntssid" acks with this shape too, plus "ssid"
+                self._set_hunt(msg.get("hunt"), msg.get("ssid"))
             if msg.get("cmd") in ("deauth", "dca"):
                 # "dca" too: without it a targeted attack left st["deauth"] at None, so the deauth card
                 # never appeared and the dwell handler (which only updates an existing entry) never
@@ -1543,6 +1569,22 @@ class Bandwatch:
                 ch = d["ch"] if d else 0
         return self.send(f"hunt {mac} {int(ch or 0)}")
 
+    def hunt_ssid(self, name):
+        """C7: hunt a network name (already through clean_hunt_ssid), or stop with None. The device derives the
+        park itself from where the strongest matching beacon was heard. Returns send()'s result."""
+        if not name:
+            return self.send("huntssid 0")
+        return self.send(f"huntssid {name}", strip=False)
+
+    def _hunt_ssid_aps(self, name, now):
+        """Every AP in the device table beaconing this exact name, loudest first (rssi None last): what the
+        dashboard lists under an SSID hunt. Caller holds dlock."""
+        aps = [{"mac": d["mac"], "ch": d.get("ch"), "rssi": d.get("rssi"), "age": round(now - d["last"], 1),
+                "vendor": d.get("vendor", "")}
+               for d in self.wifi_devs.values() if d.get("ap") and d.get("ssid") == name]
+        aps.sort(key=lambda a: (a["rssi"] is None, -(a["rssi"] or 0), a["mac"]))
+        return aps
+
     def snapshot(self):
         """Everything /api/state returns, copied under the state lock: the reader thread mutates these dicts and
         deques, and json.dumps on another thread must never see one mid-update."""
@@ -1567,8 +1609,16 @@ class Bandwatch:
         zig = [dict(d, hist=list(d["hist"]), age=round(now - d["last"], 1)) for d in self.z_devs.values()]
         hunt = None
         hu = st["hunt"]
-        if hu:
-            src = self.wifi_devs.get(hu["mac"]) or self.ble_devs.get(hu["mac"]) or self.z_devs.get(hu["mac"]) or {}
+        if hu and hu.get("ssid"):
+            # SSID hunt (C7): the device reports one reading (the strongest matching AP heard recently); the AP list
+            # comes from the device table we already have. "mac" is the loudest AP heard in the last 60 s, if any.
+            aps = self._hunt_ssid_aps(hu["ssid"], now)
+            best = next((a for a in aps if a["age"] < 60 and a["rssi"] is not None), None)
+            hunt = {"mac": best["mac"] if best else "", "ssid": hu["ssid"], "rssi": hu["rssi"], "age_ms": hu["age_ms"],
+                    "count": hu["count"], "hist": list(hu["hist"]), "label": hu["ssid"],
+                    "vendor": best["vendor"] if best else "", "kind": "network name", "aps": aps}
+        elif hu:
+            src =self.wifi_devs.get(hu["mac"]) or self.ble_devs.get(hu["mac"]) or self.z_devs.get(hu["mac"]) or {}
             hunt = {"mac": hu["mac"], "rssi": hu["rssi"], "age_ms": hu["age_ms"], "count": hu["count"],
                     "hist": list(hu["hist"]), "label": src.get("ssid") or src.get("name") or src.get("proto") or "",
                     "vendor": src.get("vendor", ""), "kind": src.get("kind", "") or (src.get("pan") and "PAN " + src["pan"]) or ""}
@@ -1814,6 +1864,13 @@ def make_handler(bw, page_path, bind=None):
                 if req.get("mac") and not target:
                     raise _Reply(400, "bad hunt target")
                 if not bw.hunt(target, req.get("ch")):
+                    raise _NotConnected
+            elif cmd == "huntssid":   # C7: {"cmd":"huntssid","ssid":"<name>"}; null/"" stops the hunt
+                raw = req.get("ssid")
+                name = clean_hunt_ssid(raw)
+                if raw not in (None, "") and not name:
+                    raise _Reply(400, "bad ssid: 1..32 bytes, no control characters, not \"0\"")
+                if not bw.hunt_ssid(name):
                     raise _NotConnected
             elif cmd == "deauth":
                 mac = clean_mac(req.get("mac"))

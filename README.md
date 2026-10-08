@@ -4,8 +4,8 @@ A Wi‑Fi **activity** meter and device finder for the dual‑band ESP32‑C5. P
 [PierreGode/WaveshareESP32C6LCD](https://github.com/PierreGode/WaveshareESP32C6LCD)'s *Bandwatch* (2.4 GHz,
 ESP32‑C6) to the **Waveshare ESP32-C5-LCD-1.47**, extended with 5 GHz sweeping, Bluetooth LE scanning, IEEE 802.15.4 (Zigbee / Thread) sniffing, device tables
 for all three radios, a "hunt" mode for locating one device by signal strength, a deauth attack that kicks
-an AP's clients off their network, an LCD UI driven by the BOOT button, and a host‑side web dashboard with
-pcap capture.
+an AP's clients off their network (and its BLE cousin `blekick`), an LCD UI driven by the BOOT button, and a host‑side
+web dashboard with pcap capture.
 
 Developer documentation (architecture, serial protocol, hardware references, board quirks): [`docs/DEVELOPER.md`](docs/DEVELOPER.md).
 A short orientation for AI assistants is in [`CLAUDE.md`](CLAUDE.md). Open work (bugs, verifications, features) is
@@ -14,7 +14,7 @@ history is in [`CHANGELOG.md`](CHANGELOG.md).
 
 Bandwatch listens to 802.11 traffic in promiscuous mode and reports a **busy score** (0–100) per channel as a proxy
 for channel load (the separate `spec` mode reads raw 2.4 GHz RF power). It does **not** measure true airtime
-occupancy. It is receive‑only with two exceptions: a running deauth attack, and BLE active scanning — `blescan active`,
+occupancy. It is receive‑only with three exceptions: a running deauth or blekick attack, and BLE active scanning — `blescan active`,
 or the default `auto` policy's short (4 s) active window after a new unnamed scannable device, sends BLE scan
 requests. `blescan passive` keeps BLE mode fully silent.
 
@@ -48,6 +48,12 @@ requests. `blescan passive` keeps BLE mode fully silent.
   Two modes: 
   - `deauth <ap_bssid>` sends broadcast deauth frames to **all** clients of that AP (kick everyone).
   - `dca <client_mac> <ap_bssid>` targets a **specific client** station (disconnect just one device).
+- **Blekick** (`blekick <mac>` / `blekick 0`, BLE mode only) — the deauth equivalent for Bluetooth LE: Bandwatch
+  becomes a central that connects to the target, holds it ~600 ms and drops it with reason 0x13 ("Remote User
+  Terminated"), over and over. For a single-connection peripheral (a beach speaker playing from its phone) each
+  takeover evicts or stutters the real peer. The Kick button sits on the BLE table rows; a paired-busy victim that
+  refuses entry shows `kicks=0` with refusals climbing — honest, not broken (§24). Like deauth it stops itself after
+  5 minutes and on any mode change. Only point it at devices you are authorised to test.
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle; hold BOOT to walk the modes 5g → 2.4g → both → ble → 802.15.4 → spectrum →

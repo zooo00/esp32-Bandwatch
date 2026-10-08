@@ -18,7 +18,9 @@ Connection"), evicting or stuttering single-connection-slot peripherals like a b
   start over a running kick ("stop kick first").
 - Static RAM 77,288 -> 77,312 B (+24).
 - First beach run found the GAP layer refusing at the door (rc=15 straight back from `ble_gap_connect()`, while our
-  discovery runs): those now count as `fails` and retry after the full gap instead of every tick.
+  discovery runs): those now count as `fails` and retry after the full gap instead of every tick. The same run caught
+  a missing comma between `"h"` and `"bk"` in the BLE heartbeat - until that was in, every heartbeat line was dropped
+  and kicks/fails froze at their start values on the dashboard.
 
 ## v1.20.1
 

@@ -147,7 +147,7 @@ Device → host, one JSON object per line unless noted:
 
 | Line | When | Fields |
 | --- | --- | --- |
-| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `spec_step` (fine-spectrum step in MHz), `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21) |
+| `{"t":"hello",...}` | boot, `info`, after `band` | `fw`, `ver`, `dwell_ms`, `spec_step` (fine-spectrum step in MHz), `band` (mode), `country/bandmode/proto/promisc` (esp_err names), `chs` (channel list of the mode), `park`, `cap`, `snap`, `heap`, `up` (s), `rst` (reset reason), `hunt` (id or null), `h` (hunt status `[rssi, age_ms, hits]` or null), `deauth` (`[bssid, park ch (0 if hopping), frames sent, frames failed]` or null), `sd` (`{mounted, mb, cap, file, frames, bytes, err, clock}` — `mounted` is historical naming: it reports `sd.cardPresent`, *a card is in the slot*, not that FATFS is mounted; since 1.18 it follows removal/insertion, §12), `mir` (§19), `ev` (event-log status, 1.18 — see the `ev` row), `alerts` (LED alert blips on/off, 1.19, §21), `pt` (C5 patrol, 1.20: `null` when idle, else `{leg, left, cyc, legs}` — see the `pt` row) |
 | `{"t":"d",...}` | every completed dwell | `c` channel, `s` EMA score, `r` raw score, `f` frames, `b` bytes, `st` strong, `u` unique, `g` global max, `n` sweep no., `park`, `cap`, `drop` (capture drops), `da` (deauth frames sent so far; 0 when idle), `df` (deauth frames failed so far; 0 when idle), `sdc` (1 while recording to microSD), `sdf`/`sdb` (frames/bytes written to the card), `h` |
 | `{"t":"s",...}` | after every full sweep | `n`, `g`, `band`, `ch`: `[[ch, ema, frames, bytes, strong, unique, state], ...]` (state 0 ok / 1 no data / 2 rejected), `aps`, `drop`, `heap` |
 | `{"t":"w","dev":[...]}` | every 2 s in Wi‑Fi modes, **in chunks of ≤24 rows** (v1.17; loudest first, each chunk a complete line; the host merges by MAC, so a chunk dropped for TX room just waits a cycle) | rows `[mac, rssi, max, frames, age_ms, ch, flags, ssid, sec, pmf, phy, bw, util, stations, cc, surv, apSuffix]`; `apSuffix` = last 3 bytes of the BSSID this device was heard associated with, lower-case hex, `""` if never seen on a BSS (§17); flags bit0 AP, bit1 IEs parsed, **bit2 seen only as a frame destination (tier 1)**; `surv` = surveillance category id (0 none); `sec` bits: 0x01 WEP, 0x02 WPA, 0x04 WPA2‑PSK, 0x08 WPA2‑Ent, 0x10 WPA3‑SAE, 0x20 WPA3‑Ent, 0x40 OWE, 0x80 open; `pmf` 0/1/2; `phy` bits 1 legacy, 2 n, 4 ac, 8 ax, 16 be; `bw` in 10 MHz units; `util` 0–255; `cc` country |
@@ -156,6 +156,7 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"pr",...}` | a directed probe request (Wi‑Fi modes, C1) | `mac` (the probing client; often a randomized, locally administered MAC), `rssi`, `ch`, `ssid` (the network it asked for, control-stripped). Wildcard probes (empty SSID) are not sent. The device suppresses a repeat of the same (MAC, SSID) pair for 60 s (32-entry table in `host_proto.cpp`); the host keeps history and expires pairs after 15 min (`PROBE_TTL_S`), grouping by SSID because phones randomize per burst |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
 | `{"t":"ev","ev":{...}}` | every 5 s while the event log is armed, in every mode (`sendEventStatus()`, 1.18) | `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}`: armed; card usable (last attach worked); baseline hashes in RAM; entries in `/seen.csv` (counted at load, plus this session's appends); rows written to `/events.csv`; rows buffered; surveillance rows; new-device rows; rows dropped (2 KB buffer full, rows discarded by `events 0` on a busy card, or the 16-entry radio queue full); card errors (failed mount/write); novelty checks skipped for want of a baseline. The same object rides on `hello` and the `events` ack. §20 |
+| `{"t":"pt","pt":{...}\|null}` | every 2 s while patrolling, in every mode (BLE has no dwells), right after each leg hand-off, and once with `null` when a patrol ends (`servicePatrol()`, C5, 1.20) | `pt` = `{"leg": i, "left": ms left in the leg (0 = due, waiting for the dwell boundary), "cyc": full cycles done, "legs": [[mode, sec], ...]}` - at most 127 B (`kPatrolJsonMax`). The same member rides on `hello` (which every hand-off also sends, so the host gets the new mode's `chs`) and the `patrol` ack. §22 |
 | `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete. Since the C4 follow-up: `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` after a delete, `"ok":0,"msg":"no such file"|"remove failed"` when the card refused it; refusals before the card is touched are `{"t":"err","msg":"sdrm: ..."}` (`bad file name ...`, `busy - a file is being pulled (sdread)`, `/x is being recorded - stop sdcap first`, `busy - the event log is writing to the card`, `no card`). `{"t":"log","msg":"seen.csv rotated: N -> M"}` when an attach trims `/seen.csv` (§20) |
 | `M <x> <y> <w> <h> <base64>` / `MF <seq> <complete>` | while `mirror 1` | one repainted LCD slice (RGB565-LE, <= ~2 KB base64) / end of one LVGL refresh; `complete` 1 = nothing dropped and no repair pending (§19) |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
@@ -184,6 +185,16 @@ reply of the presence probe; `r1` is -1 when the card is mounted or busy and the
 `ledtest surv|new|join` (diagnostic: draw one blip now, bypassing the rate limit and the `alerts` switch but never
 over an active deauth; ack `{"t":"ack","cmd":"ledtest","kind":"surv","shown":0|1}` - `shown` 0 means a deauth owns
 the LED; any other kind gives `{"t":"err","msg":"ledtest: surv|new|join"}`).
+
+1.20 (C5, §22): `patrol 1` walks the default legs `spec:30,both:40,ble:20` round-robin; `patrol <mode>:<sec>[,...]`
+sets 2-6 custom legs (mode `5g|2.4g|both|ble|154|spec`, 5-600 s each) and starts (a running patrol restarts);
+`patrol 0` stops and stays in the current mode; bare `patrol` queries. Ack `{"t":"ack","cmd":"patrol","pt":...}`.
+Refusals: `{"t":"err","msg":"patrol: legs are 2-6 x mode:sec (...)"}`, `"patrol: stop capture first"` (USB or SD),
+`"patrol: stop hunt first"`, `"patrol: stop deauth first"`. While it walks, `cap 1`, `sdcap 1`, `hunt <id>`,
+`huntssid <...>`, `deauth <bssid>` and `dca <...>` answer `{"t":"err","msg":"<cmd>: stop patrol first"}` (their stop
+forms pass); any `band` (and a BOOT-hold mode walk) stops it first (`{"t":"log","msg":"patrol stopped by band"}`).
+Also 1.20: the command line buffer is 64 bytes (a 6-leg `patrol` is 60), and a longer line is refused whole with
+`{"t":"err","msg":"line too long"}` instead of running its first 47 characters.
 
 Settings and views (ack `{"t":"ack","cmd":...}`): `specstep 1|2|5` (fine-spectrum step in MHz, spec mode; persisted),
 `blescan passive|active|auto` (BLE scan policy, §13; persisted; frozen while recording), `addr1 0|1` (tier-1
@@ -223,9 +234,17 @@ HTTP API:
   `card_file_name()`), `info`, and the host-only `explain` (`value` full|current|clear: leave spec mode, re-decode
   Wi‑Fi/BLE/15.4 — all of it, or only the legs covering the frequencies flagged unexplained right now — so the
   unexplained-energy comparison (§18) has fresh known devices, then return to spec; `clear` forgets sticky
-  explanations; 409 if one is already running). Read `do_POST` in `bandwatch_host.py` for the exact field names.
-  Errors are a non-2xx status with `{"ok": false, "error": "..."}` (400 bad argument or body, 413 body too large,
-  503 `not connected` when no device is attached — no empty pcap is opened then).
+  explanations; 409 if one is already running). `patrol` (C5, §22): `value` true|1|"on" starts the default legs,
+  false|0|"off"|absent stops, or `legs` = `[[mode, sec], ...]` (or `{"mode","sec"}` objects, or the device's
+  `"mode:sec,..."` string) starts custom ones - checked by `clean_patrol_legs()` (2-6 legs, mode
+  5g|2.4g|both|ble|154|spec, whole seconds 5-600), 400 otherwise; 409 `patrol: stop <capture|hunt|deauth> first`
+  when the host knows one is running. While a patrol runs, starting `capture`, `sdcap`, `hunt`, `deauth`, `dca` or
+  `explain` full|current is 409 `<cmd>: stop patrol first` (the stop forms pass; `band` passes and ends the patrol
+  on the device). `/api/state` carries `patrol`: `null` (firmware without it), `{"on": false}`, or `{"on": true,
+  "leg", "left", "left_ms", "cyc", "legs", "band"}` - `left_ms` counts `left` down from the last status line,
+  floored at 0. Read `do_POST` in `bandwatch_host.py` for the exact field names.
+  Errors are a non-2xx status with `{"ok": false, "error": "..."}` (400 bad argument or body, 409 refused in the
+  current state, 413 body too large, 503 `not connected` when no device is attached — no empty pcap is opened then).
 
 `/api/cmd` has **no authentication**, and one of its commands starts a deauth attack, so the server binds to
 `127.0.0.1` by default and, since v1.19.3, defends that against other web pages the browser has open: a POST must
@@ -247,7 +266,7 @@ One dashboard: `dashboard2.html`, served at `/` (and `/v2`, `/v2.html`, `/index.
 tabbed `dashboard.html` was removed in v1.19; git tag `v1.18.2` has the last copy. `/classic` and `/classic/`
 answer `301` to `/`, and `--ui` is still parsed but ignored (with a note on stdout) so old scripts keep running;
 `host/run-v2.sh` went with it. `make_handler(bw, page_path)` takes the one page.
-`dashboard2.html`: no framework, polls `/api/state` once a second; controls in a sticky left rail (band/park, capture, hunt/deauth action
+`dashboard2.html`: no framework, polls `/api/state` once a second; controls in a sticky left rail (band + patrol (C5), park, capture, hunt/deauth action
 bar, LCD mirror with page buttons, SD card list with pull-to-Mac), one scrolling main column, and only the active
 radio's device table open (the other two fold into "last seen" caches). Tables are
 rendered keyed by device id so rows keep identity; while the mouse is over a table (or the page is paused with
@@ -1264,3 +1283,43 @@ budget went 900 -> 920 for the new field.
 OUI added to `/surveil.csv`) in range, `band 2.4g` - one orange double flash when it first appears. Permit-join: a
 Zigbee coordinator with joining opened, `band 154`. With `deauth <bssid>` running, `ledtest surv` acks `"shown":0`
 and the red attack blink never breaks.
+
+## 22. Patrol mode (C5, 1.20)
+
+One radio cannot decode and measure energy at once, so the spectrum's "explained" sources (§18) are only as fresh as
+the last Wi‑Fi/BLE/15.4 sweep. Patrol walks the modes on its own so a board left on a desk keeps them fresh: `patrol 1`
+runs `spec` 30 s -> `both` 40 s -> `ble` 20 s and repeats; `patrol <mode>:<sec>,...` sets 2-6 legs of 5-600 s.
+
+### How it works
+- **State**: `Patrol` in `bandwatch_core.h` (leg table, current leg, leg start, cycle count, the band it started from,
+  28 B), one instance in `bandwatch.cpp`. `servicePatrol()` runs from `Bandwatch_Loop()`; `hopIfNeeded()` (the UI
+  timer, same task) sets `g_dwellEdge` after each finished dwell.
+- **Hand-off on a dwell boundary**: when a leg is due, `servicePatrol()` waits for the next `g_dwellEdge`, so the last
+  dwell of a leg is scored whole (at most one dwell late: 220 ms, 60 ms in spec). BLE has no dwells and a sweep mode
+  that is not on a channel never finishes one, so those hand off at once; a +1 s backstop covers a dwell that never
+  completes. The `{"t":"pt"}` line reports `left` 0 meanwhile.
+- **Each hand-off is a normal mode change**: drop any park (a leg sweeps), `setBandMode()` (so `releaseCapture()`,
+  `stopDeauth()` and the radio teardown/bring-up run exactly as for `band`), `showModeChange()` (the page + mode
+  card a `band` command shows), a `patrol: leg i/n <mode> <s> s` log line, `sendHello()` and a `pt` line. The leg
+  clock starts after the new radio is up, so BLE's bring-up is not charged to its leg. The dashboard sees only
+  ordinary mode changes, so its cached channel views collapse and return as they do for a click on a mode.
+- **v1 has no capture**: every hand-off releases the ring and the pcap link type differs per radio, so `patrol` is
+  refused while a USB or SD capture runs, and `cap 1` / `sdcap 1` are refused while it walks. Hunt and deauth park
+  the radio, which a hand-off would undo, so they exclude patrol the same way (`huntssid`, C7, is refused by its
+  command word). Per-leg capture is the documented stretch.
+- **Manual control wins**: any `band` command (even onto the current leg's mode) and a BOOT-hold mode walk stop the
+  patrol; `patrol 0` stops it where it is. The event log (`events`) keeps running across legs.
+- **Not persisted**: a reboot comes up not patrolling. While one runs, `saveSettings()` stores the band the patrol
+  started from, so another setting's save (e.g. `alerts`) does not persist a leg as the boot mode.
+- **LCD**: the header's right label reads `patrol BOTH 23s` (mode, seconds left in the leg) on the Activity,
+  Channels, Spectrum and Devices pages.
+
+### Cost
+Static RAM +56 B (77,184 -> 77,240 B): the `Patrol` struct, the dwell-edge flag, the status timestamp and the
+command line buffer growing 48 -> 64 B. No heap. Hello's serial budget grew by `kPatrolJsonMax` (128 B); the `pt`
+line is <= 139 B every 2 s, through `sendLinef()` (dropped whole when the TX buffer is short, rule 6).
+
+### Verify on hardware
+`patrol both:5,ble:5` and watch `hello` lines alternate `both`/`ble` with `pt.leg` 0/1 and `pt.cyc` counting up, and
+`{"t":"pt"}` every 2 s in BLE too (`tests/device` T13). Free heap before/after each hand-off should stay within a few
+hundred bytes (testing checklist 7). The LCD header counts the leg down. Not yet run on the board.

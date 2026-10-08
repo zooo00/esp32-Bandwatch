@@ -518,6 +518,31 @@ void sendDevices();
 void pollSerial();
 const char* bleScanModeName();
 
+// C5 patrol (bandwatch.cpp, DEVELOPER §22): walk a list of (mode, seconds) legs round-robin through setBandMode(),
+// handing off on a dwell boundary. Transient (never in NVS) and capture-free in v1: "patrol" is refused while a
+// capture, hunt or deauth runs, and those are refused while it patrols (host_proto.cpp). A manual band change
+// (command or BOOT walk) stops it. Loop task only.
+constexpr int kPatrolMinLegs = 2, kPatrolMaxLegs = 6;
+constexpr uint16_t kPatrolSecMin = 5, kPatrolSecMax = 600;
+constexpr uint32_t kPatrolStatusMs = 2000;   // {"t":"pt"} cadence while patrolling, in every mode
+constexpr size_t kPatrolJsonMax = 128;       // fmtPatrol() at its widest (6 legs, every number maxed) is 127 B
+struct Patrol {
+    uint32_t legStartMs = 0;
+    uint16_t sec[kPatrolMaxLegs] = {};
+    uint16_t cycles = 0;                     // full cycles completed since the start
+    BandMode mode[kPatrolMaxLegs] = {};
+    uint8_t n = 0, leg = 0;
+    BandMode home = BAND_5G;                 // band before the start: what saveSettings() persists meanwhile
+    bool active = false;
+};
+extern Patrol patrol;
+extern bool g_dwellEdge;                     // hopIfNeeded() finished a dwell since servicePatrol() last looked
+void startPatrol(const BandMode* modes, const uint16_t* secs, uint8_t n);
+void stopPatrol();
+void servicePatrol();                        // loop: hand off when the leg is due, {"t":"pt"} every kPatrolStatusMs
+uint32_t patrolLeftMs();                     // ms left in the current leg (0 once due, until the hand-off)
+size_t fmtPatrol(char* out, size_t n);       // "pt":null | "pt":{...} (host_proto.cpp); returns the length
+
 // Settings persistence (settings.cpp). NVS-backed so a walk-around device boots where it was left: band
 // mode + the scalar policies (addr1 / blescan / specstep / snap). Park and hunt/deauth are deliberately
 // NOT persisted - a reboot must stop transmitting and must not come up silently parked (see settings.cpp).
@@ -533,5 +558,6 @@ void buildUi();
 void refreshUi();
 void showPage(int n, int dir = 1);   // dir: which way to skip pages unavailable in this mode
 void showBandSplash(BandMode m, uint32_t durMs);   // flash the mode's name card before its scan page takes over
+void showModeChange(BandMode prev);   // after setBandMode(): the page the new mode wants + its splash (band cmd, patrol)
 void pollButton();
 void uiTimerCb(lv_timer_t* t);   // declared here so the core file can create the lv timer

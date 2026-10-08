@@ -33,7 +33,7 @@
   button.small { padding: 3px 9px; font-size: 12.5px; }
   button.tiny { padding: 2px 7px; font-size: 11.5px; border-radius: 6px; }
   button.ghost { background: transparent; border-color: transparent; color: var(--ink-2); }
-  select, input[type=number], input[type=search] { font: inherit; color: var(--ink); background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; width: 100%; }
+  select, input[type=number], input[type=search], input[type=text] { font: inherit; color: var(--ink); background: var(--page); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; width: 100%; }
   .note { color: var(--ink-2); font-size: 12.5px; line-height: 1.5; }
   .dim { color: var(--muted); }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; }
@@ -220,6 +220,14 @@
           <button data-band="ble">Bluetooth LE</button>
           <button data-band="154">Zigbee / Thread (802.15.4)</button>
           <button data-band="spec">Spectrum · 2.4 GHz energy</button>
+        </div>
+        <div id="patrolBox" hidden>
+          <h3 style="margin-top:14px">Patrol</h3>
+          <button class="block" id="patrolBtn">Start patrol</button>
+          <input type="text" id="patrolLegs" value="spec:30,both:40,ble:20" spellcheck="false" autocomplete="off"
+                 style="margin-top:8px;font-size:12.5px" aria-label="Patrol legs"
+                 title="Legs as mode:seconds, comma-separated: 2-6 legs, modes 5g 2.4g both ble 154 spec, 5-600 s each">
+          <div class="note capinfo" id="patrolInfo"></div>
         </div>
       </section>
 
@@ -498,7 +506,7 @@
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };      // table under the mouse keeps its rows put
   const expanded = { wifi: false, ble: false, zig: false };    // user-opened "last seen" cards
-  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0, spec: 0, alerts: 0 };     // click latches until the device confirms (poll is 1 Hz)
+  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0, spec: 0, alerts: 0, patrol: 0 };     // click latches until the device confirms (poll is 1 Hz)
   let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
   let specOpen = false;                                        // cached spectrum expanded outside spec mode
   let unfreeze = null;                                         // table kind a sort/filter click is re-rendering right now
@@ -716,6 +724,13 @@
     const on = !(state && state.alerts);
     armPending('alerts', $('#alertBtn'), on ? 'Turning on…' : 'Turning off…');
     post({ cmd: 'alerts', value: on }).then(unlatchOnFail('alerts'));
+  });
+  $('#patrolBtn').addEventListener('click', () => {
+    const on = !(state && state.patrol && state.patrol.on);
+    const legs = $('#patrolLegs').value.trim();
+    armPending('patrol', $('#patrolBtn'), on ? 'Starting…' : 'Stopping…');
+    post(on ? (legs ? { cmd: 'patrol', legs } : { cmd: 'patrol', value: true }) : { cmd: 'patrol', value: false })
+      .then(unlatchOnFail('patrol'));
   });
   $('#alertCard').addEventListener('click', (e) => {
     const b = e.target.closest('button[data-ledtest]'); if (!b) return;
@@ -960,10 +975,12 @@
     if (pending.cap && Date.now() - pending.cap > 6000) pending.cap = 0;   // command lost: release the button
     const capOff = spec && !cap;
     const capBtn = $('#capBtn');
+    const patrolling = !!(s.patrol && s.patrol.on);   // C5 v1 patrols without capture (the device refuses both)
     if (!pending.cap) {
       capBtn.textContent = cap ? 'Stop saving to Mac' : 'Start pcap capture';
-      capBtn.disabled = capOff;
-      capBtn.title = capOff ? 'No RX armed in spectrum mode — switch back to a radio mode first.' : '';
+      capBtn.disabled = capOff || (patrolling && !cap);
+      capBtn.title = capOff ? 'No RX armed in spectrum mode — switch back to a radio mode first.'
+        : (patrolling && !cap) ? 'Patrol runs without capture — stop the patrol first.' : '';
     }
     capBtn.classList.toggle('stop', !!cap);
     $('#snap').disabled = capOff;
@@ -984,8 +1001,9 @@
     const sdOff = spec && !rec;   // "sdcap" is refused in spec mode too: the file would never grow
     if (!pending.sd) {
       $('#sdBtn').textContent = rec ? 'Stop SD recording' : 'Record to SD';
-      $('#sdBtn').disabled = !sd.mounted || sdOff;
-      $('#sdBtn').title = !sd.mounted ? 'Insert a microSD card first.' : (sdOff ? 'No RX armed in spectrum mode — the file would never grow.' : '');
+      $('#sdBtn').disabled = !sd.mounted || sdOff || (patrolling && !rec);
+      $('#sdBtn').title = !sd.mounted ? 'Insert a microSD card first.' : (sdOff ? 'No RX armed in spectrum mode — the file would never grow.'
+        : (patrolling && !rec) ? 'Patrol runs without capture — stop the patrol first.' : '');
     }
     $('#sdBtn').classList.toggle('stop', rec);
     // Keep the file list around: hello replaces st["sd"] without it, so re-ask whenever it is gone. A few
@@ -1048,6 +1066,35 @@
     const btn = $('#alertBtn');
     if (!pending.alerts) { btn.textContent = on ? 'Turn LED alerts off' : 'Turn LED alerts on'; btn.disabled = false; }
     btn.classList.toggle('stop', on);
+  }
+
+  // C5 patrol: the device walks the modes round-robin (s.patrol is null on firmware without it - hide the block).
+  // Each hand-off is an ordinary mode change, so the views move exactly as they would for a click on a mode.
+  const PATROL_LABEL = { '5g': '5 GHz Wi-Fi', '2.4g': '2.4 GHz Wi-Fi', both: 'both Wi-Fi bands', ble: 'Bluetooth LE', '154': '802.15.4', spec: 'Spectrum' };
+  function renderPatrol(s) {
+    const p = s.patrol;
+    $('#patrolBox').hidden = !p;
+    if (!p) return;
+    const on = !!p.on;
+    if (pending.patrol && (Date.now() - pending.patrol > 6000 || (prev.patrolOn !== undefined && on !== prev.patrolOn))) pending.patrol = 0;
+    prev.patrolOn = on;
+    const busy = !on && (s.capture || s.cap || (s.sd && s.sd.cap) || s.hunt || s.deauth);
+    const btn = $('#patrolBtn');
+    if (!pending.patrol) {
+      btn.textContent = on ? 'Stop patrol' : 'Start patrol';
+      btn.disabled = !!busy;
+      btn.title = busy ? 'Patrol runs without capture, hunt or deauth — stop those first.' : '';
+    }
+    btn.classList.toggle('stop', on);
+    const inp = $('#patrolLegs');
+    inp.disabled = on;
+    if (on && p.legs && p.legs.length) inp.value = p.legs.map(l => `${l[0]}:${l[1]}`).join(',');   // what is running
+    if (!on) { $('#patrolInfo').textContent = 'Walks these modes on its own, round-robin (mode:seconds), so the spectrum\'s "explained" sources stay fresh. No capture while it runs; picking a mode stops it.'; return; }
+    const legs = p.legs || [];
+    const secs = Math.ceil((p.left_ms || 0) / 1000);
+    $('#patrolInfo').innerHTML = `leg <b>${(p.leg || 0) + 1}/${legs.length}</b> · <b>${esc(PATROL_LABEL[p.band] || p.band || '?')}</b> · ` +
+      (secs > 0 ? `<b>${secs} s</b> left` : 'handing off…') +
+      `<br><span class="dim">cycle ${fmt((p.cyc || 0) + 1)} · picking a mode stops it</span>`;
   }
 
   // C4 SD event log: status from the device's "ev" object (absent on firmware before C4 - hide the block then).
@@ -1578,7 +1625,7 @@
     $('#app').classList.toggle('stale', !s.connected);
     topbarFit();   // the firmware line can wrap the topbar
     if (s.hello && !mirrorInit) { mirrorInit = true; if (s.hello.mir) { mirrorOn = true; mirrorSetBtn(); } }
-    renderRail(s); renderAlerts(s); renderHero(s); renderDeauthBar(s); renderHuntBar(s); renderExplain(s); renderUnidPill(s);
+    renderRail(s); renderAlerts(s); renderPatrol(s); renderHero(s); renderDeauthBar(s); renderHuntBar(s); renderExplain(s); renderUnidPill(s);
     if (pending.spec && (s.band === 'spec' || Date.now() - pending.spec > 6000)) {
       pending.spec = 0;
       document.querySelectorAll('[data-startspec]').forEach(b => { b.disabled = false; b.textContent = 'Scan 2.4 GHz'; });

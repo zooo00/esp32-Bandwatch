@@ -745,6 +745,14 @@ void showBandSplash(BandMode m, uint32_t durMs) {
     if (n > 0) lv_obj_move_to_index(splashBg, n - 1);
 }
 
+// After setBandMode(): the page the new mode wants, and its name card when the mode really changed. Shared by the
+// "band" command and the C5 patrol hand-off, so a patrol leg looks exactly like a manual mode change.
+void showModeChange(BandMode prev) {
+    if (modeSpec()) showPage(PAGE_SPECTRUM);
+    else if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
+    if (bandMode != prev) showBandSplash(bandMode, kSplashShowMs);   // name the new mode before its scan page
+}
+
 // SD card face: a sad face when the card goes away, a happy one when it comes back. Drawn on LVGL's top layer so
 // it sits above any page, mode card or photo and survives a page rebuild underneath; one custom-drawn object,
 // created on demand and deleted by serviceSdFace() after kSdFaceMs.
@@ -867,7 +875,18 @@ const char* recTag() {
     return "";
 }
 
+// C5: while patrolling, a header's right label names the leg instead - "patrol BOTH 23s" (15 chars at most, as wide
+// as "BOTH ch165 USB"). No record tag is needed: patrol and capture exclude each other. False when not patrolling.
+bool patrolHeaderText(char* buf, size_t n) {
+    if (!patrol.active) return false;
+    static const char* const kLcdMode[] = {"5G", "2.4G", "BOTH", "BLE", "15.4", "SPEC"};   // indexed by BandMode
+    snprintf(buf, n, "patrol %s %lus", kLcdMode[bandMode < kBandModes ? bandMode : 0],
+             static_cast<unsigned long>((patrolLeftMs() + 999) / 1000));
+    return true;
+}
+
 void chanHeaderText(char* buf, size_t n) {
+    if (patrolHeaderText(buf, n)) return;
     if (!hopMode()) { snprintf(buf, n, "BLE"); return; }
     const char* band = (currentIdx >= 0 && is154(currentIdx)) ? "15.4" : (currentIdx >= 0 && is5g(currentIdx)) ? "5G" : "2.4G";
     if (!monitorReady)       snprintf(buf, n, "no ch%s", recTag());
@@ -1075,7 +1094,8 @@ void refreshDevices() {
     }
     char buf[48];
     const int n = devRowCount;
-    if (bandMode == BAND_BLE)
+    if (patrolHeaderText(buf, sizeof(buf))) {}
+    else if (bandMode == BAND_BLE)
         snprintf(buf, sizeof(buf), "BLE %d %s%s", n, bleScan.active ? "act" : "psv", recTag());
     else
         snprintf(buf, sizeof(buf), "%s %d%s", mode154() ? "15.4" : "WiFi", n, recTag());
@@ -1234,7 +1254,8 @@ void refreshSpectrum() {
         lv_label_set_text(spPeakLabel, "-- dBm");
         lv_label_set_text(spStatsLabel, "scanning...");
     }
-    if (monitorReady && currentSpecMhz) snprintf(buf, sizeof(buf), "%d MHz%s", currentSpecMhz, recTag());
+    if (patrolHeaderText(buf, sizeof(buf))) {}
+    else if (monitorReady && currentSpecMhz) snprintf(buf, sizeof(buf), "%d MHz%s", currentSpecMhz, recTag());
     else snprintf(buf, sizeof(buf), "scan%s", recTag());
     lv_label_set_text(spChanLabel, buf);
     applyRecColor(spChanLabel);
@@ -1394,6 +1415,10 @@ void pollButton() {
     if (!down) return;
     auto step = [&]() {                           // one walk-step: next position for one interval (modes, then the photo slot)
         const bool toPhoto = !walkPhoto && bandMode == kBandModes - 1;   // after Spectrum comes the picture, not another mode
+        if (patrol.active) {                      // a manual mode walk ends the patrol (C5), like a "band" command
+            stopPatrol();
+            if (serialRoom(80)) Serial.print("{\"t\":\"log\",\"msg\":\"patrol stopped by button\"}\n");
+        }
         if (!toPhoto) {
             setBandMode(walkPhoto ? BandMode(0) : static_cast<BandMode>(bandMode + 1));
             showBandSplash(bandMode, kSplashStepMs);   // (release still names the committed mode with the tail card)

@@ -25,6 +25,10 @@ requests. `blescan passive` keeps BLE mode fully silent.
   channels 11–26, ~3.5 s per sweep), or **spectrum** (`spec`: raw 2.4 GHz RF energy, 2400–2483 MHz at a 1/2/5 MHz
   step, flagging energy no decoded Wi‑Fi/BLE/Zigbee device explains). The C5 has one radio, so these six modes are
   time‑shared, never simultaneous.
+- **Patrol**: `patrol 1` (or the dashboard's Patrol control) walks the modes on its own — spectrum 30 s, both Wi‑Fi
+  bands 40 s, BLE 20 s, repeat — so the spectrum's "explained" sources stay fresh on a board left on a desk; custom
+  legs with `patrol spec:20,ble:10,…` (2–6 legs, 5–600 s). No capture, hunt or deauth while it walks; picking a mode
+  stops it. The LCD header shows `patrol <MODE> <s>s`.
 - **Devices**: every Wi‑Fi transmitter (RSSI, max, frames, channel) and, for access points, the beacon details:
   SSID, security (Open / WEP / WPA / WPA2‑PSK / WPA2‑Enterprise / WPA3‑SAE / WPA3‑Enterprise / OWE, PMF),
   PHY generation (b/g, n, ac, ax, be), channel width, BSS‑load utilisation and client count, country. Every BLE
@@ -174,7 +178,8 @@ Serial commands (newline‑terminated, also usable from any terminal): `band 5g|
 `hunt <mac|ext-addr|pan/short> [ch]` / `hunt 0`, `deauth <bssid>` / `deauth 0` (Wi‑Fi modes only — broadcast
 deauth to all clients of that AP, auto‑stops after 5 min), `dca <client_mac> <ap_bssid>` / `dca 0` (targeted deauth
 to one specific station), `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>`, `events 0|1`,
-`alerts 0|1`, `ledtest surv|new|join`, `mirror 0|1`, `page next|prev`, `time <epoch>`, `info`, `reboot`, and the
+`alerts 0|1`, `ledtest surv|new|join`, `mirror 0|1`, `page next|prev`, `patrol 1|0` / `patrol <mode>:<sec>,…`,
+`time <epoch>`, `info`, `reboot`, and the
 diagnostics `sdprobe` and `sdface 0|1`. Each is described in [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §4.
 Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
 `cap 1` afterwards.

@@ -50,6 +50,12 @@ records what `send()` would write), feeds it protocol lines through `handle_line
   lowers `file_total`, re-sends `sdls`; ok 0 keeps it), `sdrm: ...` refusal err lines, the pulled local copy left
   alone, and a failed `sdread` reporting `failed` so the dashboard stops showing progress.
 
+- `test_patrol.py` (C5, v1.20): the `pt` member in `hello` / `{"t":"pt"}` / the `patrol` ack (null = idle, absent =
+  old firmware), `left_ms` counting down on a faked clock, a malformed `pt` line logged not raised;
+  `clean_patrol_legs()` (2-6 legs, modes, 5-600 s, strings and objects, injection); `POST patrol` mapping, 400s,
+  503 without a device, 409 when a capture/hunt/deauth runs, and capture/sdcap/hunt/deauth/dca/explain refused with
+  409 while patrolling (their stop forms and `band` still pass).
+
 ## 2. Firmware (`tests/firmware/`) - offline, no board
 
 - `test_build_static_ram` runs `./build.sh` (compile only, never `--upload`) and fails if `Global variables use N
@@ -80,7 +86,9 @@ silence after `mirror 0`; `page next` cycle and `page prev`; a soak per mode (pl
 every line must be well-formed JSON or a valid `P`/`S`/`M`/`MF` line; `w` chunks of at most 24 rows; `sdrm` (bad
 names refused before the card is touched; with a card: a short `sdcap` pcap found by `sdls`, deleted, gone from
 the next `sdls`, a second delete answers `no such file`; deleting the file being recorded is refused and the
-recording keeps running); and no reboot during the run.
+recording keeps running); C5 patrol (bad legs and an over-long line refused, refused while `cap 1`, legs
+`both:5,ble:5` handing off with `pt.leg` / `pt.cyc` in hello and a `{"t":"pt"}` line in BLE, `cap`/`sdcap`/`hunt`
+refused mid-patrol, `band` ending it, `patrol 0` staying put); and no reboot during the run.
 
 Every test restores what it changed (band, park, USB/SD capture, mirror, event log) against the hello read at the
 start. Side effects that remain: a band change also selects an LCD page, and the `sdcap` heap test leaves one small

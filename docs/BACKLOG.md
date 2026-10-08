@@ -37,6 +37,14 @@ State as of **v1.19.5** (2026-10-07). Finished items move to **Done** at the end
 
 ## Verify on hardware (built, not yet proven)
 
+### V7 · Patrol mode on the board — P2, verify
+- Flash v1.20, run `tests/device` T13Patrol (custom legs `both:5,ble:5`: hand-off seen in hello + `{"t":"pt"}` in BLE,
+  refusals both ways, `band` ends it). Then `patrol 1` for a few full cycles with the dashboard open: the Patrol card
+  counts down, the channel views collapse/return like a manual mode click, the LCD header reads `patrol SPEC 12s`.
+- Free heap from the `s`/`ble`/`fs` lines before and after each hand-off stays within a few hundred bytes (no leak per
+  cycle); leave it walking ~30 min with `events 1` and check `T99`-style no reboot.
+- **Done when:** T13 passes on the board and the heap numbers per hand-off are in DEVELOPER §22.
+
 ### V5 · `/seen.csv` rotation time on hardware — P3, verify
 - Put a `/seen.csv` with ~5000 distinct globally-unique MAC lines on the card, `events 1` (or re-insert while armed):
   expect `seen.csv rotated: 5000 -> 2048`, `ev.file` 2048. Time the attach (the loop task is busy for it - LCD and
@@ -121,7 +129,6 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 | ID | Feature | Notes |
 | --- | --- | --- |
 | C2 | Ghost AP (beacon, then probe responder) | Transmits: needs the dead-man's switch pattern; stage 1 before stage 2 |
-| C5 | Patrol mode (auto round-robin) | Keeps the spectrum's "explained" sources fresh; covers the 1.7 time-separation gap |
 | C7 | Hunt by SSID | Small; reuses the hunt ack shape |
 | C9 | Deauth refinements (rate, auto-stop) | Read the corrected EAPOL detection in ROADMAP C9 first |
 | C12 | ESP-IDF port | The exit ramp: BLE extended advertising, the fixed ~59 kB stack |
@@ -141,6 +148,7 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 | Item | Version | Evidence |
 | --- | --- | --- |
 | **C11** host CSV export | v1.20 | `dashboard2.html`: a *CSV* button on the Wi-Fi, BLE, Zigbee and probe tables exports the rows shown (DEVELOPER §5). Checked with a scratch Node harness over the pure builder (hostile `=HYPERLINK` SSID, comma/quote/newline name, null-RSSI `dest_only` row, non-ASCII names, RFC 4180 round-trip) and the host tier; not yet clicked in a browser against a live board |
+| **C5** patrol mode (auto round-robin) | v1.20 | `patrol 1` / `patrol <mode>:<sec>,...` / `patrol 0`, `pt` in hello + `{"t":"pt"}`, LCD header, dashboard Patrol card (DEVELOPER §22). Offline only: compiled (+56 B static), host tests `tests/host/test_patrol.py`; T13Patrol written but not yet run on the board (V7) |
 | **B1** dashboard hid a running deauth while a hunt was active | v1.19.3 | `dashboard2.html` renders the hunt and deauth bars independently, so both show at once, each with its own Stop. Code review only; not yet watched on hardware with both running |
 | **B2** deauth row buttons stuck on "…" | v1.19.3 | the `pending.deauth` latch is released on every render whenever no deauth is running, not only inside the active-deauth branch. Code review only (the render harness in I2 is still to do) |
 | **C10 + 1.6.1** permit-join LED blip / alerting | v1.19 | shipped as D1 (§21) |

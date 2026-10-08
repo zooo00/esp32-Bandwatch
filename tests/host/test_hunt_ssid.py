@@ -52,7 +52,7 @@ class HuntSsidRouteTest(unittest.TestCase):
                 self.assertEqual(self.sent_for(body), (200, want))
 
     def test_line_fits_the_device_buffer(self):
-        # pollSerial keeps 47 bytes: "huntssid " + 32 bytes of UTF-8 is 41.
+        # pollSerial keeps 63 bytes since C5 (47 before): "huntssid " + 32 bytes of UTF-8 is 41, inside either.
         code, sent = self.sent_for({"cmd": "huntssid", "ssid": "é" * 16})
         self.assertEqual(code, 200)
         self.assertLessEqual(len(sent[0].encode("utf-8")), 47)

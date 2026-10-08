@@ -728,7 +728,7 @@ void handleCommand(char* line) {
         // C7: "huntssid <name>" - the name is the rest of the line, spaces included, 1..32 bytes, matched exactly
         // (case-sensitive) against beacon SSIDs as stored, i.e. after the control-character sanitize, which is
         // applied to the name too. "huntssid 0" (or no name) stops the hunt. A name that cannot be an SSID is
-        // refused and the running hunt is left alone. pollSerial's 48-byte line holds "huntssid " + 32 bytes.
+        // refused and the running hunt is left alone. pollSerial's 64-byte line (C5) holds "huntssid " + 32 bytes.
         const size_t n = strlen(arg);
         if (n > 32) {
             sendLinef("{\"t\":\"err\",\"msg\":\"huntssid: name longer than 32 bytes\"}\n");

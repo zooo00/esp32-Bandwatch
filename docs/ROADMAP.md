@@ -4,7 +4,7 @@ Planned work, open questions and known gaps. Release history is in [`CHANGELOG.m
 v1.15.x review/dashboard passes and the 2026-10 RAM audit, v1.16 C1, v1.17 the 96-slot Wi-Fi table, v1.18 C4 + SD
 removal hardening, v1.18.x mirror frames + regression suite, v1.19 LED alerts / classic retired / card-file
 management, v1.19.1 grouped card-file view + exclusive serial port, v1.19.3 review fixes). Shipped: C3 + C6 + C8 (v1.11), C1 (v1.16), C4 (v1.18, which also delivers 1.6.2 and 1.6.4);
-C10 + 1.6.1 LED alert blips (v1.19, D1); C2/C5/C7/C9/C11 still candidates, C12 the exit ramp.
+C10 + 1.6.1 LED alert blips (v1.19, D1); C5 patrol mode (v1.20); C2/C7/C9/C11 still candidates, C12 the exit ramp.
 
 **Open work is tracked in [BACKLOG.md](BACKLOG.md)**; this file keeps the design write-ups behind it.
 
@@ -75,7 +75,7 @@ The quick hits (C6–C11) are cheap enough to batch; the big ones each justify t
 | C2 | Ghost AP mode (+ probe responder) | attract sleepers, catch their handshakes | <100 B + heap scratch while active | yes: `ghost` cmd/ack, counters in `d` | M |
 | C3 | NVS persistence | boot where you left off; settings survive reboot | transient ~0.5–1 kB, none resident | no (maybe a log line) | S |
 | C4 ✅ v1.18 | Event log → SD CSV (+ novelty baseline) | persistent hits + "new device here" without a host | 16-entry queue 160 B + ~12.6 kB heap while armed (1.18 total incl. presence/faces: +456 B static) | yes in the end: `ev` status line + `events` cmd | M |
-| C5 | Patrol mode (auto round-robin) | keeps the spectrum's "known emitters" fresh; passive logging | timer state, few bytes | yes: `patrol` cmd/ack, leg in status lines | S–M |
+| C5 ✅ v1.20 | Patrol mode (auto round-robin) | keeps the spectrum's "known emitters" fresh; passive logging | +56 B (leg table, timer, 64 B command line) | yes: `patrol` cmd/ack, `pt` in hello + a `{"t":"pt"}` status line | S–M |
 | C6 | Top talker per dwell | name the loudest voice on each channel | +≈8 B in `Accum` (one instance) | field added to `d` line | S |
 | C7 | Hunt by SSID | "where's my network" without knowing its MAC | 34 B while active, heap-allocated | reuses `hunt` ack shape; new command | S–M |
 | C8 | Least-busy readout | quietest channel on Overview / dashboard | 0 — computable from today's `s` rows | no | S (UI only) |
@@ -252,7 +252,17 @@ double-flash proposal (never agreed)? Decide once together with C10.
 **Verify.** Seed `/seen.csv` with known MACs, wave a stranger past it, read the CSV off-card (`sdread` already works).
 Check writer byte-discipline against `capinfos` like §12 did for captures.
 
-### C5 — Patrol mode (auto round-robin)
+### C5 — Patrol mode (auto round-robin)  ✅ SHIPPED v1.20
+
+**Status: shipped v1.20 (compiled and tested offline; not yet run on the board).** Design and wire format in
+DEVELOPER §22. Decisions on the open questions: (1) default legs `spec` 30 s -> `both` 40 s -> `ble` 20 s (`both`
+covers the 5 GHz busy score at the cost of a longer leg); custom legs with `patrol <mode>:<sec>,...` (2-6 legs,
+5-600 s) - leg configuration was not left for later. (2) On the dwell boundary (at most one dwell late). (3) Refused
+both ways while a hunt or deauth runs (and while a USB/SD capture runs: v1 has no capture). Not persisted; a manual
+`band` or BOOT walk stops it; the event log keeps running. Status: `pt` in hello and in a `{"t":"pt"}` line every
+2 s in every mode (BLE has no dwells), the LCD header reads `patrol BOTH 23s`. Static RAM +56 B. Still open:
+per-leg capture (the stretch below), and the on-board verify list.
+
 
 **What.** A timer that walks the modes on its own — e.g. `spec` 30 s → `2.4g` 20 s → `ble` 20 s, repeat — so the
 spectrum's unidentified-energy flag stays meaningful without manually sweeping the decode modes first (the 1.7 note:
@@ -469,7 +479,7 @@ an identification. See [DEVELOPER.md §18](DEVELOPER.md). Known limits (the coar
   at a selectable 1/2/5 MHz step (`specstep`). Sub-MHz swept-centre-frequency resolution would still need driver
   work and is unverified.
 - **Correlation is time-separated.** One radio can't decode and energy-scan at once, so "unexplained" is
-  relative to the last Wi-Fi/BLE/15.4 sweep. The fix is candidate C5 (patrol mode).
+  relative to the last Wi-Fi/BLE/15.4 sweep. C5 patrol mode (v1.20) keeps that sweep recent automatically.
 
 ---
 

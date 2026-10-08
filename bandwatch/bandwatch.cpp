@@ -454,6 +454,7 @@ void hopIfNeeded() {
     if ((now - dwellStartedMs) < dwell) return;
 
     finishDwell();
+    g_dwellEdge = true;   // C5: a patrol leg that is due hands off now (servicePatrol, same task)
     const int lastIdx = currentIdx;
     monitorReady = advanceChannel();
     // Reset after the switch, not before it: frames that landed between the two used to be counted toward the
@@ -463,6 +464,80 @@ void hopIfNeeded() {
         sweepCount += 1;
         sendSweep();
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// C5 patrol: round-robin over (mode, seconds) legs (DEVELOPER §22). Loop task only.
+// ---------------------------------------------------------------------------------------------
+Patrol patrol;
+bool g_dwellEdge = false;
+
+namespace {
+uint32_t patrolSentMs = 0;   // last {"t":"pt"} line
+
+void sendPatrolStatus() {
+    char pt[kPatrolJsonMax + 8];
+    fmtPatrol(pt, sizeof(pt));
+    if (sendLinef("{\"t\":\"pt\",%s}\n", pt)) patrolSentMs = millis();
+}
+
+// Enter patrol.leg: drop any park (a leg sweeps), switch through the one tested teardown/bring-up path, then tell
+// the host - hello carries the new channel list and the "pt" object. The leg clock starts after the radio is up.
+void enterPatrolLeg() {
+    const BandMode prev = bandMode;
+    parkedIdx = -1;
+    setBandMode(patrol.mode[patrol.leg]);
+    showModeChange(prev);
+    patrol.legStartMs = millis();
+    g_dwellEdge = false;
+    sendLinef("{\"t\":\"log\",\"msg\":\"patrol: leg %u/%u %s %u s\"}\n", patrol.leg + 1, patrol.n,
+              kBandName[bandMode], patrol.sec[patrol.leg]);
+    sendHello();
+}
+} // namespace
+
+uint32_t patrolLeftMs() {
+    if (!patrol.active) return 0;
+    const uint32_t legMs = static_cast<uint32_t>(patrol.sec[patrol.leg]) * 1000UL;
+    const uint32_t el = millis() - patrol.legStartMs;
+    return el >= legMs ? 0 : legMs - el;
+}
+
+void startPatrol(const BandMode* modes, const uint16_t* secs, uint8_t n) {
+    if (!patrol.active) patrol.home = bandMode;   // a restart keeps the band the first start came from
+    for (uint8_t i = 0; i < n; i++) { patrol.mode[i] = modes[i]; patrol.sec[i] = secs[i]; }
+    patrol.n = n;
+    patrol.leg = 0;
+    patrol.cycles = 0;
+    patrol.active = true;
+    enterPatrolLeg();
+    sendPatrolStatus();
+}
+
+void stopPatrol() {
+    if (!patrol.active) return;
+    patrol.active = false;
+    sendPatrolStatus();   // one "pt":null line, so a host that missed the ack still sees it end
+}
+
+void servicePatrol() {
+    if (!patrol.active) return;
+    const bool edge = g_dwellEdge;
+    g_dwellEdge = false;
+    const uint32_t now = millis();
+    const uint32_t legMs = static_cast<uint32_t>(patrol.sec[patrol.leg]) * 1000UL;
+    const uint32_t el = now - patrol.legStartMs;
+    // Due: hand off on the next dwell boundary (cleaner per-channel stats, at most one dwell late). BLE has no
+    // dwells, and a sweep mode whose radio is not on a channel never finishes one, so those go at once; the
+    // +1 s is a backstop in case a dwell never completes.
+    if (el >= legMs && (edge || !hopActive() || !monitorReady || el >= legMs + 1000)) {
+        patrol.leg = static_cast<uint8_t>((patrol.leg + 1) % patrol.n);
+        if (patrol.leg == 0 && patrol.cycles < 0xFFFF) patrol.cycles++;
+        enterPatrolLeg();
+        sendPatrolStatus();
+        return;
+    }
+    if (now - patrolSentMs >= kPatrolStatusMs) sendPatrolStatus();
 }
 
 void Bandwatch_Init(void) {
@@ -509,6 +584,7 @@ void Bandwatch_Loop(void) {
     serviceLedAlerts();  // D1: surveillance / permit-join / new-device LED blips (yields to deauth)
     serviceBle();
     serviceSpectrum();   // re-arm energy detection (spec mode only; no-op otherwise)
+    servicePatrol();     // C5: leg hand-off on a dwell boundary + {"t":"pt"} status (no-op unless patrolling)
     const uint32_t now = millis();
     if (now - lastDevMs >= kDevListMs) {
         lastDevMs = now;

@@ -12,7 +12,7 @@ so the page shown after a run can differ. `sdcap` (only when a card is in) leave
 (the T11 sdrm tests delete the ones they record).
 
 Env: BANDWATCH_PORT (required), BANDWATCH_SOAK_S (per-mode soak length, default 30).
-Runtime: ~6-7 minutes with the default soak.
+Runtime: ~7-8 minutes with the default soak.
 """
 import os
 import re
@@ -58,6 +58,8 @@ def tearDownModule():
 def restore():
     """Put band / park / capture / SD capture / mirror / event log / LED alerts back to what ORIG reported."""
     h = board.hello(timeout=8)
+    if h.get("pt"):   # C5: never leave the board walking (a patrol would also change the band under the checks below)
+        board.command("patrol 0")
     if h.get("mir") != ORIG.get("mir"):
         board.command("mirror %d" % (ORIG.get("mir") or 0))
     if (h.get("sd") or {}).get("cap") and not (ORIG.get("sd") or {}).get("cap"):
@@ -96,7 +98,7 @@ class T01Hello(BoardTest):
         self.assertEqual(h["fw"], "bandwatch")
         self.assertRegex(h["ver"], r"^\d+\.\d+(\.\d+)?$")
         for k in ("dwell_ms", "spec_step", "band", "country", "bandmode", "proto", "promisc", "chs", "park", "cap",
-                  "snap", "heap", "up", "rst", "hunt", "h", "deauth", "sd", "mir", "ev", "alerts"):
+                  "snap", "heap", "up", "rst", "hunt", "h", "deauth", "sd", "mir", "ev", "alerts", "pt"):
             self.assertIn(k, h)
         self.assertIn(h["band"], BAND_NAMES)
         self.assertEqual(h["chs"], EXPECTED_CHS[h["band"]])
@@ -506,6 +508,75 @@ class T12Alerts(BoardTest):
         idx = board.mark()
         board.send("ledtest purple")
         board.wait_json(lambda o: o.get("t") == "err" and str(o.get("msg", "")).startswith("ledtest"), 3, idx)
+
+
+class T13Patrol(BoardTest):
+    """C5 patrol (v1.20): short custom legs, the hand-off seen in hello and the {"t":"pt"} status line (also in BLE,
+    which has no dwells), the refusals both ways, a manual band ending it, then "patrol 0". Only receive-side
+    commands are tried while patrolling: a broken guard must not be able to start a deauth from a test."""
+
+    def tearDown(self):
+        board.send("patrol 0")
+        board.send("hunt 0")
+        time.sleep(0.3)
+        super().tearDown()
+
+    def test_bad_legs_refused(self):
+        for arg in ("spec:30", "spec:4,ble:5", "spec:601,ble:5", "6g:30,ble:5", "spec:30,ble:5,"):
+            with self.subTest(arg=arg):
+                r = board.command_or_err("patrol " + arg)
+                self.assertEqual(r.get("t"), "err", r)
+        self.assertIsNone(board.hello()["pt"])
+
+    def test_overlong_line_refused(self):
+        idx = board.mark()
+        board.send("patrol " + ",".join(["both:600"] * 7))   # 69 chars: past the 63-char line buffer
+        board.wait_json(lambda o: o.get("t") == "err" and o.get("msg") == "line too long", 3, idx)
+        self.assertIsNone(board.hello()["pt"])
+
+    def test_patrol_refused_while_capturing(self):
+        board.set_band("2.4g")
+        if board.command("cap 1", timeout=8).get("cap") != 1:
+            self.skipTest("no capture ring (low heap)")
+        r = board.command_or_err("patrol 1")
+        self.assertEqual((r.get("t"), r.get("msg")), ("err", "patrol: stop capture first"))
+        board.command("cap 0")
+
+    def test_hand_off_status_and_stop(self):
+        ack = board.command("patrol both:5,ble:5", timeout=15)
+        pt = ack["pt"]
+        self.assertEqual(pt["legs"], [["both", 5], ["ble", 5]])
+        self.assertEqual(pt["leg"], 0)
+        self.assertTrue(0 < pt["left"] <= 5000, pt)
+        idx = board.mark()
+        h = board.wait_json(lambda o: o.get("t") == "hello" and (o.get("pt") or {}).get("leg") == 1, 12, idx,
+                            "the hello of the second leg")
+        self.assertEqual((h["band"], h["chs"]), ("ble", []))
+        o = board.wait_json(lambda o: o.get("t") == "pt" and o.get("pt"), 4, idx, "a pt status line in BLE")
+        self.assertIn(o["pt"]["leg"], (0, 1))
+        h = board.wait_json(lambda o: o.get("t") == "hello" and (o.get("pt") or {}).get("leg") == 0, 12, idx,
+                            "the hello of the wrap back to the first leg")
+        self.assertEqual((h["band"], h["pt"]["cyc"]), ("both", 1))
+        for cmd in ("cap 1", "sdcap 1", "hunt aa:bb:cc:dd:ee:ff"):
+            with self.subTest(cmd=cmd):
+                r = board.command_or_err(cmd)
+                self.assertEqual((r.get("t"), r.get("msg")), ("err", cmd.split()[0] + ": stop patrol first"))
+        self.assertIsNone(board.command("patrol 0")["pt"])
+        h = board.hello()
+        self.assertIsNone(h["pt"])
+        mode = h["band"]
+        time.sleep(6)   # longer than a leg: it really stopped
+        self.assertEqual(board.hello()["band"], mode)
+
+    def test_band_command_ends_patrol(self):
+        board.command("patrol both:5,ble:5", timeout=15)
+        idx = board.mark()
+        board.send("band 2.4g")
+        board.wait_json(lambda o: o.get("t") == "ack" and o.get("cmd") == "band", 15, idx, "band ack")
+        # A leg hand-off may slip its own hello in before the band command lands: wait for the one with "pt" null.
+        h = board.wait_json(lambda o: o.get("t") == "hello" and "pt" in o and o["pt"] is None, 10, idx,
+                            "hello after band")
+        self.assertEqual(h["band"], "2.4g")
 
 
 class T99NoReboot(BoardTest):

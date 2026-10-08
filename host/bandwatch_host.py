@@ -23,6 +23,9 @@ Serial protocol (one line each):
     {"t":"ev", "ev":{...}}        SD event log status (every 5 s while armed; the same "ev" object rides on
                                   hello and the "events" ack): on, card, base, file, written, pending,
                                   surv, new, drop, err, wait - see _set_events()
+    {"t":"pt", "pt":{...}|null}   C5 patrol status (every 2 s while patrolling, in every mode, and once when it
+                                  stops; the same "pt" member rides on hello and the "patrol" ack): leg, left
+                                  (ms), cyc, legs [[mode, sec], ...] - see _set_patrol()
     {"t":"ack"|"log"|"err", ...}
     P <ch> <rssi> <ts_us> <len> <base64 frame>   captured 802.11 frame (when "cap 1")
     S <n> <base64>                               chunk of a file being read back (after "sdread")
@@ -42,7 +45,9 @@ card-root file; the pulled local copy stays), "time <epoch>", "info",
 /seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s),
 "alerts 0|1" (LED alert blips for surveillance hits / permit-join / new devices; persists), "ledtest surv|new|join",
 "specstep 1|2|5" (fine-spectrum step, spec mode), "blescan active|passive|auto", "addr1 0|1" (track addr1-only
-destinations), "mirror 0|1" (stream the LCD), "page next|prev" (step the LCD like a BOOT tap).
+destinations), "mirror 0|1" (stream the LCD), "page next|prev" (step the LCD like a BOOT tap),
+"patrol 1|0" / "patrol <mode>:<sec>,..." (C5: walk the modes round-robin; 2-6 legs of 5-600 s; refused while a
+capture, hunt or deauth runs, and those are refused while it walks; a "band" ends it).
 "explain full|current|clear" on /api/cmd is host-side: it walks the device through Wi-Fi/BLE/15.4 and back to spec.
 
 HTTP API: GET /api/state, /api/screen, /screen.bin, /file?name=..; POST /api/cmd with a JSON object body and
@@ -231,6 +236,38 @@ def clean_hunt_id(v):
         return None
     v = v.strip()
     return v.lower() if MAC_RE.match(v) or KEY154_RE.match(v) else None
+
+
+PATROL_MODES = ("5g", "2.4g", "both", "ble", "154", "spec")
+PATROL_LEGS_MIN, PATROL_LEGS_MAX = 2, 6     # bandwatch_core.h kPatrolMinLegs / kPatrolMaxLegs
+PATROL_SEC_MIN, PATROL_SEC_MAX = 5, 600     # kPatrolSecMin / kPatrolSecMax
+
+
+def clean_patrol_legs(v):
+    """C5 patrol legs, as a list of [mode, sec] pairs (or {"mode", "sec"} objects) or the device's own
+    "mode:sec,mode:sec" string. Returns the device argument ("spec:30,both:40") or None when anything is off:
+    2..6 legs, modes from PATROL_MODES, whole seconds 5..600. Strict, so nothing malformed reaches the serial line
+    (the device re-validates and would refuse it with an err line the dashboard only sees in the log)."""
+    if isinstance(v, str):
+        v = [part.split(":", 1) if ":" in part else [part, None] for part in v.strip().split(",")]
+    if not isinstance(v, list) or not PATROL_LEGS_MIN <= len(v) <= PATROL_LEGS_MAX:
+        return None
+    out = []
+    for leg in v:
+        if isinstance(leg, dict):
+            mode, sec = leg.get("mode"), leg.get("sec")
+        elif isinstance(leg, (list, tuple)) and len(leg) == 2:
+            mode, sec = leg
+        else:
+            return None
+        if not isinstance(mode, str) or mode.strip() not in PATROL_MODES:
+            return None
+        if isinstance(sec, str) and sec.strip().isdigit():
+            sec = int(sec.strip())
+        if isinstance(sec, bool) or not isinstance(sec, int) or not PATROL_SEC_MIN <= sec <= PATROL_SEC_MAX:
+            return None
+        out.append(f"{mode.strip()}:{sec}")
+    return ",".join(out)
 
 
 def find_port():
@@ -454,6 +491,9 @@ class Bandwatch:
             "sd_rm": None,           # last card-file delete: {name,pending,ok,msg,t} (the dashboard's confirm/toast)
             "events": None,          # C4 SD event log status, the device's "ev" object (None = old firmware)
             "alerts": None,          # LED alert blips on/off (hello + "alerts" ack; None = firmware without it)
+            # C5 patrol: None = firmware without it; {"on": False} = idle; {"on": True, "leg", "left", "cyc", "legs",
+            # "t"} while it walks (from hello, the {"t":"pt"} line every 2 s and the "patrol" ack). See _set_patrol().
+            "patrol": None,
             # completed captures this session, per sink, for the dashboard counters
             "saved": {"usb": {"count": 0, "last": None, "frames": 0, "bytes": 0},
                       "sd":  {"count": 0, "last": None, "frames": 0, "bytes": 0}},
@@ -628,6 +668,26 @@ class Bandwatch:
         if isinstance(ev, dict):
             self.state["events"] = dict(ev)
 
+    def _set_patrol(self, msg):
+        """C5 patrol state from a line that carries the "pt" member (hello, {"t":"pt"}, the "patrol" ack): null =
+        idle, else {"leg": i, "left": ms left in the leg, "cyc": cycles done, "legs": [[mode, sec], ...]}. A line
+        without the member (firmware before C5) leaves the state alone. "t" stamps it, so snapshot() can count
+        "left" down between the 2 s status lines."""
+        if "pt" not in msg:
+            return
+        pt = msg.get("pt")
+        if not isinstance(pt, dict):
+            self.state["patrol"] = {"on": False}
+            return
+        legs = [[str(l[0]), int(l[1])] for l in pt.get("legs", []) if isinstance(l, list) and len(l) >= 2]
+        leg = int(pt.get("leg", 0))
+        self.state["patrol"] = {"on": True, "leg": leg, "left": int(pt.get("left", 0)), "cyc": int(pt.get("cyc", 0)),
+                                "legs": legs, "t": time.time()}
+
+    def patrolling(self):
+        p = self.state.get("patrol")
+        return bool(p and p.get("on"))
+
     def _set_deauth(self, d):
         # device sends [bssid, park channel (0 if hopping), frames sent, frames failed] or null for broadcast mode;
         # or [client_mac, ap_bssid, targeted_flag=1, sent, fail] for targeted mode.
@@ -728,8 +788,11 @@ class Bandwatch:
             self._set_events(msg.get("ev"))
             if "alerts" in msg:
                 st["alerts"] = 1 if msg.get("alerts") else 0
+            self._set_patrol(msg)
         elif t == "ev":
             self._set_events(msg.get("ev"))
+        elif t == "pt":
+            self._set_patrol(msg)
         elif t == "d":
             c = msg["c"]
             entry = {"s": msg["s"], "r": msg["r"], "f": msg["f"], "b": msg["b"], "st": msg["st"],
@@ -877,6 +940,8 @@ class Bandwatch:
                 self._set_events(msg.get("ev"))
             if msg.get("cmd") == "alerts" and "alerts" in msg:
                 st["alerts"] = 1 if msg.get("alerts") else 0
+            if msg.get("cmd") == "patrol":
+                self._set_patrol(msg)
             if msg.get("cmd") == "sdread":
                 self._sd_read_start(msg.get("file"), msg.get("bytes"))   # the ack precedes the S chunks
             elif msg.get("cmd") == "sdread_done":
@@ -1574,7 +1639,15 @@ class Bandwatch:
                     "vendor": src.get("vendor", ""), "kind": src.get("kind", "") or (src.get("pan") and "PAN " + src["pan"]) or ""}
         fine = self.fine
         live = copy.deepcopy({k: st.get(k) for k in ("hello", "capture", "explain", "deauth", "ble", "sd", "sd_read",
-                                                      "sd_rm", "saved", "events", "alerts")})
+                                                      "sd_rm", "saved", "events", "alerts", "patrol")})
+        patrol = live["patrol"]
+        if patrol and patrol.get("on"):
+            # Count the leg down between status lines (they come every 2 s; the dashboard polls at 1 Hz). Floors at 0:
+            # a due leg waits for the next dwell boundary before the hand-off.
+            legs = patrol.get("legs") or []
+            leg = patrol.get("leg", 0)
+            patrol["left_ms"] = max(0, int(patrol.get("left", 0) - (now - patrol.pop("t", now)) * 1000))
+            patrol["band"] = legs[leg][0] if 0 <= leg < len(legs) else None
         return {
             "connected": st["connected"], "port": st["port"],
             "age": round(now - st["last_rx"], 1) if st["last_rx"] else None,
@@ -1598,6 +1671,7 @@ class Bandwatch:
             "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt,
             "deauth": live["deauth"], "ble": live["ble"], "sd": live["sd"], "sd_read": live["sd_read"],
             "sd_rm": live["sd_rm"], "saved": live["saved"], "events": live["events"], "alerts": live["alerts"],
+            "patrol": patrol,
             "oui_source": self.oui.source,
         }
 
@@ -1796,7 +1870,46 @@ def make_handler(bw, page_path, bind=None):
                     raise _NotConnected
 
             cmd = req.get("cmd")
-            if cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154", "spec"):
+
+            def not_while_patrolling(starting):
+                # C5 v1: the device refuses these mid-patrol ("<cmd>: stop patrol first"); refusing here too keeps
+                # the click from looking accepted (and keeps "capture" from opening a pcap that never grows).
+                if starting and bw.patrolling():
+                    raise _Reply(409, f"{cmd}: stop patrol first")
+
+            if cmd in ("capture", "sdcap"):
+                not_while_patrolling(bool(req.get("value")))
+            elif cmd in ("hunt", "deauth"):
+                not_while_patrolling(bool(req.get("mac")))
+            elif cmd == "dca":
+                not_while_patrolling(bool(req.get("client_mac") or req.get("mac") or req.get("ap_bssid")))
+            elif cmd == "explain":
+                not_while_patrolling(req.get("value") in ("full", "current"))   # its band steps would end the patrol
+
+            if cmd == "patrol":
+                # {"value": true|false} = default legs / stop; {"legs": [[mode, sec], ...] or "mode:sec,..."} = custom.
+                legs = req.get("legs")
+                value = req.get("value")
+                if legs is not None:
+                    arg = clean_patrol_legs(legs)
+                    if not arg:
+                        raise _Reply(400, "patrol legs: 2-6 of [mode, sec], mode 5g|2.4g|both|ble|154|spec, 5-600 s")
+                elif value in (True, 1, "1", "on"):
+                    arg = "1"
+                elif value in (False, 0, "0", "off", None):
+                    arg = "0"
+                else:
+                    raise _Reply(400, "patrol value must be on/off")
+                if arg != "0":
+                    need_device()
+                    with bw.dlock:
+                        st = bw.state
+                        busy = ("capture" if st.get("capture") or st.get("cap") or (st.get("sd") or {}).get("cap")
+                                else "hunt" if st.get("hunt") else "deauth" if st.get("deauth") else None)
+                    if busy:
+                        raise _Reply(409, f"patrol: stop {busy} first")
+                dev(f"patrol {arg}")
+            elif cmd == "band" and req.get("value") in ("5g", "2.4g", "both", "ble", "154", "spec"):
                 dev(f"band {req['value']}")
             elif cmd == "specstep" and int(req.get("value") or 0) in (1, 2, 5):
                 dev(f"specstep {int(req['value'])}")

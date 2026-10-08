@@ -179,14 +179,27 @@ void huntIdText(char* out, size_t n) {
     }
 }
 
+// C5 patrol state as one JSON member: "pt":null, or "pt":{"leg":i,"left":ms,"cyc":n,"legs":[["spec",30],...]}.
+// Widest case (6 legs of a 4-char mode at 600 s, left 600000, cyc 65535) is 127 B = kPatrolJsonMax - 1.
+size_t fmtPatrol(char* out, size_t n) {
+    if (!patrol.active) return static_cast<size_t>(snprintf(out, n, "\"pt\":null"));
+    int w = snprintf(out, n, "\"pt\":{\"leg\":%u,\"left\":%lu,\"cyc\":%u,\"legs\":[", patrol.leg,
+                     static_cast<unsigned long>(patrolLeftMs()), patrol.cycles);
+    for (uint8_t i = 0; i < patrol.n && w > 0 && static_cast<size_t>(w) < n; i++)
+        w += snprintf(out + w, n - w, "%s[\"%s\",%u]", i ? "," : "", kBandName[patrol.mode[i]], patrol.sec[i]);
+    if (w > 0 && static_cast<size_t>(w) < n) w += snprintf(out + w, n - w, "]}");
+    return w > 0 ? static_cast<size_t>(w) : 0;
+}
+
 void sendHello() {
     // Worst case, from the format strings below with every field at its widest: 132 B of literal text in the
     // first printf + ver/dwell/step/band (16) + the channel list (kChannelCount x 4, "165,") + the park..hunt
     // printf (119, incl. a 23-char 15.4 hunt id) + "h" (32) + a targeted "deauth" (74) + "sd" (166, incl. a 47-char
-    // path) + mir/alerts (20) + "ev" (189) + "}\n" = 750 + 152 = 902, plus the four esp_err_to_name() strings,
+    // path) + mir/alerts (20) + "ev" (189) + "}\n" = 750 + 152 = 902, + C5's ",\"pt\":{...}" (128, kPatrolJsonMax)
+    // = 1,030, plus the four esp_err_to_name() strings,
     // measured at run time because their length is the one part not bounded here. A line that passes the check
     // and then overruns is truncated mid-JSON, which is exactly what the drop-whole-lines rule exists to prevent.
-    constexpr size_t kHelloFixed = 750 + kChannelCount * 4;
+    constexpr size_t kHelloFixed = 750 + kPatrolJsonMax + kChannelCount * 4;
     const size_t errLen = strlen(esp_err_to_name(errCountry)) + strlen(esp_err_to_name(errBand)) +
                           strlen(esp_err_to_name(errProto)) + strlen(esp_err_to_name(errPromisc));
     if (!serialRoom(kHelloFixed + errLen)) return;
@@ -220,7 +233,9 @@ void sendHello() {
                   static_cast<unsigned long>(sd.errors), epochValid ? 1 : 0);
     Serial.printf(",\"mir\":%d,\"alerts\":%d,", g_mirror ? 1 : 0, g_ledAlerts ? 1 : 0);
     printEvents();
-    Serial.print("}\n");
+    char pt[kPatrolJsonMax + 8];
+    fmtPatrol(pt, sizeof(pt));
+    Serial.printf(",%s}\n", pt);
 }
 
 void sendDwell(int idx) {
@@ -440,13 +455,81 @@ bool parseKey154(const char* s, uint8_t* key) {
     return false;
 }
 
+// C5: "spec:30,both:40,ble:20" -> legs. The whole argument must parse: kPatrolMinLegs..kPatrolMaxLegs legs of
+// <mode>:<seconds>, mode by its kBandName, seconds kPatrolSecMin..kPatrolSecMax as plain digits.
+bool parsePatrolLegs(char* s, BandMode* modes, uint16_t* secs, uint8_t& n) {
+    n = 0;
+    for (;;) {
+        if (n >= kPatrolMaxLegs) return false;
+        char* colon = strchr(s, ':');
+        if (!colon) return false;
+        *colon = 0;
+        int m = -1;
+        for (int i = 0; i < kBandModes; i++) if (!strcmp(s, kBandName[i])) m = i;
+        const char* p = colon + 1;
+        unsigned sec = 0;
+        int digits = 0;
+        while (*p >= '0' && *p <= '9' && digits < 4) { sec = sec * 10 + static_cast<unsigned>(*p++ - '0'); digits++; }
+        if (m < 0 || !digits || sec < kPatrolSecMin || sec > kPatrolSecMax) return false;
+        modes[n] = static_cast<BandMode>(m);
+        secs[n] = static_cast<uint16_t>(sec);
+        n++;
+        if (!*p) break;
+        if (*p != ',' || !p[1]) return false;
+        s = const_cast<char*>(p + 1);
+    }
+    return n >= kPatrolMinLegs;
+}
+
 void handleCommand(char* line) {
     // One command per line; the full list and each reply's shape are in docs/DEVELOPER.md (and CLAUDE.md).
     // Every ack/err/log reply goes through sendLinef(), so a full TX buffer drops the reply whole (rule 6).
     char* sp = strchr(line, ' ');
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
-    if (!strcmp(line, "cap")) {
+    if (patrol.active) {
+        // C5 v1 patrols without capture (every hand-off releases the ring), and a hunt or deauth parks the radio,
+        // which a hand-off would undo: none of them may start mid-patrol (patrol refuses to start over them too).
+        // The stop forms ("cap 0", "hunt 0", "deauth 0", "dca 0") still pass. C7's "huntssid" is matched by its
+        // command word only, so this guard needs nothing from that code.
+        const bool capStart = (!strcmp(line, "cap") || !strcmp(line, "sdcap")) && atoi(arg) != 0;
+        const bool parkStart = (!strcmp(line, "hunt") || !strcmp(line, "huntssid") || !strcmp(line, "deauth") ||
+                                !strcmp(line, "dca")) && arg[0] && strcmp(arg, "0") != 0;
+        if (capStart || parkStart) {
+            sendLinef("{\"t\":\"err\",\"msg\":\"%s: stop patrol first\"}\n", line);
+            return;
+        }
+    }
+    if (!strcmp(line, "patrol")) {
+        // "patrol 1" = the default legs, "patrol <mode>:<sec>,..." = custom legs (both start, or restart, it),
+        // "patrol 0" = stop and stay in the current mode, bare "patrol" = query. Never persisted.
+        if (!strcmp(arg, "0")) {
+            stopPatrol();
+        } else if (arg[0]) {
+            static const BandMode kDefModes[] = {BAND_SPEC, BAND_BOTH, BAND_BLE};
+            static const uint16_t kDefSecs[] = {30, 40, 20};
+            BandMode modes[kPatrolMaxLegs];
+            uint16_t secs[kPatrolMaxLegs];
+            uint8_t n = 0;
+            const char* why = nullptr;
+            if (!strcmp(arg, "1")) {
+                for (n = 0; n < 3; n++) { modes[n] = kDefModes[n]; secs[n] = kDefSecs[n]; }
+            } else if (!parsePatrolLegs(arg, modes, secs, n)) {
+                why = "legs are 2-6 x mode:sec (5g|2.4g|both|ble|154|spec, 5-600 s)";
+            }
+            if (!why && (captureEnabled || sd.capEnabled)) why = "stop capture first";
+            else if (!why && hunt.active) why = "stop hunt first";
+            else if (!why && deauth.active) why = "stop deauth first";
+            if (why) {
+                sendLinef("{\"t\":\"err\",\"msg\":\"patrol: %s\"}\n", why);
+                return;
+            }
+            startPatrol(modes, secs, n);
+        }
+        char pt[kPatrolJsonMax + 8];
+        fmtPatrol(pt, sizeof(pt));
+        sendLinef("{\"t\":\"ack\",\"cmd\":\"patrol\",%s}\n", pt);
+    } else if (!strcmp(line, "cap")) {
         // Wi-Fi / 802.15.4 / BLE all have a link type; spec arms no RX, so refuse rather than record silence.
         const bool want = atoi(arg) != 0;
         const bool on = want && !modeSpec() && ensureCapRing();
@@ -556,16 +639,21 @@ void handleCommand(char* line) {
         sendLinef("{\"t\":\"ack\",\"cmd\":\"park\",\"park\":%d}\n", parkedIdx >= 0 ? kChannels[parkedIdx] : 0);
     } else if (!strcmp(line, "band")) {
         const BandMode prev = bandMode;
-        if (!strcmp(arg, "5g")) setBandMode(BAND_5G);
-        else if (!strcmp(arg, "2.4g") || !strcmp(arg, "24g")) setBandMode(BAND_24G);
-        else if (!strcmp(arg, "both")) setBandMode(BAND_BOTH);
-        else if (!strcmp(arg, "ble")) setBandMode(BAND_BLE);
-        else if (!strcmp(arg, "154") || !strcmp(arg, "zigbee") || !strcmp(arg, "thread")) setBandMode(BAND_154);
-        else if (!strcmp(arg, "spec") || !strcmp(arg, "spectrum")) setBandMode(BAND_SPEC);
-        if (modeSpec()) showPage(PAGE_SPECTRUM);
-        else if (!hopMode() && (currentPage == PAGE_OVERVIEW || currentPage == PAGE_CHANNELS)) showPage(PAGE_DEVICES);
-        if (bandMode != prev) showBandSplash(bandMode, kSplashShowMs);   // name the new mode before its scan page
-        if (bandMode != prev) saveSettings();   // persist the new mode (C3); park is intentionally not saved
+        int m = -1;
+        if (!strcmp(arg, "5g")) m = BAND_5G;
+        else if (!strcmp(arg, "2.4g") || !strcmp(arg, "24g")) m = BAND_24G;
+        else if (!strcmp(arg, "both")) m = BAND_BOTH;
+        else if (!strcmp(arg, "ble")) m = BAND_BLE;
+        else if (!strcmp(arg, "154") || !strcmp(arg, "zigbee") || !strcmp(arg, "thread")) m = BAND_154;
+        else if (!strcmp(arg, "spec") || !strcmp(arg, "spectrum")) m = BAND_SPEC;
+        const bool wasPatrolling = m >= 0 && patrol.active;
+        if (wasPatrolling) {   // a manual mode choice ends the patrol (C5), even onto the leg it was already on
+            stopPatrol();
+            sendLinef("{\"t\":\"log\",\"msg\":\"patrol stopped by band\"}\n");
+        }
+        if (m >= 0) setBandMode(static_cast<BandMode>(m));
+        showModeChange(prev);
+        if (bandMode != prev || wasPatrolling) saveSettings();   // persist the new mode (C3); park is intentionally not saved
         sendLinef("{\"t\":\"ack\",\"cmd\":\"band\",\"band\":\"%s\"}\n", kBandName[bandMode]);
         sendHello();
     } else if (!strcmp(line, "hunt")) {
@@ -687,15 +775,22 @@ void handleCommand(char* line) {
 } // namespace
 
 void pollSerial() {
-    static char line[48];
+    // 64: the longest valid command is a 6-leg "patrol" (60 chars). A longer line used to be cut and run as its
+    // prefix - harmless for a MAC, but a cut leg list can still parse ("both:600" -> "both:6") - so it is refused.
+    static char line[64];
     static size_t len = 0;
+    static bool over = false;
     while (Serial.available()) {
         const char c = static_cast<char>(Serial.read());
         if (c == '\n' || c == '\r') {
-            if (len) { line[len] = 0; handleCommand(line); }
+            if (over) sendLinef("{\"t\":\"err\",\"msg\":\"line too long\"}\n");
+            else if (len) { line[len] = 0; handleCommand(line); }
             len = 0;
+            over = false;
         } else if (len < sizeof(line) - 1) {
             line[len++] = c;
+        } else {
+            over = true;
         }
     }
 }

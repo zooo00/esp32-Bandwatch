@@ -7,6 +7,8 @@
 // + LED alert blips on/off ("alerts", absent key = on, so the schema stays 1).
 // NOT persisted, on purpose:
 //   - park: a device that boots silently parked on one channel is a "why is it stuck" footgun; let it hop.
+//   - patrol (C5): a reboot comes up in the band the patrol started from, not walking. While one runs, the
+//     band saved here is that starting band, so another setting's save does not persist a leg.
 //   - hunt / deauth: a reboot must STOP transmitting (the same safety argument as the dead-man's switch),
 //     and must not resume an attack nobody is watching.
 #include "bandwatch_core.h"
@@ -54,7 +56,7 @@ void loadSettings() {
 void saveSettings() {
     if (!prefs.begin(kNs, /*readOnly=*/false)) return;
     prefs.putUChar("ver", kSchema);
-    prefs.putUChar("band", bandMode);
+    prefs.putUChar("band", patrol.active ? patrol.home : bandMode);   // a patrol leg is not a choice (C5)
     prefs.putUChar("addr1", trackAddr1 ? 1 : 0);
     prefs.putUChar("blescan", bleScan.mode);
     prefs.putUChar("specstep", specStepMhz);

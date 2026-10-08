@@ -175,7 +175,10 @@ lines. Useful commands: `band 5g|2.4g|both|ble|154|spec`, `park <ch>`, `cap 1/0`
 `snap <32..1600>` (capture snap length), `addr1 1|0` (also track Wi-Fi devices seen only as a frame destination,
 tier 1, §15; persisted), `blescan active|passive|auto` (BLE scan policy; default `auto` stays
 passive and opens a short active window when a new scannable device has no name), `specstep 1|2|5` (fine-spectrum
-step in MHz; spec mode only), `mirror 1|0` (stream the LCD to the host over serial; default off, §19), `page next|prev` (step the LCD like a BOOT tap, §19), `reboot`.
+step in MHz; spec mode only), `mirror 1|0` (stream the LCD to the host over serial; default off, §19), `page next|prev` (step the LCD like a BOOT tap, §19),
+`patrol 1|0` / `patrol <mode>:<sec>[,...]` (C5: walk the modes round-robin; default spec 30 s -> both 40 s -> ble 20 s,
+2-6 legs of 5-600 s; hand-off on a dwell boundary; not persisted; refused while a capture/hunt/deauth runs and those are
+refused while it walks; any `band` stops it; status `pt` in hello + `{"t":"pt"}` every 2 s, §22), `reboot`.
 microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>` (delete one
 card-root file; refused for the file being recorded, during an `sdread` or mid event-log flush; deleting `seen.csv`
 while the event log is armed restarts novelty; §12), `time <epoch>` (no RTC —

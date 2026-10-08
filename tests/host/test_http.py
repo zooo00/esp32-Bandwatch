@@ -195,6 +195,9 @@ class CommandMappingTest(unittest.TestCase):
             ({"cmd": "dca", "mac": "aa:aa:aa:aa:aa:aa", "ap_bssid": "11:22:33:44:55:66"},
              ["dca aa:aa:aa:aa:aa:aa 11:22:33:44:55:66"]),
             ({"cmd": "dca"}, ["dca 0"]),
+            ({"cmd": "blekick", "mac": "aa:bb:cc:dd:ee:ff"}, ["blekick aa:bb:cc:dd:ee:ff"]),
+            ({"cmd": "blekick", "mac": "AA:BB:CC:DD:EE:FF"}, ["blekick aa:bb:cc:dd:ee:ff"]),   # lower-cased, like the rest
+            ({"cmd": "blekick"}, ["blekick 0"]),
             ({"cmd": "sdcap", "value": 1}, ["sdcap 1"]),
             ({"cmd": "sdcap", "value": 0}, ["sdcap 0"]),
             ({"cmd": "events", "value": True}, ["events 1"]),
@@ -243,6 +246,7 @@ class CommandMappingTest(unittest.TestCase):
             {"cmd": "specstep"}, {"cmd": "park", "value": "six"},
             {"cmd": "hunt", "mac": "nonsense"}, {"cmd": "hunt", "mac": "aa:bb:cc:dd:ee:ff reboot"},
             {"cmd": "deauth", "mac": "aa:bb"}, {"cmd": "deauth", "mac": "aa:bb:cc:dd:ee:ff\nreboot"},
+            {"cmd": "blekick", "mac": "aa:bb"}, {"cmd": "blekick", "mac": "aa:bb:cc:dd:ee:ff\nreboot"},
             {"cmd": "dca", "client_mac": "aa:aa:aa:aa:aa:aa"},
             {"cmd": "dca", "client_mac": "aa:aa:aa:aa:aa:aa 11:22:33:44:55:66", "ap_bssid": "x"},
             {"cmd": "page", "value": "up"}, {"cmd": "blescan", "value": "loud"},

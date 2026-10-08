@@ -452,6 +452,41 @@ class AckTest(unittest.TestCase):
         self.assertEqual(snap["band"], "ble")
 
 
+class BleKickTest(unittest.TestCase):
+    """BLE kick (v1.21): the "bk" member rides the BLE heartbeat and the blekick ack; absent on older firmware."""
+
+    def test_ble_heartbeat_carries_bkick(self):
+        bw = make_bw()
+        feed(bw, {"t": "ble", "devs": 3, "cycles": 9, "heap": 80000, "adv": 120, "scan": "active",
+                  "running": "active", "switches": 1, "cap": 0, "drop": 0, "sdc": 0, "sdf": 0, "sdb": 0,
+                  "h": None, "bk": ["aa:bb:cc:dd:ee:ff", "connected", 3, 1]})
+        self.assertEqual(bw.snapshot()["blekick"], {"mac": "aa:bb:cc:dd:ee:ff", "state": "connected",
+                                                     "kicks": 3, "fails": 1})
+
+    def test_ble_heartbeat_null_bkick_clears(self):
+        bw = make_bw()
+        line = {"t": "ble", "devs": 3, "cycles": 9, "heap": 80000, "adv": 120, "scan": "active",
+                "running": "active", "switches": 1, "cap": 0, "drop": 0, "sdc": 0, "sdf": 0, "sdb": 0, "h": None}
+        feed(bw, dict(line, bk=["aa:bb:cc:dd:ee:ff", "idle", 0, 2]))
+        self.assertIsNotNone(bw.snapshot()["blekick"])
+        feed(bw, dict(line, bk=None))   # a stop on the device shows up within one heartbeat (<= 1 s)
+        self.assertIsNone(bw.snapshot()["blekick"])
+
+    def test_blekick_ack(self):
+        bw = make_bw()
+        feed(bw, HELLO_24)
+        feed(bw, {"t": "ack", "cmd": "blekick", "bk": ["aa:bb:cc:dd:ee:ff", "idle", 0, 0]})
+        self.assertEqual(bw.snapshot()["blekick"]["mac"], "aa:bb:cc:dd:ee:ff")
+        feed(bw, {"t": "ack", "cmd": "blekick", "bk": None})   # stopped (or started outside BLE mode)
+        self.assertIsNone(bw.snapshot()["blekick"])
+
+    def test_old_firmware_without_bk_key_keeps_none(self):
+        bw = make_bw()
+        feed(bw, {"t": "ble", "devs": 3, "cycles": 9, "heap": 80000, "adv": 120, "scan": "auto",
+                  "running": "passive", "switches": 1, "cap": 0, "drop": 0, "sdc": 0, "sdf": 0, "sdb": 0, "h": None})
+        self.assertIsNone(bw.snapshot()["blekick"])
+
+
 class AlertsTest(unittest.TestCase):
     """LED alert blips (v1.19): "alerts" on hello and on the alerts ack; absent on older firmware."""
 

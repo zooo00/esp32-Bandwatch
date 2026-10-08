@@ -531,7 +531,7 @@
   const sort = { wifi: { k: 'rssi', dir: -1 }, ble: { k: 'rssi', dir: -1 }, zig: { k: 'rssi', dir: -1 } };
   const frozen = { wifi: false, ble: false, zig: false };      // table under the mouse keeps its rows put
   const expanded = { wifi: false, ble: false, zig: false };    // user-opened "last seen" cards
-  const pending = { cap: 0, sd: 0, deauth: 0, ev: 0, spec: 0, alerts: 0, patrol: 0 };     // click latches until the device confirms (poll is 1 Hz)
+  const pending = { cap: 0, sd: 0, deauth: 0, bk: 0, ev: 0, spec: 0, alerts: 0, patrol: 0 };     // click latches until the device confirms (poll is 1 Hz)
   let explainPending = null;                                   // {scope, t} latched from click until the host reports it active
   let specOpen = false;                                        // cached spectrum expanded outside spec mode
   let unfreeze = null;                                         // table kind a sort/filter click is re-rendering right now
@@ -847,6 +847,13 @@
     if (!k) return;
     armPending('deauth', k, '…');
     post({ cmd: 'deauth', mac: k.dataset.deauth || null }).then(unlatchOnFail('deauth'));
+  });
+  // Kick button (BLE rows): connect/hold/disconnect loop against one device - the deauth equivalent for BLE.
+  document.addEventListener('click', (e) => {
+    const k = e.target.closest('button[data-bkick]');
+    if (!k) return;
+    armPending('bk', k, '…');
+    post({ cmd: 'blekick', mac: k.dataset.bkick || null }).then(unlatchOnFail('bk'));
   });
   // The gear that reveals the client picker. One menu open at a time; a click anywhere else closes it.
   document.addEventListener('click', (e) => {
@@ -1580,6 +1587,12 @@
     return ` <button class="small ${on ? 'stop' : ''}" data-huntssid="${on ? '' : esc(d.ssid)}" title="${on ? 'Stop the network-name hunt' : 'Hunt every AP beaconing this name'}">${on ? 'Stop name' : 'Name'}</button>`;
   }
   function huntBtn(mac, ch, s) { const on = s.hunt && !s.hunt.ssid && s.hunt.mac === mac; return `<button class="small ${on ? 'stop' : ''}" data-hunt="${on ? '' : esc(mac)}" ${ch ? `data-ch="${esc(ch)}"` : ''}>${on ? 'Stop' : 'Hunt'}</button>`; }
+  function kickBtn(d, s) {
+    const on = !!(s.blekick && s.blekick.mac === d.mac);
+    return pending.bk
+      ? `<button class="small" disabled>…</button>`
+      : `<button class="small ${on ? 'stop' : ''}" data-bkick="${on ? '' : esc(d.mac)}" title="${on ? `Stop — ${s.blekick.kicks} kick${s.blekick.kicks === 1 ? '' : 's'} so far` : 'Connect, hold, disconnect — repeat (the BLE deauth)'}">${on ? 'Stop' : 'Kick'}</button>`;
+  }
   function deauthBtn(d, s) {
     // "Stop" belongs on whichever row the running attack is pinned to: in targeted mode the device
     // reports the client as .mac and the AP as .ap_bssid, so an AP row matches on either.
@@ -1641,6 +1654,10 @@
   }
 
   function renderBle(s) {
+    // Release the Kick click latch on every render, running or not: as soon as the device's state differs from what it
+    // was at the click, or after ~6 s (same rule as deauth in renderDeauthBar()).
+    if (pending.bk && (Date.now() - pending.bk > 6000 || (prev.bkOn !== undefined && !!s.blekick !== prev.bkOn))) pending.bk = 0;
+    prev.bkOn = !!s.blekick;
     const f = $('#bleFilter').value.trim().toLowerCase(), active = $('#bleActive').checked;
     let rows = (s.ble_devs || []).filter(d => (!active || d.age < 60) && (!f || [d.name, d.mac, d.vendor, d.kind, d.company_name].join(' ').toLowerCase().includes(f)));
     rows = sortRows(rows, 'ble');
@@ -1652,8 +1669,8 @@
       <td class="l mono">${esc(d.mac)}<br><span class="sub">${d.random ? 'random address' : 'public address'}</span></td>
       <td class="l">${esc(d.vendor)}${d.company && d.company_name !== d.vendor ? `<br><span class="sub">${esc(d.company_name)}</span>` : ''}</td>
       <td class="l">${esc(d.kind)}</td><td>${d.tx != null ? esc(d.tx) + ' dBm' : ''}</td>
-      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.adv)}</td><td>${ago(d.age)}</td><td class="l">${huntBtn(d.mac, 0, s)}</td>`, freezeOf('ble'));
-    for (const tr of $('#bleTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${d.age > 60 ? 'stale' : ''}`; }
+      <td>${rssiCell(d.rssi, d)}</td><td>${maxCell(d.max, d)}</td><td>${spark(d.hist, d)}</td><td>${fmt(d.adv)}</td><td>${ago(d.age)}</td><td class="l"><span class="actgrp">${huntBtn(d.mac, 0, s)}${kickBtn(d, s)}</span></td>`, freezeOf('ble'));
+    for (const tr of $('#bleTbl tbody').children) { const d = rows.find(x => x.mac === tr.dataset.key); if (d) tr.className = `${s.hunt && s.hunt.mac === d.mac ? 'hunted' : ''} ${s.blekick && s.blekick.mac === d.mac ? 'kicked' : ''} ${d.age > 60 ? 'stale' : ''}`; }
   }
 
   function renderZig(s) {

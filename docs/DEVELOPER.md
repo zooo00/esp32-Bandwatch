@@ -1467,3 +1467,41 @@ hit). The Montserrat fonts are ASCII-only, so non-ASCII bytes in a name still re
 **Verify on hardware.** Two APs with one SSID on different channels: walk between them; the reading and the park
 should follow the stronger (allow one rescan, up to ~35 s). A name that matches nothing: zero hits, hopping, no
 crash. `park 6` during the hunt: the hunt leaves the park alone from then on.
+
+## 24. BLE kick (`blekick`, v1.21)
+
+The deauth equivalent for BLE. There is no BLE management frame to spoof, so instead of blasting a "leave" we
+**take over the victim's connection**: Bandwatch becomes a NimBLE *central* aimed at one target MAC and repeats
+connect -> hold ~600 ms -> disconnect with status **0x13** ("Remote User Terminated Connection"). A single-slot
+peripheral (a beach speaker playing from its phone) drops or stutters the real peer each cycle. `blekick <mac>`
+starts in BLE mode, `blekick 0` stops; an unparseable MAC or a non-BLE band also stops — exactly mirroring `deauth`.
+
+**Why takeover.** Four families of BLE DoS exist (see the plan's prior-art table): advertising flood, **connection
+takeover**, L2CAP data flood, and raw passive `LL_TERMINATE_IND` injection. Takeover is the only one doable with
+stock NimBLE host APIs on this core — no raw PDU injection, no GATT/L2CAP client. Prior art: blue-deauth's "connect
+flood" (same idea over BlueZ), btlejack's passive "jam" (injects a forged 0x13 `LL_TERMINATE_IND` with a coprocessor
+board — prior art for the reason code, not the mechanism), bettercap #719 (still open in 2026: no BLE DoS shipped),
+and the GHM DoS paper (DOI 10.18466/cbayarfbe.856119): one l2ping did nothing to headphones, ~7 parallel ones
+disconnected them — that is the v2 "flood" mode if takeover alone doesn't bite.
+
+**State machine (`ble_kick.cpp`).** `startBleKick(mac)` copies the MAC and resolves the peer address type from a fresh
+`bleDevs[]` entry (default random) under `g_devMux`. `serviceBleKick()` paces it from `uiTimerCb()` at ~120 ms:
+idle for `kBleKickGapMs` (700) -> `ble_gap_connect(BLE_OWN_ADDR_PUBLIC, peer, kBleKickTimeoutMs (4000), NULL)` with its
+own GAP callback; connected and held for `kBleKickHoldMs` (600) -> `ble_gap_terminate(connh, 0x13)`. The callback runs
+on the NimBLE host task under the same single-producer discipline as `bleGapEvent()`: shared fields only under
+`g_devMux`, Serial outside. A dead-man's switch (`kDeauthMaxMs`, like deauth) auto-stops a forgotten attack, and a mode
+change does too (`stopBleKick()` in `setBandMode`). Stop mid-connected must not hold the victim's slot until its
+supervision timeout: `serviceBleKick()` terminates once for the `!active && st == 2` case.
+
+**Protocol.** A `"bk"` member `[mac, state, kicks, fails]` (state ∈ idle/connecting/connected; null when stopped) rides
+the BLE heartbeat (`sendBleStatus()`, budget raised 300 -> 360 B) and the ack — BLE mode has no dwell lines for a live
+counter to ride (§14). Log lines are the on-hardware oracle: `blekick #N connected` per won connect, first refusal +
+every 16th as `blekick attempt failed rc=<nimble>`. The Kick button sits on each BLE table row; the red attack blink is
+shared with deauth.
+
+**RAM.** `BleKick` packs to 28 B (field-ordered, `static_assert`). Static total 77,288 -> 77,312 B (+24).
+
+**Open questions (honest failure modes).** A victim busy while paired *refuses* new peers: `kicks=0`, `fails` climbs —
+that is the signal, not a bug; v2 adds parallel attempts or an L2CAP echo flood. Resolvable-private addresses fail to
+connect (no IRK held) -> also honest `fails`; static random and public work. The passive raw-terminate family defeats
+busy-refuse outright at the cost of a coprocessor board (`tools/witness` pattern).

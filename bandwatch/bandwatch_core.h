@@ -17,7 +17,7 @@ typedef struct _lv_timer_t lv_timer_t;
 // ---------------------------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------------------------
-constexpr const char* kVersion = "1.20.1";
+constexpr const char* kVersion = "1.21";
 constexpr uint32_t kDwellMs = 220;          // Dwell per channel (200–400 ms)
 constexpr uint32_t kUiIntervalMs = 120;     // UI refresh cadence
 constexpr int kStrongThresholdDbm = -65;    // "Strong" frame threshold
@@ -37,6 +37,10 @@ constexpr uint32_t kDevFreshMs = 60000;     // Devices older than this are not r
 constexpr uint32_t kDevLcdFreshMs = 20000;  // ... nor shown on the LCD
 constexpr uint32_t kBleActiveWindowMs = 4000;   // how long to scan actively after a new scannable device
 constexpr uint32_t kBleSwitchMinMs = 2000;      // never flip the scan mode more often than this
+// BLE kick ("blekick"): connect -> hold this long -> terminate(0x13) -> pause, repeated (the deauth equivalent).
+constexpr uint32_t kBleKickHoldMs = 600;        // hold a won connection this long before terminating it
+constexpr uint32_t kBleKickGapMs = 700;         // pause between attempts (let the victim re-advertise)
+constexpr int      kBleKickTimeoutMs = 4000;    // per-attempt connect timeout for ble_gap_connect()
 constexpr const char* kCountryCode = "EU";  // Only affects the regulatory table (sniffing never transmits; deauth and
                                             // the BLE active window do - see DEVELOPER.md).
 constexpr uint32_t kDeauthMaxMs = 5UL * 60UL * 1000UL;  // Dead-man's switch: auto-stop a deauth attack after this long
@@ -277,6 +281,21 @@ struct BleState {
     uint32_t switches = 0;
 };
 
+// BLE kick ("blekick"): the deauth equivalent for BLE - we become a central for one target and loop
+// connect / hold / terminate(0x13). Not persisted: like park/hunt/deauth, a reboot must stop transmitting.
+struct BleKick {
+    uint8_t mac[6] = {};                 // target, MSB-first (table order)
+    volatile bool active = false;        // attack running ("blekick <mac>" was accepted in BLE mode)
+    volatile uint8_t st = 0;             // 0 idle / 1 connecting / 2 connected
+    uint8_t addrType = 1;                // peer BLE_ADDR_PUBLIC/RANDOM, resolved from the table at start (default random)
+    uint16_t connh = 0;                  // connection handle while st == 2
+    uint32_t startMs = 0;                // dead-man's switch origin: kDeauthMaxMs, like deauth
+    uint32_t stateMs = 0;                // pacing: millis() when st last changed (and at start)
+    volatile uint32_t kicks = 0;         // successful connects - the moment of impact
+    volatile uint32_t fails = 0;         // refused/timed-out attempts
+};
+static_assert(sizeof(BleKick) == 28, "BleKick is field-ordered to pack tightly (see deauth's packing note)");
+
 // microSD sink (sd_sink). FATFS is mounted only while the card is actually in use: mounting costs ~30 KB
 // and BLE mode cuts its scans short below ~28 KB free.
 struct SdSink {
@@ -378,6 +397,7 @@ extern Dev154 devs154[kDev154Slots];
 extern Hunt hunt;
 extern Deauth deauth;
 extern BleState bleScan;
+extern BleKick bleKick;   // the BLE kick attack (ble_kick.cpp)
 extern SdSink sd;
 
 // Beacon-injection self-test (deauth_diag.cpp), toggled from the host with "txtest".
@@ -465,6 +485,11 @@ void startDeauth(const uint8_t* mac);
 void startDeauthTargeted(const uint8_t* clientMac, const uint8_t* apBssid);
 void stopDeauth();
 void serviceDeauth();
+
+// BLE kick ("blekick"), the deauth equivalent for BLE (ble_kick.cpp). Loop task calls start/stop; uiTimerCb paces.
+void startBleKick(const uint8_t* mac);
+void stopBleKick();
+void serviceBleKick();
 
 // C1 probe-request mapping: the Wi-Fi task queues each *directed* probe request (a client naming the network it
 // wants); serviceProbes() (host_proto.cpp, loop task) dedups (MAC, SSID) pairs and emits {"t":"pr"} lines.

@@ -618,6 +618,34 @@ class T14SeenGen(BoardTest):
         self.assertEqual((r.get("t"), r.get("ok")), ("ack", 1), "seengen 0 (restore) failed: %s" % r)
 
 
+class T15BleKick(BoardTest):
+    """v1.21 blekick (DEVELOPER §24): the deauth equivalent for BLE - a round trip in BLE mode: start -> ack with a
+    non-null bk, a heartbeat carrying bk, stop -> null; outside BLE mode a start is accepted as a stop. No assertion on
+    kicks or fails - that needs real air."""
+
+    def tearDown(self):
+        board.send("blekick 0")   # the stop form passes even mid-patrol and in any band
+        time.sleep(0.3)
+        super().tearDown()
+
+    def test_round_trip_in_ble_mode(self):
+        board.set_band("ble", settle=1.5)
+        ack = board.command("blekick aa:bb:cc:dd:ee:ff", timeout=8)
+        bk = ack.get("bk")
+        self.assertIsNotNone(bk, "ack without a non-null bk member: %r" % ack)
+        self.assertEqual((bk[0], len(bk)), ("aa:bb:cc:dd:ee:ff", 4), bk)
+        idx = board.mark()
+        h = board.wait_json(lambda o: o.get("t") == "ble" and o.get("bk"), 3, idx, "a ble heartbeat carrying bk")
+        self.assertEqual(h["bk"][0], "aa:bb:cc:dd:ee:ff")
+        ack2 = board.command("blekick 0", timeout=8)
+        self.assertIsNone(ack2.get("bk"))
+
+    def test_start_outside_ble_mode_stops(self):
+        board.set_band("2.4g")
+        ack = board.command("blekick aa:bb:cc:dd:ee:ff", timeout=8)
+        self.assertIsNone(ack.get("bk"), "a start outside BLE mode should stop, like deauth in a non-Wi-Fi band: %r" % ack)
+
+
 class T99NoReboot(BoardTest):
     def test_board_did_not_reboot(self):
         h = board.hello()

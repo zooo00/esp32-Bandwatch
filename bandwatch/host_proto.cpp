@@ -206,6 +206,18 @@ void printDeauth() {
     }
 }
 
+// [mac, state ("idle"|"connecting"|"connected"), kicks, fails]; null when not kicking. The BLE heartbeat and the
+// "blekick" ack both carry it - BLE mode has no dwell lines for a live counter to ride on (DEVELOPER.md section 14).
+void printBleKick() {
+    if (!bleKick.active) { Serial.print("\"bk\":null"); return; }
+    char mac[26];
+    fmtMac(mac, sizeof(mac), bleKick.mac);   // MSB-first, like every other MAC we emit
+    const uint8_t st = bleKick.st;           // read once: the attack can change state between the two uses below
+    const char* name = st == 1 ? "connecting" : st == 2 ? "connected" : "idle";
+    Serial.printf("\"bk\":[\"%s\",\"%s\",%lu,%lu]", mac, name,
+                  static_cast<unsigned long>(bleKick.kicks), static_cast<unsigned long>(bleKick.fails));
+}
+
 } // namespace
 
 void huntIdText(char* out, size_t n) {
@@ -386,9 +398,9 @@ void sendSweep() {
                   static_cast<unsigned>(ESP.getFreeHeap()));
 }
 
-// BLE-mode heartbeat (no dwells there)
+// BLE-mode heartbeat (no dwells there). Budget covers the fixed prefix plus printHunt and printBleKick at their widest.
 void sendBleStatus() {
-    if (!serialRoom(300)) return;
+    if (!serialRoom(360)) return;   // was 300: +"bk" member (up to ~58 B when kicking)
     int n = 0;
     const uint32_t now = millis();
     portENTER_CRITICAL(&g_devMux);
@@ -403,6 +415,7 @@ void sendBleStatus() {
                   sd.capEnabled ? 1 : 0, static_cast<unsigned long>(sd.frames),
                   static_cast<unsigned long>(sd.bytes));
     printHunt();
+    printBleKick();
     Serial.print("}\n");
 }
 
@@ -576,13 +589,13 @@ void handleCommand(char* line) {
     char* arg = const_cast<char*>("");
     if (sp) { *sp = 0; arg = sp + 1; }
     if (patrol.active) {
-        // C5 v1 patrols without capture (every hand-off releases the ring), and a hunt or deauth parks the radio,
-        // which a hand-off would undo: none of them may start mid-patrol (patrol refuses to start over them too).
-        // The stop forms ("cap 0", "hunt 0", "deauth 0", "dca 0") still pass. C7's "huntssid" is matched by its
+        // C5 v1 patrols without capture (every hand-off releases the ring), and a hunt/deauth/kick holds state a
+        // hand-off would undo (park or a live attack): none may start mid-patrol (patrol refuses to start over them).
+        // The stop forms ("cap 0", "hunt 0", "deauth 0", "dca 0", "blekick 0") still pass. C7's "huntssid" is matched by its
         // command word only, so this guard needs nothing from that code.
         const bool capStart = (!strcmp(line, "cap") || !strcmp(line, "sdcap")) && atoi(arg) != 0;
         const bool parkStart = (!strcmp(line, "hunt") || !strcmp(line, "huntssid") || !strcmp(line, "deauth") ||
-                                !strcmp(line, "dca")) && arg[0] && strcmp(arg, "0") != 0;
+                                !strcmp(line, "dca") || !strcmp(line, "blekick")) && arg[0] && strcmp(arg, "0") != 0;
         if (capStart || parkStart) {
             sendLinef("{\"t\":\"err\",\"msg\":\"%s: stop patrol first\"}\n", line);
             return;
@@ -608,6 +621,7 @@ void handleCommand(char* line) {
             if (!why && (captureEnabled || sd.capEnabled)) why = "stop capture first";
             else if (!why && hunt.active) why = "stop hunt first";
             else if (!why && deauth.active) why = "stop deauth first";
+            else if (!why && bleKick.active) why = "stop kick first";   // a hand-off would stop it every leg anyway
             if (why) {
                 sendLinef("{\"t\":\"err\",\"msg\":\"patrol: %s\"}\n", why);
                 return;
@@ -820,6 +834,19 @@ void handleCommand(char* line) {
                       c, a, deauth.targeted ? 1 : 0, ch, kickFc);
         else
             sendLinef("{\"t\":\"ack\",\"cmd\":\"dca\",\"deauth\":null,\"park\":%d}\n", ch);
+    } else if (!strcmp(line, "blekick")) {
+        // The deauth equivalent for BLE: connect/hold/disconnect loop against one MAC. BLE mode only - the victim
+        // must be advertising. Unparseable arg or wrong mode stops it (mirrors "deauth" exactly).
+        uint8_t mac[6];
+        if (bandMode == BAND_BLE && parseMac(arg, mac)) startBleKick(mac);
+        else stopBleKick();
+        // One room check for the whole line: printBleKick writes raw (shared with the heartbeat), so budgeting it
+        // separately would let a full TX buffer truncate mid-"bk". Prefix (~27 B) + bk member (up to ~60 B).
+        if (serialRoom(96)) {
+            Serial.print("{\"t\":\"ack\",\"cmd\":\"blekick\",");
+            printBleKick();   // "bk":null when stopped, or [mac, state, kicks, fails] when running
+            Serial.print("}\n");
+        }
     } else if (!strcmp(line, "kickfc")) {
         // DIAGNOSTIC (§11): override the FC byte0 the internal kick path writes. "kickfc 80" sends a
         // beacon down the deauth descriptor path, so an external monitor can tell whether that path

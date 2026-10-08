@@ -1,6 +1,6 @@
 {
-  "global_bytes_ceiling": 77696,
-  "measured_bytes": 77184,
-  "measured_at": "v1.19.3 (review fixes: ChannelState.ed*/Deauth.dumped/probeDropped removed), arduino-cli compile via ./build.sh, 2026-10-07",
+  "global_bytes_ceiling": 77824,
+  "measured_bytes": 77312,
+  "measured_at": "v1.21 (blekick), arduino-cli compile via ./build.sh, 2026-10-08 - blekick itself is +24 B over the v1.20.1 baseline (77288); most of the rest is drift since v1.19.3",
   "note": "Ceiling = measured + 512 B. 'Global variables use N bytes' from the arduino-cli link summary. Raise it deliberately (and say why in the commit) when a feature is worth the RAM; see CLAUDE.md rule 4 and docs/DEVELOPER.md section 16 - free heap at peak is what binds."
 }

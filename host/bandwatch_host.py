@@ -507,6 +507,7 @@ class Bandwatch:
             "last_rx": 0, "log": deque(maxlen=60), "capture": None,
             "hunt": None,            # {"mac", "rssi", "age_ms", "count", "hist": deque}
             "deauth": None,          # {"mac", "ch", "sent"} while a deauth attack runs
+            "blekick": None,         # {"mac", "state", "kicks", "fails"} while the kick loop runs (BLE mode)
             "ble": {"devs": 0, "cycles": 0},
             "sd": None,              # {"mounted","mb","cap","file","frames","bytes","err","clock"}
             "sd_read": None,         # a card file being pulled off: {name,total,received,done,path}
@@ -734,6 +735,15 @@ class Bandwatch:
         else:
             st["deauth"] = None
 
+    def _set_bkick(self, bk):
+        # device sends [mac, state ("idle"|"connecting"|"connected"), kicks, fails] or null when stopped.
+        # The BLE heartbeat and the "blekick" ack both carry it (BLE mode has no dwell lines to ride on).
+        st = self.state
+        if bk and len(bk) >= 4:
+            st["blekick"] = {"mac": bk[0], "state": bk[1], "kicks": bk[2], "fails": bk[3]}
+        else:
+            st["blekick"] = None
+
     def _hunt_update(self, h):
         hu = self.state["hunt"]
         if h is None or hu is None:
@@ -938,6 +948,7 @@ class Bandwatch:
                 self._sd_track(sd)
             st["heap"] = msg.get("heap", st["heap"])
             self._hunt_update(msg.get("h"))
+            self._set_bkick(msg.get("bk"))   # live kick counters ride the heartbeat (no dwell lines in BLE mode)
         elif t == "ack":
             st["log"].append("ack " + json.dumps({k: v for k, v in msg.items() if k != "t"}))
             if "band" in msg:
@@ -955,6 +966,8 @@ class Bandwatch:
                 # never appeared and the dwell handler (which only updates an existing entry) never
                 # showed a frame count - the attack ran, invisibly, until the next "hello".
                 self._set_deauth(msg.get("deauth"))
+            if msg.get("cmd") == "blekick":
+                self._set_bkick(msg.get("bk"))
             if msg.get("cmd") in ("sdcap", "sdinfo"):
                 sd = st.get("sd") or {}
                 # the device's ack uses "sdcap" for the running flag and "sd" for card presence
@@ -1691,7 +1704,7 @@ class Bandwatch:
                     "hist": list(hu["hist"]), "label": src.get("ssid") or src.get("name") or src.get("proto") or "",
                     "vendor": src.get("vendor", ""), "kind": src.get("kind", "") or (src.get("pan") and "PAN " + src["pan"]) or ""}
         fine = self.fine
-        live = copy.deepcopy({k: st.get(k) for k in ("hello", "capture", "explain", "deauth", "ble", "sd", "sd_read",
+        live = copy.deepcopy({k: st.get(k) for k in ("hello", "capture", "explain", "deauth", "blekick", "ble", "sd", "sd_read",
                                                       "sd_rm", "saved", "events", "alerts", "patrol")})
         patrol = live["patrol"]
         if patrol and patrol.get("on"):
@@ -1722,7 +1735,7 @@ class Bandwatch:
                               for i, r in enumerate(fine["bins"]) if len(r) >= 4]},
             "captures_dir": os.path.abspath(self.captures_dir), "log": list(st["log"])[-15:],
             "wifi_devs": wifi, "probes": probe_groups, "ble_devs": ble, "z_devs": zig, "hunt": hunt,
-            "deauth": live["deauth"], "ble": live["ble"], "sd": live["sd"], "sd_read": live["sd_read"],
+            "deauth": live["deauth"], "blekick": live["blekick"], "ble": live["ble"], "sd": live["sd"], "sd_read": live["sd_read"],
             "sd_rm": live["sd_rm"], "saved": live["saved"], "events": live["events"], "alerts": live["alerts"],
             "patrol": patrol,
             "oui_source": self.oui.source,
@@ -1936,6 +1949,8 @@ def make_handler(bw, page_path, bind=None):
                 not_while_patrolling(bool(req.get("mac")))
             elif cmd == "dca":
                 not_while_patrolling(bool(req.get("client_mac") or req.get("mac") or req.get("ap_bssid")))
+            elif cmd == "blekick":
+                not_while_patrolling(bool(req.get("mac")))   # a hand-off would stop it every leg anyway
             elif cmd == "explain":
                 not_while_patrolling(req.get("value") in ("full", "current"))   # its band steps would end the patrol
 
@@ -1958,7 +1973,8 @@ def make_handler(bw, page_path, bind=None):
                     with bw.dlock:
                         st = bw.state
                         busy = ("capture" if st.get("capture") or st.get("cap") or (st.get("sd") or {}).get("cap")
-                                else "hunt" if st.get("hunt") else "deauth" if st.get("deauth") else None)
+                                else "hunt" if st.get("hunt") else "deauth" if st.get("deauth")
+                                else "blekick" if st.get("blekick") else None)
                     if busy:
                         raise _Reply(409, f"patrol: stop {busy} first")
                 dev(f"patrol {arg}")
@@ -1999,6 +2015,11 @@ def make_handler(bw, page_path, bind=None):
                 if (req.get("client_mac") or req.get("mac") or req.get("ap_bssid")) and not (mac and ap_bssid):
                     raise _Reply(400, "dca needs a valid client_mac and ap_bssid")
                 dev(f"dca {mac} {ap_bssid}" if mac and ap_bssid else "dca 0")
+            elif cmd == "blekick":   # the deauth equivalent for BLE: connect/hold/disconnect loop against one MAC
+                mac = clean_mac(req.get("mac"))
+                if req.get("mac") and not mac:
+                    raise _Reply(400, "bad mac")
+                dev(f"blekick {mac or '0'}")   # the device only starts it in BLE mode; anything else stops it
             elif cmd == "sdcap":
                 dev(f"sdcap {1 if req.get('value') else 0}")
             elif cmd == "events":   # C4 SD event log; persists on the device

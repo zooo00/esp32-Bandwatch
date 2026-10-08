@@ -186,6 +186,7 @@ void setBandMode(BandMode m) {
     releaseCapture();         // the host restarts a capture if it wants one (link type differs per radio);
                               // the ring must go back to the heap or BLE mode starts ~32 KB short
     stopDeauth();             // the attack is pinned to a channel: unpark, and the host can re-send it
+    stopBleKick();            // a mode change deinits the host: don't strand a pending connect or held slot
     if (parkedIdx >= 0 && !chanEnabled(parkedIdx)) parkedIdx = -1;
     const bool prevRadio = (prev == BAND_BLE) || (prev == BAND_154) || (prev == BAND_SPEC);
     const bool newRadio = (m == BAND_BLE) || (m == BAND_154) || (m == BAND_SPEC);

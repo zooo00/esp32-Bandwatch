@@ -1299,7 +1299,7 @@ void refreshSpectrum() {
 }
 
 void driveLed(float global) {
-    if (deauth.active) { setLedColor(LED_RED, static_cast<uint8_t>((millis() / kUiIntervalMs & 1u) ? 12 : 70)); return; }   // blink while kicking
+    if (deauth.active || bleKick.active) { setLedColor(LED_RED, static_cast<uint8_t>((millis() / kUiIntervalMs & 1u) ? 12 : 70)); return; }   // blink while kicking (Wi-Fi deauth or BLE kick)
     if (ledBlipActive()) return;   // an alert blip owns the LED for ~0.5 s (led_alert.cpp); never over deauth
     if (hunt.active) {
         const uint32_t last = hunt.lastMs;
@@ -1375,6 +1375,7 @@ void uiTimerCb(lv_timer_t* t) {
     (void)t;
     hopIfNeeded();
     serviceDeauth();
+    serviceBleKick();   // pace the BLE kick state machine (connect/hold/terminate loop), ~120 ms cadence
     refreshUi();
 }
 

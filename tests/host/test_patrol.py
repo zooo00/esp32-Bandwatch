@@ -128,7 +128,8 @@ class PatrolRouteTest(unittest.TestCase):
 
     def test_start_refused_while_capture_hunt_or_deauth(self):
         for setup, what in [({"cap": 1}, "capture"), ({"sd": {"cap": 1}}, "capture"),
-                            ({"hunt": {"mac": "aa:bb:cc:dd:ee:ff"}}, "hunt"), ({"deauth": {"mac": "x"}}, "deauth")]:
+                            ({"hunt": {"mac": "aa:bb:cc:dd:ee:ff"}}, "hunt"), ({"deauth": {"mac": "x"}}, "deauth"),
+                            ({"blekick": {"mac": "x"}}, "blekick")]:
             with self.subTest(what=setup):
                 saved = {k: self.bw.state.get(k) for k in setup}
                 self.bw.state.update(setup)
@@ -144,6 +145,7 @@ class PatrolRouteTest(unittest.TestCase):
         for body in ({"cmd": "capture", "value": 1}, {"cmd": "sdcap", "value": 1},
                      {"cmd": "hunt", "mac": "aa:bb:cc:dd:ee:ff"}, {"cmd": "deauth", "mac": "11:22:33:44:55:66"},
                      {"cmd": "dca", "client_mac": "aa:aa:aa:aa:aa:aa", "ap_bssid": "11:22:33:44:55:66"},
+                     {"cmd": "blekick", "mac": "aa:bb:cc:dd:ee:ff"},
                      {"cmd": "explain", "value": "full"}):
             with self.subTest(body=body):
                 code, resp = self.s.post(body)
@@ -152,6 +154,7 @@ class PatrolRouteTest(unittest.TestCase):
         self.assertIsNone(self.bw.snapshot()["capture"])   # no empty pcap was opened
         for body, want in [({"cmd": "sdcap", "value": 0}, ["sdcap 0"]), ({"cmd": "hunt"}, ["hunt 0"]),
                            ({"cmd": "deauth"}, ["deauth 0"]), ({"cmd": "dca"}, ["dca 0"]),
+                           ({"cmd": "blekick"}, ["blekick 0"]),
                            ({"cmd": "band", "value": "5g"}, ["band 5g"]),   # a manual band ends the patrol on the device
                            ({"cmd": "patrol", "value": False}, ["patrol 0"])]:
             with self.subTest(body=body):

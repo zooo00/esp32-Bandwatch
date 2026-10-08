@@ -3,6 +3,21 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.21
+
+`blekick <mac>` — the deauth equivalent for BLE (DEVELOPER §24): in BLE mode the device becomes a NimBLE central
+for one target and loops **connect -> hold ~600 ms -> disconnect with status 0x13** ("Remote User Terminated
+Connection"), evicting or stuttering single-connection-slot peripherals like a beach speaker playing from its phone.
+
+- **Kick button on BLE table rows.** Latches until the device confirms, highlights the row while kicking, and the
+  tooltip counts kicks. `blekick 0` stops; an unparseable MAC or a non-BLE band also stops, exactly like `deauth`.
+- **Protocol.** A `"bk"` member (`[mac, state, kicks, fails]`, state idle/connecting/connected) rides the BLE
+  heartbeat (budget raised 300 -> 360 B) and the ack; log lines on every won connect and on refused attempts.
+  Stops on a mode change, not persisted, red LED blink while active — all mirroring deauth.
+- **Patrol parity.** Refused mid-patrol like hunt/deauth (a hand-off would stop it every leg), and patrol refuses to
+  start over a running kick ("stop kick first").
+- Static RAM 77,288 -> 77,312 B (+24).
+
 ## v1.20.1
 
 Dashboard layout fixes after checking v1.20 in Chrome against the board. No firmware or protocol change (`kVersion`

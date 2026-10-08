@@ -72,6 +72,7 @@ bool sdMount() {
 void sdUnmount() {
     if (!sd.mounted || sd.capEnabled || sd.readActive) return;   // never pull the filesystem out from under
                                                               // an open capture or an in-flight sdread
+    if (eventsHoldsCard()) return;   // nor from under the event log's /seen.csv register pass (it unmounts at its end)
     SD.end();
     sd.mounted = false;
 }
@@ -157,6 +158,7 @@ void sdCloseCapture() {
 
 bool sdOpenCapture() {
     if (sd.capEnabled) return true;
+    eventsReleaseCard();   // a running /seen.csv register pass steps aside; the capture owns the card now
     if (!sdMount()) return false;
     sd.buf = static_cast<uint8_t*>(malloc(kSdBufSize));
     if (!sd.buf) { sdUnmount(); return false; }
@@ -262,6 +264,7 @@ static void sdReadAbort() {
 // The path comes from the host and is echoed back, so it is JSON-escaped (jsonQuote) like any untrusted string.
 void sdReadFile(const char* path) {
     sdReadAbort();
+    eventsReleaseCard();   // a running /seen.csv register pass steps aside (it may be the file asked for)
     char q[256];   // a command line holds <= 40 path chars: <= 242 B escaped and quoted
     if (!jsonQuote(q, sizeof(q), path)) { sendLinef("{\"t\":\"err\",\"msg\":\"sdread: path too long\"}\n"); return; }
     if (!sdMount()) { sendLinef("{\"t\":\"err\",\"msg\":\"sdread: no card\"}\n"); return; }

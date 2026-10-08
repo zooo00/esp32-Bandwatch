@@ -38,10 +38,16 @@ State as of **v1.19.5** (2026-10-07). Finished items move to **Done** at the end
 ## Verify on hardware (built, not yet proven)
 
 ### V5 · `/seen.csv` rotation time on hardware — P3, verify
-- Put a `/seen.csv` with ~5000 distinct globally-unique MAC lines on the card, `events 1` (or re-insert while armed):
-  expect `seen.csv rotated: 5000 -> 2048`, `ev.file` 2048. Time the attach (the loop task is busy for it - LCD and
-  hopping pause). Pull both files and check the content.
-- **Done when:** the time is in DEVELOPER §20; if it is more than ~1 s, consider rotating in chunks across loops.
+- Now with the v2 device register (83 B rows, so the file at the threshold is ~340 KB, not ~74 KB) and a `seengen`
+  diagnostic that makes the file: `events 0`, `seengen 5000` (parks the real register in `/seen.bak.csv`), `events 1`.
+  Expect `{"t":"log","msg":"seen.csv rotated: 5000 -> 2048 in R ms (attach A ms)"}` before the ack and `ev.file` 2048.
+  R is the copy, A the whole attach - the loop task is busy for A (LCD and hopping pause). Pull `seen.csv` /
+  `seen.old.csv` and check: 2048 rows with the largest `last`, header first, every row 83 B. Then `events 0`,
+  `seengen 0` to put the real register back. `T13SeenGen` in `tests/device` runs this sequence and prints R and A.
+  Also worth one look on the board: a v1 `seen.csv` converts on attach (`seen.csv converted to v2: ...`), and a known
+  device's row gets `last`/`sessions` rewritten in place within ~5 min (`kRegisterMs`) or at `events 0`.
+- **Done when:** R and A are in DEVELOPER §20; if A is more than ~1 s, consider rotating in chunks across loops
+  (the register pass already runs in 8 ms slices).
 
 ### V6 · LED alerts on real hits — P3, verify
 - `ledtest` covers the patterns. Still unseen: a real surveillance OUI in range (or a test OUI in `/surveil.csv`) and

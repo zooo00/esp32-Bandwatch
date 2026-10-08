@@ -508,6 +508,45 @@ class T12Alerts(BoardTest):
         board.wait_json(lambda o: o.get("t") == "err" and str(o.get("msg", "")).startswith("ledtest"), 3, idx)
 
 
+class T13SeenGen(BoardTest):
+    """/seen.csv device register (docs/DEVELOPER.md section 20): "seengen 5000" parks the real register and writes 5000
+    synthetic rows; re-arming the event log must rotate them to the 2048 seen most recently and log how long that took
+    (BACKLOG V5's measurement); "seengen 0" puts the real register back."""
+
+    ROT_RE = re.compile(r"^seen\.csv rotated: (\d+) -> (\d+) in (\d+) ms \(attach (\d+) ms\)$")
+
+    def test_seengen_rotation_is_timed_and_restored(self):
+        if not card_present():
+            self.skipTest("no microSD card in the slot")
+        was_on = board.hello()["ev"]["on"]
+        if was_on:
+            board.command("events 0", timeout=30)   # disarm: the next arm is the attach that rotates
+        try:
+            r = board.command_or_err("seengen 5000", timeout=60)
+            self.assertEqual(r.get("t"), "ack", "seengen 5000 failed: %s" % r.get("msg"))
+            self.assertEqual((r["n"], r["ok"]), (5000, 1), r)
+            gen_ms = r["ms"]
+            idx = board.mark()
+            r = board.command_or_err("events 1", timeout=60)
+            self.assertEqual(r.get("t"), "ack", "events 1 failed: %s" % r.get("msg"))
+            log = board.wait_json(lambda o: o.get("t") == "log" and str(o.get("msg", "")).startswith("seen.csv rotated"),
+                                  5, idx, "the seen.csv rotation log line")
+            m = self.ROT_RE.match(log["msg"])
+            self.assertIsNotNone(m, "rotation line without its duration: %r" % log["msg"])
+            rows, kept, rot_ms, attach_ms = (int(g) for g in m.groups())
+            self.assertEqual((rows, kept), (5000, 2048))
+            self.assertLessEqual(rot_ms, attach_ms)
+            self.assertEqual(r["ev"]["file"], 2048)
+            self.assertEqual(r["ev"]["card"], 1)
+            print("\n  seengen 5000: %d ms; rotation 5000 -> 2048: %d ms, whole attach %d ms" % (gen_ms, rot_ms, attach_ms))
+        finally:
+            board.command("events 0", timeout=60)   # restore as a plain file swap, then re-arm if it was armed
+            r = board.command_or_err("seengen 0", timeout=30)
+            if was_on:
+                board.command("events 1", timeout=60)
+        self.assertEqual((r.get("t"), r.get("ok")), ("ack", 1), "seengen 0 (restore) failed: %s" % r)
+
+
 class T99NoReboot(BoardTest):
     def test_board_did_not_reboot(self):
         h = board.hello()

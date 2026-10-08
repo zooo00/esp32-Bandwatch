@@ -18,6 +18,7 @@ class CardFileNameTest(unittest.TestCase):
             with self.subTest(n=n):
                 self.assertEqual(bh.card_file_name(n), n.lstrip("/"))
         self.assertIn("seen.old.csv", bh.CARD_TEXT_FILES)
+        self.assertIn("seen.bak.csv", bh.CARD_TEXT_FILES)   # the register "seengen" parks (DEVELOPER.md 20)
         edge = "bandwatch-wifi-" + "x" * 19 + ".pcap"   # exactly 39 chars
         self.assertEqual(len(edge), 39)
         self.assertEqual(bh.card_file_name(edge), edge)

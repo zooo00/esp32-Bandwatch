@@ -17,7 +17,7 @@ serves a web dashboard on http://127.0.0.1:8080 and writes pcap files.
   channel model, and the state types + externs more than one file touches): `bandwatch.cpp` = core (channel
   hopping, dwell scoring, snapshots, hunt), `wifi_sniff.cpp` / `ble_scan.cpp` / `ieee154.cpp` = radio lifecycle
   + RX paths, `deauth_diag.cpp` = attack + diagnostics, `capture.cpp` = capture ring, `sd_sink.cpp` = microSD
-  pcap + card presence, `events.cpp` = C4 event log to SD (`/events.csv`, `/seen.csv` baseline, `/surveil.csv`),
+  pcap + card presence, `events.cpp` = C4 event log to SD (`/events.csv`, `/seen.csv` device register - row logic in `seen_row.h`, `/surveil.csv`),
   `settings.cpp` = NVS persistence, `led_alert.cpp` = LED alert blips, `host_proto.cpp` = serial JSON, `lcd_ui.cpp` = LVGL pages. `devices.h` = device table structs/hash,
   `surv_ouis.h` = surveillance-OUI table. `Display_ST7789.*`, `LVGL_Driver.*`, `lv_conf.h` = display glue (from
   the upstream C6 project, pins changed); `boot_logos.h` = generated boot-photo arrays (`tools/img2c.py` from
@@ -180,8 +180,11 @@ microSD: `sdcap 0|1` (record pcap on the card), `sdinfo`, `sdls`, `sdread <path>
 card-root file; refused for the file being recorded, during an `sdread` or mid event-log flush; deleting `seen.csv`
 while the event log is armed restarts novelty; §12), `time <epoch>` (no RTC —
 the host sends this on connect; it dates the pcap records and names the files, in UTC), `events 1|0` (C4 event log
-to `/events.csv`; persisted; arms with no card; status in `{"t":"ev"}` every 5 s, §20), `sdprobe` (raw CMD0 R1 of
-the presence probe; -1 while the card is mounted/busy), `sdface 0|1` (show the card-out/card-in LCD face).
+to `/events.csv`, plus the `/seen.csv` device register: type, label, first/last seen, sessions per device; persisted;
+arms with no card; status in `{"t":"ev"}` every 5 s, §20), `sdprobe` (raw CMD0 R1 of
+the presence probe; -1 while the card is mounted/busy), `sdface 0|1` (show the card-out/card-in LCD face),
+`seengen <1..10000>` (diagnostic: replace `/seen.csv` with synthetic rows, the real one parked in `/seen.bak.csv`, so the
+next attach rotates and logs its time - BACKLOG V5) | `seengen 0` (put the real register back).
 LED: `alerts 1|0` (alert blips on the LED - surveillance hit orange double, Zigbee permit-join purple double, new device
 white single; default on, persisted, §21), `ledtest surv|new|join` (draw one blip now; never over a running deauth).
 Diagnostics for the deauth investigation (§11), not product features: `txtest 1|2|0` (inject a beacon with

@@ -246,8 +246,12 @@
           <button class="block" id="evBtn">Start event log</button>
           <div class="note capinfo" id="evInfo"></div>
           <p class="note dim" style="margin:8px 0 0">Writes <code>events.csv</code> on the card: surveillance-OUI hits, and
-            <b>new</b> devices - a MAC not seen on this card before (randomized MACs are ignored). The baseline
-            (<code>seen.csv</code>) grows as you walk, so early on almost everything is new; past 4096 MACs it is trimmed to the newest 2048 when the log attaches (the rest move to <code>seen.old.csv</code>). Deleting <code>seen.csv</code> starts novelty from scratch. The setting stays on the device.</p>
+            <b>new</b> devices - a MAC not seen on this card before (randomized MACs are ignored). <code>seen.csv</code> is the
+            card's device register: one row per device with its type (AP / station / BLE), SSID or name, first and last seen
+            and how many sessions it turned up in (times are 0 until the dashboard has set the clock). It grows as you walk,
+            so early on almost everything is new; past 4096 devices it is trimmed to the 2048 seen most recently when the
+            log attaches (the whole old file moves to <code>seen.old.csv</code>). Deleting <code>seen.csv</code> starts
+            novelty from scratch. The setting stays on the device.</p>
         </div>
       </section>
 
@@ -509,7 +513,7 @@
     { key: 'ble', title: 'BLE captures', desc: 'advertising packets · BLE LL pcap', test: b => /^bandwatch-ble-/.test(b), cap: true },
     { key: '154', title: '802.15.4 captures', desc: 'Zigbee / Thread frames · 802.15.4-TAP pcap', test: b => /^bandwatch-802154-/.test(b), cap: true },
     { key: 'events', title: 'Event log', desc: 'surveillance hits and new devices (CSV)', test: b => b === 'events.csv' || b === 'events.old.csv' },
-    { key: 'seen', title: 'Device baseline', desc: 'MACs already known on this card · deleting seen.csv restarts novelty', test: b => b === 'seen.csv' || b === 'seen.old.csv' },
+    { key: 'seen', title: 'Device register', desc: 'devices known on this card: type, label, first / last seen, sessions (CSV) · deleting seen.csv restarts novelty', test: b => b === 'seen.csv' || b === 'seen.old.csv' || b === 'seen.bak.csv' || b === 'seen.old.bak.csv' },
     { key: 'surv', title: 'Surveillance OUI list', desc: 'extra prefixes, read at boot', test: b => b === 'surveil.csv' },
     { key: 'other', title: 'Other files', desc: '', test: () => true },
   ];
@@ -992,7 +996,7 @@
         `<br><span class="dim">retries the card every 30 s</span>`;
     else
       html = `<span class="recdot"></span>logging - <b>${n(ev.written)}</b> rows written, ${n(ev.pending)} pending` +
-        `<br>${n(ev.new)} new, ${n(ev.surv)} surveillance · <span title="${n(ev.file)} MACs in seen.csv">baseline ${n(ev.base)}</span>`;
+        `<br>${n(ev.new)} new, ${n(ev.surv)} surveillance · <span title="${n(ev.file)} devices in seen.csv, ${n(ev.base)} held in RAM for novelty">register ${n(ev.file)}</span>`;
     if (ev.drop || ev.err)
       html += `<br><b style="color:var(--critical)">${ev.drop ? `${n(ev.drop)} rows dropped` : ''}${ev.drop && ev.err ? ' · ' : ''}${ev.err ? `${n(ev.err)} card errors` : ''}</b>`;
     $('#evInfo').innerHTML = html;   // events.csv / seen.csv download + delete live in the card's file list above

@@ -72,8 +72,10 @@ requests. `blescan passive` keeps BLE mode fully silent.
   time. Files can be listed and pulled back over serial without ejecting the card.
 - **Event log on the card** (`events 1`, or the dashboard's *Event log* control; the setting survives a power
   cycle): an untethered record of a walk. `events.csv` gets a row for every surveillance‑OUI match and for every
-  device **new to this card** — not in its `seen.csv` baseline, which grows as you walk, so early on almost
-  everything is new. Randomized (privacy) addresses never count as new. Rows are timestamped once a host has sent
+  device **new to this card** — not in its `seen.csv` register, which grows as you walk, so early on almost
+  everything is new. `seen.csv` keeps one row per device: Wi‑Fi AP / station / BLE, its SSID or name, when it was
+  first and last seen, and in how many sessions (times stay 0 until a host has set the clock). Randomized
+  (privacy) addresses never count as new. Rows are timestamped once a host has sent
   the time, buffered in RAM, and written in short bursts, so the card is not held mounted. With no card in, the
   log stays armed, keeps surveillance hits, and attaches when a card appears. Extra surveillance prefixes can be
   added by putting a `surveil.csv` (`AA:BB:CC,<category>`) on the card. The dashboard pulls `events.csv` /
@@ -174,7 +176,7 @@ Serial commands (newline‑terminated, also usable from any terminal): `band 5g|
 deauth to all clients of that AP, auto‑stops after 5 min), `dca <client_mac> <ap_bssid>` / `dca 0` (targeted deauth
 to one specific station), `sdcap 0|1`, `sdinfo`, `sdls`, `sdread <path>`, `sdrm <name>`, `events 0|1`,
 `alerts 0|1`, `ledtest surv|new|join`, `mirror 0|1`, `page next|prev`, `time <epoch>`, `info`, `reboot`, and the
-diagnostics `sdprobe` and `sdface 0|1`. Each is described in [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §4.
+diagnostics `sdprobe`, `sdface 0|1` and `seengen <n>|0`. Each is described in [`docs/DEVELOPER.md`](docs/DEVELOPER.md) §4.
 Changing mode (`band …`, or holding BOOT) always ends a capture and frees the capture ring, so restart it with
 `cap 1` afterwards.
 802.15.4 captures use the 802.15.4‑TAP pcap link type (Wireshark decodes Zigbee/Thread; encrypted payloads need

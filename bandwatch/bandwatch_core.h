@@ -492,6 +492,9 @@ void sendEventStatus();   // host_proto.cpp: {"t":"ev"} every 5 s while armed
 int eventsBaseCount();
 bool eventsFlushing();                    // flush() has the event files open: sdrm refuses
 void eventsFileRemoved(const char* path); // sdrm deleted a card file: /seen.csv while armed reloads an empty baseline
+bool eventsHoldsCard();                    // a /seen.csv register pass has the file open: sdUnmount() keeps the mount
+void eventsReleaseCard();                 // sdcap / sdread take the card: a running register pass steps aside
+void seenGenerate(long n);                // "seengen <n>" diagnostic: n synthetic /seen.csv rows (0 = restore the backup)
 extern bool g_eventsWanted;   // settings.cpp: restored "events" flag, applied in Bandwatch_Init
 void loadSurvExtra();   // /surveil.csv extra surveillance OUIs, read at boot while the card is mounted
 

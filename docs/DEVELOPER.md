@@ -116,7 +116,7 @@ file-local helpers live in an anonymous namespace.
   since 1.18 also card presence (`sdSetPresent()`, the one place it changes; the idle CMD0 probe
   `sdServicePresence()`) and the one I/O-failure path for a card pulled mid-capture (§12).
 - `events.cpp` — the C4 event log (1.18, §20): `eventFlag()` (radio side, under `g_devMux`), `serviceEvents()`
-  (loop: classify, buffer, flush to `/events.csv`), the `/seen.csv` novelty baseline, and `loadSurvExtra()`
+  (loop: classify, buffer, flush to `/events.csv`), the `/seen.csv` device register (row logic in `seen_row.h`), and `loadSurvExtra()`
   (`/surveil.csv` extra OUIs, read at boot).
 - `settings.cpp` — NVS persistence (C3, 1.11; the `events` flag joined in 1.18, `alerts` in 1.19).
 - `led_alert.cpp` — LED alert blips (1.19, §21): `ledNoteSurv()` (radio side, under `g_devMux`), `g_ledJoinFlag`
@@ -156,9 +156,9 @@ Device → host, one JSON object per line unless noted:
 | `{"t":"z","dev":[...]}` | every 2 s in 802.15.4 mode | rows `[id, rssi, max, frames, age_ms, ch, pan, short, proto, flags, lqi]`; `id` = extended address `aa:bb:cc:dd:ee:ff:00:11` or `pan/short` hex; `proto` 0 unknown, 1 Zigbee, 2 Zigbee GP, 3 Thread/6LoWPAN, 4 MAC‑secured; flags bit0 ext addr, bit1 beacons, bit2 permit join, bit3 MAC security, bit4 data seen |
 | `{"t":"pr",...}` | a directed probe request (Wi‑Fi modes, C1) | `mac` (the probing client; often a randomized, locally administered MAC), `rssi`, `ch`, `ssid` (the network it asked for, control-stripped). Wildcard probes (empty SSID) are not sent. The device suppresses a repeat of the same (MAC, SSID) pair for 60 s (32-entry table in `host_proto.cpp`); the host keeps history and expires pairs after 15 min (`PROBE_TTL_S`), grouping by SSID because phones randomize per burst |
 | `{"t":"ble",...}` | every 1 s in BLE mode | `devs`, `cycles`, `heap`, `adv` (advertising reports), `scan` (policy) / `running` (what is actually running) / `switches`, `cap`, `drop`, `sdc`/`sdf`/`sdb`, `h`. **BLE mode emits no dwell lines, so this is the only live capture telemetry there** - anything added to `{"t":"d"}` for the dashboard has to be added here too |
-| `{"t":"ev","ev":{...}}` | every 5 s while the event log is armed, in every mode (`sendEventStatus()`, 1.18) | `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}`: armed; card usable (last attach worked); baseline hashes in RAM; entries in `/seen.csv` (counted at load, plus this session's appends); rows written to `/events.csv`; rows buffered; surveillance rows; new-device rows; rows dropped (2 KB buffer full, rows discarded by `events 0` on a busy card, or the 16-entry radio queue full); card errors (failed mount/write); novelty checks skipped for want of a baseline. The same object rides on `hello` and the `events` ack. §20 |
+| `{"t":"ev","ev":{...}}` | every 5 s while the event log is armed, in every mode (`sendEventStatus()`, 1.18) | `ev` = `{on, card, base, file, written, pending, surv, new, drop, err, wait}`: armed; card usable (last attach worked); baseline hashes in RAM; device rows in `/seen.csv` (counted at load, plus this session's appends); rows written to `/events.csv`; rows buffered; surveillance rows; new-device rows; rows dropped (2 KB buffer full, rows discarded by `events 0` on a busy card, or the 16-entry radio queue full); card errors (failed mount/write); novelty checks skipped for want of a baseline. The same object rides on `hello` and the `events` ack. §20 |
 | `{"t":"pt","pt":{...}\|null}` | every 2 s while patrolling, in every mode (BLE has no dwells), right after each leg hand-off, and once with `null` when a patrol ends (`servicePatrol()`, C5, 1.20) | `pt` = `{"leg": i, "left": ms left in the leg (0 = due, waiting for the dwell boundary), "cyc": full cycles done, "legs": [[mode, sec], ...]}` - at most 127 B (`kPatrolJsonMax`). The same member rides on `hello` (which every hand-off also sends, so the host gets the new mode's `chs`) and the `patrol` ack. §22 |
-| `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete. Since the C4 follow-up: `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` after a delete, `"ok":0,"msg":"no such file"|"remove failed"` when the card refused it; refusals before the card is touched are `{"t":"err","msg":"sdrm: ..."}` (`bad file name ...`, `busy - a file is being pulled (sdread)`, `/x is being recorded - stop sdcap first`, `busy - the event log is writing to the card`, `no card`). `{"t":"log","msg":"seen.csv rotated: N -> M"}` when an attach trims `/seen.csv` (§20) |
+| `{"t":"ack",...}` / `{"t":"log","msg"}` / `{"t":"err","msg"}` | command replies and notices | Since 1.18: `{"t":"log","msg":"sd card removed[: why]"}` / `"sd card inserted"` on every presence change after boot (`why` e.g. `recording stopped`, `file pull stopped`, `event log buffering`) — the host sets `sd.mounted` from it and drops its stale file list; `{"t":"err","msg":"sdcap: write failed after N frames (card removed?) - recording stopped"}` (host clears `cap`); `{"t":"err","msg":"sdread: read failed at X of Y bytes (card removed?)"}` *instead of* `sdread_done` when a pull comes up short, so the host discards the partial file rather than saving it as complete. Since the C4 follow-up: `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` after a delete, `"ok":0,"msg":"no such file"|"remove failed"` when the card refused it; refusals before the card is touched are `{"t":"err","msg":"sdrm: ..."}` (`bad file name ...`, `busy - a file is being pulled (sdread)`, `/x is being recorded - stop sdcap first`, `busy - the event log is writing to the card`, `no card`). `{"t":"log","msg":"seen.csv rotated: N -> M in R ms (attach A ms)"}` when an attach trims `/seen.csv`, `"seen.csv converted to v2: N rows in M ms"` when it upgrades a v1 file (§20) |
 | `M <x> <y> <w> <h> <base64>` / `MF <seq> <complete>` | while `mirror 1` | one repainted LCD slice (RGB565-LE, <= ~2 KB base64) / end of one LVGL refresh; `complete` 1 = nothing dropped and no repair pending (§19) |
 | `S <n> <base64>` | after `sdread <path>` | one chunk of a file being streamed off the card; bracketed by `sdread` / `sdread_done` acks |
 | `{"t":"sdls","files":[[name, bytes], ...],"total":N,"sent":M}` | after `sdls` | files in the card root; `sent < total` = the serial buffer filled mid-list (host slow or absent) and whole entries were dropped |
@@ -182,6 +182,9 @@ device rejects anything else) / `dca 0`,
 will not allocate), `sdprobe` (diagnostic: `{"t":"ack","cmd":"sdprobe","r1":N,"present":0|1}` — the raw CMD0
 reply of the presence probe; `r1` is -1 when the card is mounted or busy and the probe was not sent),
 `sdface 0|1` (diagnostic: show the card-out / card-in LCD face for 3 s without touching the card).
+`seengen <n>` (diagnostic, §20: replace `/seen.csv` with n = 1..10000 synthetic register rows, parking the real one in
+`/seen.bak.csv`; ack `{"t":"ack","cmd":"seengen","n":N,"ms":M,"ok":0|1}`; `seengen 0` restores; refusals are
+`{"t":"err","msg":"seengen: ..."}`).
 `sdrm <name>` deletes one file in the card root (§12 "Deleting card files"): `<name>` is `/x` or `x`, 1-39 chars of
 `[A-Za-z0-9._-]`, no `..`; ack `{"t":"ack","cmd":"sdrm","file":"/x","ok":1}` (or `"ok":0,"msg":...`), refusals as
 `sdrm: ...` err lines (table above). The host re-sends `sdls` after a delete.
@@ -602,7 +605,7 @@ root. The rules, in the order they are checked:
 - **Not the file `sdcap` is recording** (`sd.path`). Other files may go while a capture runs: the capture's mount
   is reused and `sdUnmount()` leaves it in place.
 - **Not while the event log is mid-flush** (`eventsFlushing()`: `flush()` has `/events.csv` / `/seen.csv` open
-  between `attachCard()` and its unmount). Commands and flushes both run on the loop task, so today a command
+  between `attachCard()` and its unmount, and a `/seen.csv` register pass keeps the file open across loops, §20). Commands and flushes both run on the loop task, so today a command
   always lands between flushes; the check keeps that true if flushing ever becomes incremental.
 - **Mount on demand, unmount after** (`sdMount()` / `sdUnmount()`); no card → `sdrm: no card`.
 - **Deleting `/seen.csv` while the event log is armed resets novelty** (`eventsFileRemoved()` in `events.cpp`): the
@@ -903,8 +906,8 @@ the Spectrum page's 42 bars onto the same `BarStrip` drawing (each bar an exact 
 Montserrat 12/14/20 are built without U+00B7 and the dashes: LCD strings must stay ASCII or they render as boxes.
 
 **The event log (§20, 1.18) is heap while armed, nothing while off:** the baseline set (`kBaseCap` 2,560 ×
-4 B = 10,240 B), the CSV row buffer (2,048 B) and the pending `/seen.csv` appends (48 × 6 = 288 B) — about
-12.6 KB, malloc'ed by `events 1` (refused with an error if it will not fit) and freed by `events 0`. It mounts
+4 B = 10,240 B), the CSV row buffer (2,048 B) and the pending `/seen.csv` appends (48 × 12 = 576 B since the v2
+register) — about 12.9 KB, malloc'ed by `events 1` (refused with an error if it will not fit) and freed by `events 0`. It mounts
 FATFS only for the length of a flush and never alongside a capture (flushes wait while `sdcap` records), so the
 FATFS cost does not stack on the SD-capture worst case above — but the 12.6 KB are gone from *every* state while
 armed, BLE and capture included, and arming is persisted. Free heap at peak load with the log armed was
@@ -1168,32 +1171,107 @@ Events come from slot *creation*: the Wi‑Fi and NimBLE paths call `eventFlag()
 16-entry queue (`g_evtQ`) and returns, dropping and counting on overflow. Everything else runs on the loop task in
 `serviceEvents()`: dedup, classification, row formatting, flushing.
 
-### Novelty baseline
-On attach, `loadBaseline()` reads `/seen.csv` and keeps the **newest 2048 entries** (a ring over the file) as
-sorted 32-bit FNV-1a hashes for binary search; `kBaseCap` = 2560 leaves room for 512 new devices this session
-(past that a MAC is still logged as new but not remembered in RAM, so a re-created slot could log it again). New
-MACs are appended to `/seen.csv` on each flush, so the baseline grows with every walk and a device counts as new
-once per card. A 32-bit hash can collide; a collision makes a new device look known (a missed row), never the
-reverse.
+### The device register: `/seen.csv` v2
+`/seen.csv` is the novelty baseline *and* a register of every globally unique device the log has met on this card.
+Pure row logic (format, parse, sanitize, top-K selection, the line reader) is in `seen_row.h`, which has no Arduino
+dependency and is tested natively; the file handling is in `events.cpp`.
 
-**Rotation.** When an attach finds more than `kSeenRotate` = 4096 entries (2 x `kBaseLoad`), `loadBaseline()`
-trims the file while the card is still mounted (`rotateSeen()`): `/seen.csv` is renamed to `/seen.old.csv`
-(replacing an older one), a fresh `/seen.csv` is written with the newest 2048 entries - exactly the set the RAM
-baseline just loaded, so novelty does not change - and `{"t":"log","msg":"seen.csv rotated: N -> M"}` is sent.
-Why 4096: each attach reads the whole file on the loop task, so it is kept at <= ~74 KB (18 B a line), and the
-rewrite (~37 KB) is paid at most once per 2048 new devices. How it stays bounded: the RAM set holds hashes, which
-cannot be turned back into MACs, and buffering 2048 MACs would cost 12 KB; instead a second pass over the old file
-with the same 40-byte line buffer skips the first `total - 2048` entries and copies the rest (both passes parse
-lines through `readSeenLine()`, so they agree on what counts). Transient cost is two FATFS file objects (~4.3 KB
-each); the rotation is skipped below 24 kB free heap and retried on the next attach. If the new file cannot be
-opened or written, `/seen.old.csv` is renamed back, so the baseline is never lost; a power cut mid-copy leaves the
-complete history in `/seen.old.csv` and a short `/seen.csv` (only older novelty history is lost). One generation
-is kept, like `/events.old.csv`. `g_evStats.baseFile` (`ev.file`) reports the trimmed count.
+**Format.** A header line, then one fixed-width row per device, 83 bytes with the newline:
+
+```
+# bandwatch seen v2: mac,type,label,first,last,sessions
+aa:bb:cc:dd:ee:ff,ap ,HomeNet                         ,1790000000,1790001234,00007
+00:1b:63:00:00:01,sta,                                ,0000000000,0000000000,00001
+```
+
+| field | offset | width | content |
+| --- | --- | --- | --- |
+| mac | 0 | 17 | lowercase, colon-separated |
+| type | 18 | 3 | `ap ` (beacon/probe response seen), `sta`, `ble`, or `?  ` (unknown: a row converted from v1) |
+| label | 22 | 32 | SSID or BLE name when the row was written; control characters, `,` and `"` become `.` (rule 9); cut or space-padded to 32 bytes; UTF-8 kept |
+| first | 55 | 10 | epoch seconds of the first sighting, zero-padded |
+| last | 66 | 10 | epoch seconds of the latest recorded sighting |
+| sessions | 77 | 5 | sessions the device was seen in, zero-padded, saturating at 99999 |
+
+**No clock:** there is no RTC, so `first`/`last` are `0000000000` for a device met before any host sent `time`.
+An update without a clock leaves `last` as it was (never writes a 0 over a real time) and still counts the session;
+`first` is never rewritten, so a 0 stays "unknown" even after a clock arrives. Readers should skip `#` lines and trim
+the padding. A *session* is one attach of the card with the log armed: arming, a boot with the log armed, or a
+card re-inserted or swapped.
+
+**New device** (a globally unique MAC not in the RAM set): its `new` row goes to `/events.csv` as before, and an
+entry `{mac, type, epoch}` waits in `newDevs` (48 × 12 B) until the next flush appends its row with
+`first = last = ` the time it was classified, `sessions = 1`. The type is AP/station from the live Wi-Fi table
+(BLE from the event flags); the label and a late AP flag are looked up in the live tables *at flush time*, so a
+beacon or scan response that arrived after the slot was created still names it. A slot already evicted by then
+leaves the type known at creation and an empty label.
+
+**Known device seen again.** The RAM set holds, per entry, a 30-bit MAC hash and two flag bits: *dirty* (seen since
+its row was last written) and *counted* (its session count was already raised this session). Two sources set
+*dirty*: a slot re-created for a known MAC (`eventFlag()`, as before), and `touchLive()`, which every 60 s marks each
+known, non-randomized device in the Wi-Fi and BLE tables whose `lastMs` moved since the previous sweep - without it,
+a device that keeps its slot all session would never be refreshed (`eventFlag()` only fires on slot creation).
+**Register pass** (`regStart()` / `regStep()`): when entries are dirty and 5 min (`kRegisterMs`) have passed since
+the last pass, a flush opens `/seen.csv` `r+` and the loop walks it in slices of at most `kSdBudgetUs` (8 ms, the
+capture drain's budget), so hopping and the LCD keep running. For each row whose entry is dirty it patches the line
+buffer - `last` = now (kept without a clock), `sessions` + 1 if not yet counted, and, for a `?` row of a device that
+is still in the live tables, its type and label - writes the 82 bytes back over the row (same width, nothing moves),
+seeks back to the read position, and clears *dirty* / sets *counted*. Only the first row of a MAC is updated if a
+v1 history left duplicates. The card stays mounted only for the pass; `sdUnmount()` will not unmount under it
+(`eventsHoldsCard()`), `sdcap` and `sdread` make it step aside (`eventsReleaseCard()`; entries it had not reached
+stay dirty for the next pass), `sdrm` and `seengen` refuse while it runs (`eventsFlushing()`), and an I/O error ends
+it like any failed write (`cardLost()`). `events 0` finishes the running pass and runs a final one (blocking,
+bounded by one read of the file), so a disarm leaves the register current; a power cut loses at most the last 5 min
+of `last`/`sessions` updates. Why every 5 min and not every flush: the pass reads the whole file (up to ~340 KB) and
+holds FATFS (~30 KB) for its length, which in BLE mode sits near the scan floor (rule 11). It is skipped below
+24 kB free heap like a rotation; the dirty bits simply wait.
+
+**Loading** (`loadBaseline()`, on attach): the RAM set holds every row when there are at most 2048 (one pass), else
+the **2048 seen most recently** (`last`): a first pass keeps the 2048 largest `last` values in a min-heap built in the
+baseline array itself (`topkPush`), its root is the threshold; a second pass loads every row above it and, of the rows
+*at* the threshold (ties - every row is one when there was never a clock), the *last* ones in file order via a small
+ring (`RingLoad`), which is what v1 did (newest appended). The file size picks the mode up front. `kBaseCap` = 2560
+leaves room for 512 new devices this session (past that a MAC is still logged as new but not remembered in RAM). A
+hash collision makes a new device look known (a missed row), never the reverse; with 30 bits it is ~2.4e-6 per lookup.
+
+**Rotation.** When an attach finds more than `kSeenRotate` = 4096 rows, `rotateSeen()` renames `/seen.csv` to
+`/seen.old.csv` (replacing an older one) and copies back **the same 2048 rows the RAM set just loaded**
+(`selectKeep()` makes the same choice as the load, ties included), so novelty does not change; the header is
+rewritten first. It logs `{"t":"log","msg":"seen.csv rotated: N -> M in R ms (attach A ms)"}`: R is the copy, A
+the whole attach (all passes) - the loop task is busy for A, so that is the number BACKLOG V5 measures. Same
+safety as before: no MAC buffer (one line buffer per pass), two FATFS files open, skipped below 24 kB free heap and
+retried on the next attach; if the copy fails the old file is renamed back; a power cut mid-copy leaves the whole
+history in `/seen.old.csv`. Cost: a file at the threshold is ~340 KB (83 B a row, was 18 B in v1), so an attach at
+2049-4096 rows reads it twice and a rotation three times plus a ~170 KB write - all blocking on the loop task.
+
+**v1 compatibility.** A v1 file (one bare MAC per line, no header) - or a v2 file to which an older firmware appended
+bare MACs - is converted on attach (`convertSeen()`): every row is copied to `/seen.new.csv` (v2 rows verbatim, v1
+lines as `?`, empty label, `0`/`0`, 1 session), then `/seen.csv` is removed and the new file renamed over it, with
+`{"t":"log","msg":"seen.csv converted to v2: N rows in M ms"}`. A power cut between the remove and the rename is
+finished by the next load (no `/seen.csv` but a `/seen.new.csv`); a leftover partial `/seen.new.csv` next to a
+`/seen.csv` is deleted. If the conversion cannot run (heap, card full), the file is loaded as it is - v1 lines count
+as rows - and the conversion is retried on the next attach. The register then fills in `?` rows as those devices are
+met again. Going back to a v1 firmware still works: its reader takes the MAC prefix of each v2 row and skips the
+header.
+
+**`seengen <n>`** (diagnostic, like `sdprobe`; not exposed by the host): writes `n` (1..10000) synthetic v2 rows -
+MACs `00:1b:63:xx:xx:xx` (a real OUI, globally unique, so they count), types cycling ap/sta/ble, labels
+`net-NNNNN`/`tag-NNNNN`, `last` spread over the 30 days before now (a fixed 2026 date without a clock), `first` up
+to 30 days before that, 1-20 sessions - and replies `{"t":"ack","cmd":"seengen","n":N,"ms":M,"ok":1}`. The real
+register is parked first: `/seen.csv` -> `/seen.bak.csv` (an empty one if there was none) and `/seen.old.csv` ->
+`/seen.old.bak.csv` (the rotation would replace it); parked files are never overwritten, so a second `seengen` only
+replaces the synthetic file. `seengen 0` deletes the synthetic `/seen.csv` and `/seen.old.csv` and puts both back
+(err `seengen: no /seen.bak.csv to restore` when nothing is parked). Refused (`seengen: busy - ...`) while `sdcap`,
+`sdread` or an event-log flush/register pass has the card. Blocking (~1 s per few thousand rows, yielding every 64
+rows). With the log armed the new file is loaded at once (an attach); disarmed, the next `events 1` or card
+insertion is the attach. Measuring V5: `events 0`, `seengen 5000`, `events 1` -> `seen.csv rotated: 5000 -> 2048 in
+R ms (attach A ms)` before the ack, `ev.file` 2048; then `events 0`, `seengen 0` (`T14SeenGen` does exactly this).
 
 ### Buffering and flushing
 Rows go into a 2 KB heap buffer (~25-30 rows); overflow is counted in `drop`, not hidden. The card is **not**
-kept mounted (rule 11): it is mounted just long enough to append, when 16 rows are waiting, 48 new MACs are pending
-for `/seen.csv`, or 60 s have passed with anything pending. `/events.csv` rotates at 1 MB to `/events.old.csv`
+kept mounted (rule 11): it is mounted just long enough to append, when 16 rows are waiting, 48 new devices are pending
+for `/seen.csv`, or 60 s have passed with anything pending (plus the length of a register pass, every 5 min at most,
+above). `/events.csv` rotates at 1 MB to `/events.old.csv`
 (one previous file kept). Flushes wait while `sdcap` records or an `sdread` runs — the card belongs to them —
 and rows keep buffering meanwhile.
 
@@ -1213,7 +1291,7 @@ and rows keep buffering meanwhile.
 ack, and a `{"t":"ev"}` line every 5 s while armed, in every mode. The dashboard shows it with an arm/disarm
 control; the card's file list (§12) offers download and delete for every file. The host's `sdread`/`sdrm` guard
 accepts the card's text files (`CARD_TEXT_FILES`: `events.csv`, `events.old.csv`, `seen.csv`, `seen.old.csv`,
-`surveil.csv`) besides the pcap naming scheme. Deleting `seen.csv` while armed starts novelty over (§12).
+`seen.bak.csv`, `seen.old.bak.csv` - the register `seengen` parks -, `surveil.csv`) besides the pcap naming scheme. Deleting `seen.csv` while armed starts novelty over (§12).
 
 ### `/surveil.csv` (1.6.4)
 Up to 64 extra OUIs, one `AA:BB:CC,<category 1-7>` per line (categories as `kSurvName` in `surv_ouis.h`),
@@ -1222,8 +1300,13 @@ read once at boot by `sdProbeAtBoot()` → `loadSurvExtra()` into heap (absent f
 §15: a match is evidence, not identification.
 
 ### Memory
-Nothing while off. Armed: ~12.6 KB heap (baseline 10,240 B + rows 2,048 B + pending appends 288 B), plus FATFS
-(~30 KB) only for the duration of a flush. Static: the queue and counters (§16).
+Nothing while off. Armed: ~12.9 KB heap (baseline 10,240 B + rows 2,048 B + pending appends 48 × 12 = 576 B), plus
+FATFS (~30 KB) only for the duration of a flush or register pass, and during a pass its state (~0.3 KB: one 256 B
+read buffer) and one open file (~4.3 KB) - less than `sdcap` holds, and never alongside it. The register's flags
+live in the two low bits of each baseline hash instead of two 320 B bitmaps, and nothing else is kept per device in
+RAM (no counters, no row offsets: the pass finds rows by reading). v2 vs v1: +288 B heap while armed (the pending
+appends grew from 6 to 12 B to keep type and time), +16 B static (77,184 -> 77,200 B). Static: the queue and counters
+(§16).
 
 ### Measured on hardware (1.18 session)
 First flush at 16 rows; correct CSV with epoch timestamps; `seen.csv` at 31 entries after about 80 s. Card pulled
@@ -1237,8 +1320,9 @@ added *after* that test, because `base` read 32 instead of about 52 — it has n
   §12). Hot-pulling the card can intermittently reset the board over USB (`rst: usb`, a hardware effect, §12).
 - Measured (v1.19): free heap at peak load with the log armed - `events 1` + `cap 1` + `sdcap 1`, `both` band, every
   LCD page - bottoms at **25,172 B** (Overview), ~0.6 kB above the 24 kB floor that `ensureCapRing()` sizes the ring
-  to keep. Not yet measured: the time a `/seen.csv` rotation takes on hardware
-  (a > 4096-entry file; written, compiled, not yet run on the board).
+  to keep. Not yet measured: the time a `/seen.csv` rotation takes on hardware (BACKLOG V5; `seengen`, above, makes
+  the file and the log line carries the time), and the v2 register on the board at all - the register pass, the
+  v1 conversion and `seengen` are compiled and their row logic natively tested, not yet run on hardware.
 
 ## 21. LED alert blips (D1: 1.6.1 alerting, C4 novelty, C10 permit-join; 1.19)
 

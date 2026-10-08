@@ -43,7 +43,8 @@ build.sh flashes by default - confirm with tools/witness/verify.py, never from t
 "sdcap 0|1" (record pcap on the device's microSD), "sdinfo", "sdls", "sdread <path>", "sdrm <path>" (delete one
 card-root file; the pulled local copy stays), "time <epoch>", "info",
 "events 0|1" (C4: arm/disarm the SD event log - /events.csv rows for surveillance hits and MACs new to this card's
-/seen.csv baseline; persists on the device, and arming with no card just buffers and retries every 30 s),
+/seen.csv device register (type, label, first/last seen, sessions per device); persists on the device, and arming
+with no card just buffers and retries every 30 s),
 "alerts 0|1" (LED alert blips for surveillance hits / permit-join / new devices; persists), "ledtest surv|new|join",
 "specstep 1|2|5" (fine-spectrum step, spec mode), "blescan active|passive|auto", "addr1 0|1" (track addr1-only
 destinations), "mirror 0|1" (stream the LCD), "page next|prev" (step the LCD like a BOOT tap),
@@ -120,7 +121,9 @@ HTTP_BODY_MAX = 65536   # largest POST body /api/cmd accepts (413 above)
 PCAP_FLUSH_S = 1.0      # flush a running pcap at least this often, so a crash loses at most ~1 s
 # C4 event-log text files on the card that "sdread" may pull besides the pcaps (they land in the captures dir under
 # the same name, overwritten on re-pull, and download through /file like a pcap).
-CARD_TEXT_FILES = ("events.csv", "events.old.csv", "seen.csv", "seen.old.csv", "surveil.csv")
+# seen.bak.csv / seen.old.bak.csv are the real register parked by the "seengen" diagnostic (docs/DEVELOPER.md 20).
+CARD_TEXT_FILES = ("events.csv", "events.old.csv", "seen.csv", "seen.old.csv", "seen.bak.csv", "seen.old.bak.csv",
+                   "surveil.csv")
 CARD_PCAP_RE = re.compile(r"^bandwatch-(?:wifi|ble|802154)-[^\s/\\]+\.pcap$")
 
 
@@ -688,7 +691,7 @@ class Bandwatch:
 
     def _set_events(self, ev):
         """C4 event log status. The device's "ev" object: on (armed), card (last mount attempt worked), base
-        (baseline MACs in RAM), file (entries in /seen.csv), written / pending (/events.csv rows written / still
+        (baseline MACs in RAM), file (device rows in /seen.csv), written / pending (/events.csv rows written / still
         buffered), surv / new (rows by kind), drop (rows lost), err (card errors), wait (novelty checks skipped
         because no baseline is loaded yet). Absent on firmware before C4: keep whatever we had (None)."""
         if isinstance(ev, dict):

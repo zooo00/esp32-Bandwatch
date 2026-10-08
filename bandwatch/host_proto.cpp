@@ -624,6 +624,9 @@ void handleCommand(char* line) {
         const bool idle = !sd.mounted && !sd.capEnabled && !sd.readActive;
         sendLinef("{\"t\":\"ack\",\"cmd\":\"sdprobe\",\"r1\":%d,\"present\":%d}\n",
                   idle ? sdProbeR1() : -1, sd.cardPresent ? 1 : 0);
+    } else if (!strcmp(line, "seengen")) {   // diagnostic (V5): n synthetic /seen.csv rows, 0 = restore /seen.bak.csv
+        if (!isdigit(static_cast<unsigned char>(*arg))) sendLinef("{\"t\":\"err\",\"msg\":\"seengen: seengen <1..10000> | seengen 0 (restore)\"}\n");
+        else seenGenerate(atol(arg));   // acks {"cmd":"seengen","n","ms","ok"}; refusals are "seengen: ..." err lines
     } else if (!strcmp(line, "sdls")) {
         sdListFiles();
     } else if (!strcmp(line, "sdread")) {

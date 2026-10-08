@@ -16,24 +16,7 @@ State as of **v1.19.5** (2026-10-07). Finished items move to **Done** at the end
 
 ## Bugs
 
-### B4 · USB serial went silent while the firmware kept running — P2, bug (likely a second reader; confirm)
-- **Seen once, 2026-10-07, v1.19:** right after the full tier-3 suite finished (26/26, `T99NoReboot` passed), the next
-  session on the port got **zero bytes**: no idle traffic and no reply to `info`/`sdls`/`sdread`. The LCD kept updating
-  (the firmware was alive). `esptool --before no-reset` could not reach the ROM loader (not download mode). Only the
-  RESET button recovered it; afterwards everything worked (hello `up 60`, sdread fine).
-- **Likely explained (same day):** a second process reading the port. macOS lets two programs open it; they split the
-  bytes, each sees "readiness to read but returned no data" or nothing at all, and esptool gets "No serial data
-  received" - exactly what was seen. The user had a host running alongside; with one reader there were 0 errors in 30 s.
-  v1.19.1 opens the port **exclusively** in the host (a second one is refused with a clear message). Keep this item
-  open until the device suite + a fresh open no longer reproduces it.
-- **Earlier suspects:** (1) the device suite's port handling - `tests/device/board.py` clears HUPCL so closing the port does
-  not drop DTR; the next open by another process may leave the USB-Serial-JTAG CDC in a state where the device thinks
-  no host is reading (Arduino HWCDC) and silently discards TX, or RX stops; (2) an HWCDC TX stall after a long burst
-  at a full buffer (`setTxTimeoutMs(0)`).
-- **Reproduce:** run the device suite, then open the port from a fresh process with DTR/RTS asserted and send `info`.
-  Repeat a few times; also try a fresh open after `power_profile.py`.
-- **Done when:** the cause is known and either fixed (firmware: e.g. detect "no host" via `HWCDC` connected state and
-  reset the TX side; or the suite restores HUPCL) or documented with a recovery that needs no RESET press.
+None open (B4 closed in v1.20, see Done).
 
 ## Verify on hardware (built, not yet proven)
 
@@ -54,18 +37,6 @@ State as of **v1.19.5** (2026-10-07). Finished items move to **Done** at the end
 ### V6 · LED alerts on real hits — P3, verify
 - `ledtest` covers the patterns. Still unseen: a real surveillance OUI in range (or a test OUI in `/surveil.csv`) and
   a Zigbee coordinator opening joins (`band 154`). Also: with events armed in a busy place, `new` blinks stay <= 1 per 2 s.
-- **Open choice from D4:** deleting `/seen.csv` while armed also drops MACs still waiting to be appended, so those
-  devices count as new once more. Fine, or keep them?
-
-### V4 · Hot-pulling the card reset the board once (`rst: usb`) — P3, verify
-- One of three pulls (the second; the first during `sdcap` and the third under the reconnecting watcher did not)
-  coincided with a USB-peripheral reset. Note that a second program reading the port (B4) can look similar but shows
-  *no* uptime reset; this one did reset (`up` restarted, `rst: usb`). Not a panic, and not the probe (DEVELOPER §12). A
-  likely cause is a supply dip briefly dropping the USB link.
-- **How:** about 10 pulls with `card_watch`-style monitoring (it reconnects, and logs `REBOOT` when uptime goes
-  backwards). Once with a powered hub and once direct.
-- **Done when:** the rate is known. If it is high, note it in the README ("pull the card gently / power off
-  first"). A hardware fix (bulk capacitance near the slot) is out of scope for the firmware.
 
 ---
 
@@ -136,7 +107,7 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 | 1.10 | Mode splash is fire-and-forget | The splash does not reflect a radio that failed to start |
 
 ## Known limits (documented, no action planned)
-- Whether a deauth actually disconnects a real station is untested (DEVELOPER §11).
+- Deauth works on real stations (owner-confirmed 2026-10-08); PMF networks ignore it by design (DEVELOPER §11).
 - BLE 5 extended advertising is invisible with the prebuilt core (rule 7; C12 would lift it).
 - Surveillance OUI matches are evidence, not proof, and have never been seen live.
 
@@ -146,6 +117,9 @@ C4 covers Wi-Fi and BLE only. 802.15.4 extended addresses are stable and globall
 
 | Item | Version | Evidence |
 | --- | --- | --- |
+| **B4** USB serial silent after the device suite | v1.20 | Not reproduced on v1.19.5 (2026-10-08): full device suite passed, then five fresh opens from new processes all got hello, uptime continuous (1529 -> 1545 s, no reset). Cause taken as a second program reading the port: the host (v1.19.1), `tests/device` and `tools/smoke.py` now open it exclusively, so a second reader is refused with "could not exclusively lock" instead of splitting the bytes. Recovery: find and stop the other reader; RESET only if none |
+| **V4** card hot-pull resetting the board | v1.20 | Closed on the owner's observation (2026-10-08): pulls "seem to work fine"; the one `rst: usb` stays unexplained (likely a supply dip). README still advises pulling gently |
+| **D4 choice** pending MACs on a `seen.csv` delete | v1.20 | Decided: dropped. A deliberate delete means "start novelty over" |
 | **C11** host CSV export | v1.20 | `dashboard2.html`: a *CSV* button on the Wi-Fi, BLE, Zigbee and probe tables exports the rows shown (DEVELOPER §5). Checked with a scratch Node harness over the pure builder (hostile `=HYPERLINK` SSID, comma/quote/newline name, null-RSSI `dest_only` row, non-ASCII names, RFC 4180 round-trip) and the host tier; not yet clicked in a browser against a live board |
 | **C5** patrol mode (auto round-robin) | v1.20 | `patrol 1` / `patrol <mode>:<sec>,...` / `patrol 0`, `pt` in hello + `{"t":"pt"}`, LCD header, dashboard Patrol card (DEVELOPER §22). Offline only: compiled (+56 B static), host tests `tests/host/test_patrol.py`; T13Patrol written but not yet run on the board (V7) |
 | **C7** hunt by SSID | v1.20 | `huntssid <name>` / `huntssid 0`, DEVELOPER §23. Offline only: firmware builds (77,192 B static, +8), `tests/host/test_hunt_ssid.py` (route validation, ack/hello parsing, AP list), dashboard render harness. The two-APs walk test (park follows the stronger) still needs hardware |

@@ -239,8 +239,8 @@ frames. Only a second radio in monitor mode can tell you — that is what `tools
 just deauth, which means the reverse-engineered offsets in `docs/DEVELOPER.md` §9 are wrong rather than merely
 fragile. It is kept only as a starting point for fixing them.
 
-**Whether a real station actually disconnects is untested.** Correct deauth frames demonstrably reach the air;
-no client of ours has been observed dropping. PMF-enabled networks ignore these frames by design.
+**Real stations do disconnect** - confirmed by the owner on their own network (2026-10-08, v1.19.x): stations drop. Correct deauth frames demonstrably reach the air (witness,
+§11 in DEVELOPER). PMF-enabled networks ignore these frames by design.
 
 ## Limitations
 

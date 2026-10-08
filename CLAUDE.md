@@ -106,7 +106,7 @@ Install the push guard once per machine: `cp tools/pre-push .git/hooks/pre-push 
    tree - it edits the vendor blob inside the linked output, so every build re-applies it.
    **The counters still prove nothing** - `deauthSent`/`da` is incremented unconditionally and `ic_tx_pkt()`
    returns `void`; `da` once reached 328 while the witness heard zero. Confirm on air with
-   `tools/witness/verify.py`, never from a counter. Whether a real station actually drops is still untested.
+   `tools/witness/verify.py`, never from a counter. Real stations do drop: confirmed by the owner on their own network (2026-10-08, v1.19.x): stations drop (no witness log of the drop itself; PMF networks still ignore these frames).
    Never hardcode the patch address: it moved from `0x420ff3b0` to `0x420ff436` just from adding one command.
 11. **The SD card shares the LCD's SPI bus** (CS GPIO4, 20 MHz vs the LCD's 40 MHz). Safe only because both
    wrap transfers in beginTransaction/endTransaction and both run on the loop task — never touch the card

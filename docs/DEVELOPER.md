@@ -530,10 +530,9 @@ unconditionally and `ic_tx_pkt()` returns `void`; on the raw path an `ESP_OK` on
 
 ### Still open
 
-Whether a real station actually disconnects. Everything above establishes that correct deauth frames reach the
-air; it does not establish that any particular client honours them. That needs a device you own, associated to
-an AP you own. Unprotected-frame handling varies by supplicant, and PMF-enabled networks will ignore these
-frames by design.
+Nothing for the basic attack: real stations disconnect - confirmed by the owner on their own network (2026-10-08, v1.19.x): stations drop,
+with devices they own on an AP they own. Not measured: which clients and how fast; unprotected-frame handling varies
+by supplicant, and PMF-enabled networks ignore these frames by design.
 
 
 ## 12. microSD pcap recording (1.3)

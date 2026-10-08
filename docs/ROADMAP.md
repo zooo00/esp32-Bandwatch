@@ -646,10 +646,9 @@ not worth their risk at this headroom: heap `specFine[]` only in spec (504 B, nu
 - **Device names are environment-capped, not code-capped.** Measured: 31 distinct advertisers, 3 ever
   broadcast a name. Most nearby traffic is Apple continuity and non-connectable beacons that never answer a
   `SCAN_REQ`. No scanning strategy changes that.
-- **Whether a deauth actually disconnects a real station is untested.** 1.6 established that correct deauth
-  frames reach the air at the target; it did not establish that any particular client honours them. That
-  needs a device you own, associated to an AP you own. Unprotected-frame handling varies by supplicant, and
-  PMF-enabled networks ignore these frames by design. [`DEVELOPER.md`](DEVELOPER.md) §11.
+- **Deauth disconnects real stations** - confirmed by the owner on their own network (2026-10-08, v1.19.x): stations drop. 1.6 established
+  that correct frames reach the air at the target (witness). Unprotected-frame handling still varies by supplicant,
+  and PMF-enabled networks ignore these frames by design. [`DEVELOPER.md`](DEVELOPER.md) §11.
 
 ---
 

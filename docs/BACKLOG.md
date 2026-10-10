@@ -10,13 +10,41 @@ Every item has a **Done when** line, and wherever possible a test to add, so wor
 Priority: **P1** wrong or misleading behaviour today · **P2** gap a user will notice · **P3** improvement / decision.
 Type: bug · verify (built, not proven on hardware) · decision (needs a call before code) · feature.
 
-State as of **v1.20.1** (2026-10-08). Finished items move to **Done** at the end, with the evidence.
+State as of **v1.21** (2026-10-10). Finished items move to **Done** at the end, with the evidence.
 
 ---
 
 ## Bugs
 
-None open (B4 closed in v1.20, see Done).
+### B5 · Event log: a device logged `new` twice in one boot — P1, bug
+- Seen in a field `/events.csv` (v1.21 era, card-attached boot of 2026-10-07 10:53 UTC, ~6.5 min): 8 globally unique
+  MACs got a second `new` row in the same boot - `c8:5e:a9:09:f0:b0`, `d4:ab:61:fe:d8:b4`, `80:ea:0b:27:e0:0a`,
+  `6c:9c:ed:ed:07:c0`, `6c:9c:ed:ed:07:c1`, `58:1c:f8:4f:14:fb`, `4c:79:6e:d8:03:88`, `c4:03:a8:ba:3e:02`. §20 says a
+  device is new once per card. All 8 were first logged at up_ms 115-190 s and again at 237-357 s; nothing logged
+  before 115 s repeated.
+- Hypothesis (unproven): the `/seen.csv` appends of the flushes at ~170 s and ~230 s did not reach the card (write
+  reported success, or a partial write), then a `cardLost()` -> `attachCard()` reload rebuilt the RAM set from the file
+  without them; `newN` was already 0, so nothing put them back, and the next slot re-creation counted them as new.
+  Path: `flush()` / `cardLost()` / `attachCard()` in `events.cpp`.
+- First evidence to collect: whether that card's `/seen.csv` holds those MACs (absent / once / twice), and `err` in
+  `{"t":"ev"}` during such a run.
+- **Done when:** the cause is found and fixed, and a test reproduces it - a `seen_row.h`-level or `tests/device` case
+  where a failed or lost `/seen.csv` append followed by a reload does not log the same MAC as `new` twice (I4's
+  simulated removal would serve).
+
+### B6 · `time` accepts a clock that goes backwards — P2, bug
+- Same field log: within one boot (uptime continuous, 1,868,633 -> 2,229,529 ms) `epoch_ms` jumped from 2026-10-07
+  13:26 to **2025-09-23 10:45** UTC (-~379 days) and stayed there for 13 rows. Some host sent `time 1758624xxx`
+  (a second machine, or one with a wrong clock); `handleCommand` `time` in `host_proto.cpp` only checks
+  `e > 1600000000`.
+- Damage: the `events.csv` timeline, `first` of those devices in `/seen.csv`, and `last` of any known device a
+  register pass rewrote meanwhile (the "never write 0 over a real time" guard does not stop an *older* real time),
+  plus pcap record times / file names.
+- Fix to decide: refuse (ack `ok 0`, with a reason) a `time` earlier than a floor compiled into the build (e.g. the
+  build date) and, once the clock is set, a step back of more than a few minutes unless forced (`time <epoch> force`);
+  the host logs the refusal.
+- **Done when:** a backwards / pre-build `time` is refused and visible in the ack, a host test covers the ack, and a
+  `tests/device` case shows the clock unchanged after it.
 
 ## Verify on hardware (built, not yet proven)
 

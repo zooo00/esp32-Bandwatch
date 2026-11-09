@@ -144,7 +144,8 @@ int logoPick(int prevIdx) {
 }
 
 // Show picture idx full-screen for durMs. Boot passes thenModeCard so the mode card still names the boot
-// band afterwards; a page-wrap tap just flashes one. Taps while it is up step to the next (see pollButton).
+// band afterwards. A tap while it is up dismisses it (see pollButton) - stepping to the next picture instead
+// made every tap meant to get out extend the stay.
 void showLogoPic(int idx, uint32_t durMs, bool thenModeCard) {
     if (!logoSplash) {
         logoSplash = lv_image_create(lv_scr_act());
@@ -1380,9 +1381,10 @@ void uiTimerCb(lv_timer_t* t) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// BOOT button: tap = next page. Hold = walk the mode splashes one by one - with a photo stop after
-// Spectrum (the last mode) before wrapping; release commits the one on screen, and stopping on the
-// photo lets taps step through the pictures. Holding from the hunt page stops the hunt first, then walks.
+// BOOT button: tap = next page (a tap on a picture just dismisses it). Hold = walk the mode splashes one
+// by one - with a photo stop after Spectrum (the last mode) before wrapping, never as the first step of a
+// hold (from Spectrum that went straight to the photo); release commits the one on screen. Holding from
+// the hunt page stops the hunt first, then walks.
 // See showBandSplash + kSplash*Ms, walkPhoto below.
 // ---------------------------------------------------------------------------------------------
 void pollButton() {
@@ -1407,15 +1409,16 @@ void pollButton() {
             walkPhoto = false;
         } else if (!holding) {
             const int prev = currentPage;
-            if (logoActive()) {                   // stopped on a picture instead of a scan page: step through them
-                showLogoPic((logoIdx + 1) % K_BOOT_LOGO_COUNT, kWrapLogoMs, false);   // loops at the end
+            if (logoActive()) {                   // a picture is up (boot, or the walk's photo stop): tap = back to the page
+                lv_obj_add_flag(logoSplash, LV_OBJ_FLAG_HIDDEN);
+                logoThenModeCard = false;          // ... and no boot mode card after it either; the tap asked for the page
             } else {
                 showPage(prev + 1);               // tap: next page
                 splashDurMs = 0;                  // ... without a lingering mode splash shadowing it
             }
             refreshUi();
         } else if (stepped) {                     // release commits the mode on screen: linger on its splash
-            if (walkPhoto)                        // ... stopped on the photo slot: keep it up so taps step through pictures
+            if (walkPhoto)                        // ... stopped on the photo slot: keep it up a while (a tap dismisses it)
                 showLogoPic(logoIdx, kWrapLogoMs, false);
             else
                 showBandSplash(bandMode, kSplashTailMs);
@@ -1426,7 +1429,9 @@ void pollButton() {
 
     if (!down) return;
     auto step = [&]() {                           // one walk-step: next position for one interval (modes, then the photo slot)
-        const bool toPhoto = !walkPhoto && bandMode == kBandModes - 1;   // after Spectrum comes the picture, not another mode
+        // After Spectrum comes the picture, not another mode - but only once the hold has stepped: a hold that
+        // starts on Spectrum goes to 5 GHz first, so a slightly long tap never lands on the photo.
+        const bool toPhoto = stepped && !walkPhoto && bandMode == kBandModes - 1;
         if (patrol.active) {                      // a manual mode walk ends the patrol (C5), like a "band" command
             stopPatrol();
             if (serialRoom(80)) Serial.print("{\"t\":\"log\",\"msg\":\"patrol stopped by button\"}\n");

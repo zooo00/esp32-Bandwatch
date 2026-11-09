@@ -57,8 +57,8 @@ requests. `blescan passive` keeps BLE mode fully silent.
 - **Per channel, every 220 ms dwell**: frames, bytes, strong frames (≥ −65 dBm), unique transmitters
   (best effort). Busy score = log‑scaled pkt/s + B/s + strong ratio + talkers, then an EMA (α 0.22).
 - **LCD pages** (tap BOOT to cycle; hold BOOT to walk the modes 5g → 2.4g → both → ble → 802.15.4 → spectrum →
-  boot photo, one card every 0.7 s, and release to pick the one on screen; on the Hunt page a long press stops
-  the hunt). Six pages, each shown only in the modes it applies to:
+  boot photo, one card every 0.7 s, and release to pick the one on screen; a tap on a photo dismisses it; on the
+  Hunt page a long press stops the hunt). Six pages, each shown only in the modes it applies to:
   1. *Overview* (Wi‑Fi and 802.15.4): max busy score + bar, sweep count, top‑3 channels with pkt/s, per‑channel
      strip (current channel in cyan), last‑dwell stats for the current channel, transmitter estimate.
   2. *Channels* (Wi‑Fi and 802.15.4): every channel of the active band with score bar and value.

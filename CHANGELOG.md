@@ -3,6 +3,18 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.21.1
+
+BOOT button: no more getting stuck in the photo roll.
+
+- **A tap on a photo dismisses it** (the boot photo or the mode walk's photo stop) and returns to the page, without
+  also stepping it. It used to show the next photo for another 5 s, so every tap meant to get out extended the stay.
+  Stepping through the photos one by one is gone; each pass of the walk shows one random photo.
+- **A hold never starts on the photo stop.** Holding from Spectrum used to land on the photo as its first step, so a
+  slightly long tap (>= 0.7 s) did it; now it goes to 5 GHz first and the photo is only reached by walking past
+  Spectrum.
+- Static RAM unchanged (77,312 B).
+
 ## v1.21
 
 `blekick <mac>` — the deauth equivalent for BLE (DEVELOPER §24): in BLE mode the device becomes a NimBLE central

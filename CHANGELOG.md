@@ -3,6 +3,16 @@
 Newest first. Moved here from `CLAUDE.md` (which now only points at this file). Details live in `docs/DEVELOPER.md`
 and `docs/ROADMAP.md`; open work is in `docs/BACKLOG.md`.
 
+## v1.21.2
+
+BOOT button: holding from Spectrum works again.
+
+- **A hold that starts on Spectrum now steps to 5 GHz.** v1.21.1 skipped the photo on that first step but only
+  wrapped the walk from the photo slot, so it stepped to a mode 6 that does not exist: out-of-range reads of the
+  mode card/name tables, a garbage card or a panic, and a reboot back into Spectrum (the persisted mode), which
+  made Spectrum impossible to leave from the button.
+- Static RAM unchanged (77,312 B).
+
 ## v1.21.1
 
 BOOT button: no more getting stuck in the photo roll.

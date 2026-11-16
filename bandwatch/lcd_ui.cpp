@@ -1437,7 +1437,10 @@ void pollButton() {
             if (serialRoom(80)) Serial.print("{\"t\":\"log\",\"msg\":\"patrol stopped by button\"}\n");
         }
         if (!toPhoto) {
-            setBandMode(walkPhoto ? BandMode(0) : static_cast<BandMode>(bandMode + 1));
+            // Wrap past Spectrum too, not only off the photo slot: a hold that starts on Spectrum skips the photo,
+            // and bandMode + 1 there was mode 6 - out of range for kSplash/kBandName (panic, back in spec).
+            const bool wrap = walkPhoto || bandMode >= kBandModes - 1;
+            setBandMode(wrap ? BandMode(0) : static_cast<BandMode>(bandMode + 1));
             showBandSplash(bandMode, kSplashStepMs);   // (release still names the committed mode with the tail card)
         } else {
             showLogoSplash(kSplashStepMs, false);      // photo slot: one random picture for the interval
